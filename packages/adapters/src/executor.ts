@@ -40,6 +40,7 @@ import {
   BOT_TITLE_MAX_LENGTH,
   BotSecretName,
   botSecretSubmissionSchema,
+  CLOUDFLARE_AI_GATEWAY_CONFIG_MESSAGE,
   COMPUTER_COMMAND_OUTPUT_MAX_CHARS,
   isAttachmentImageMimeType,
   OPENAI_COMPATIBLE_PROVIDER_ID,
@@ -181,6 +182,7 @@ import { type CloudAgentConnection, cloudAgentsEnabled } from "./cloud-agent-fac
 import { executeCloudAgentTool } from "./cloud-agent-service.js";
 import { validCloudAgentArgs } from "./cloud-agent-tools.js";
 import { selectCloudAgentTools } from "./cloud-agent-tools-select.js";
+import { cloudflareGatewayProviderEnv } from "./cloudflare-ai-gateway.js";
 import {
   collectLogIds,
   mergeConnectedPlugins,
@@ -2895,6 +2897,14 @@ export function buildApprovalContinuation(
   ].join("\n");
 }
 
+export function isTerminalModelSetupError(error: unknown): boolean {
+  return (
+    error instanceof UnavailableModelForAuthError ||
+    isRetiredModelCredentialError(error) ||
+    (error instanceof Error && error.message === CLOUDFLARE_AI_GATEWAY_CONFIG_MESSAGE)
+  );
+}
+
 export function createRunExecutor(deps: ExecutorDeps) {
   const web = deps.web ?? createWebProvider();
   const browser = deps.browser ?? createBrowserProvider(undefined, { sandbox: deps.sandbox });
@@ -2933,6 +2943,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
       provider,
       id: modelId,
       apiKey: resolved.oauth ? undefined : resolved.apiKey,
+      ...cloudflareRunFields(resolved),
       baseUrl: resolved.baseUrl,
       reasoning: resolved.reasoning,
       maxTokens: resolved.maxTokens,
@@ -3007,6 +3018,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
         provider,
         id,
         apiKey: resolved.oauth ? undefined : resolved.apiKey,
+        ...cloudflareRunFields(resolved),
         baseUrl: resolved.baseUrl,
         reasoning: resolved.reasoning,
         maxTokens: resolved.maxTokens,
@@ -3450,7 +3462,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
             peerMessage.intent === "question" ||
             peerMessage.repliesToRequest
             ? `Update from ${peerMessage.fromBotName}: ${peerMessage.text}`
-            : "The delegated bot completed its turn without a written summary."
+            : DELEGATED_EMPTY_NOTICE
           : undefined;
         const recallPromise =
           threadContext.includeSemanticRecall &&
@@ -3573,12 +3585,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
         } catch (error) {
           // A dead or account-switched credential is already deleted. Retrying
           // setup would requeue the run and might fall back to another model.
-          if (
-            !(error instanceof UnavailableModelForAuthError) &&
-            !isRetiredModelCredentialError(error)
-          ) {
-            throw error;
-          }
+          if (!isTerminalModelSetupError(error)) throw error;
           await failRunBeforeModel(
             error instanceof Error ? error.message : "Connect the provider again.",
           );
@@ -4223,6 +4230,8 @@ export function createRunExecutor(deps: ExecutorDeps) {
                       runtime: deps.runtime,
                       checker: checker!,
                       apiKey: judgeKey.oauth ? undefined : judgeKey.apiKey,
+                      accountId: judgeKey.accountId,
+                      gatewayId: judgeKey.gatewayId,
                       baseUrl: judgeKey.baseUrl,
                       reasoning: judgeKey.reasoning,
                       oauth: judgeKey.oauth
@@ -5984,7 +5993,19 @@ export function createRunExecutor(deps: ExecutorDeps) {
                   });
                 }
               }
-              if (event.type === "error") result = { error: event.message };
+              if (event.type === "error") {
+                result = { error: event.message };
+                for (const logId of event.logIds ?? []) {
+                  await deps.events.append({
+                    spaceId: run.spaceId,
+                    threadId: thread.id,
+                    botId: bot.id,
+                    runId: run.id,
+                    type: "effect.recorded",
+                    payload: { tool: name, logId },
+                  });
+                }
+              }
             }
             return finish(result);
           }
@@ -6170,6 +6191,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 provider: runModelProvider,
                 id: runModelId,
                 apiKey: resolved.oauth ? undefined : resolved.apiKey,
+                ...cloudflareRunFields(resolved),
                 baseUrl: resolved.baseUrl,
                 reasoning: resolved.reasoning,
                 maxTokens: resolved.maxTokens,
@@ -6671,6 +6693,16 @@ export function createRunExecutor(deps: ExecutorDeps) {
             : redactSecrets(completionNotificationBody(silentReply.assembled, blocks), runSecrets);
           if (containsSecret(text, runSecrets)) {
             throw new Error("refusing to persist a secret in the thread");
+          }
+          // Tool steps succeeded and the only completion text is the synthetic
+          // empty notice. That is a missed final answer or a swallowed provider
+          // failure, not a successful delegated summary.
+          if (
+            !handedOff &&
+            !silentReply.assembled.trim() &&
+            emptyDelegatedToolTurnShouldFail(completionBlocks)
+          ) {
+            throw new Error(TOOL_STEPS_WITHOUT_RESPONSE);
           }
           if (!(await renewRunLease(deps, runId, workerId, fence))) return;
           const botMessageOutcome =
@@ -7196,6 +7228,23 @@ export function runReplyGuidance(trigger: string): string {
     : LONG_WORK_PROGRESS_GUIDANCE;
 }
 
+export const DELEGATED_EMPTY_NOTICE =
+  "The delegated bot completed its turn without a written summary.";
+
+/** Failure used when a tool-bearing turn would otherwise complete as the empty notice. */
+export const TOOL_STEPS_WITHOUT_RESPONSE =
+  "The model finished its tool steps without a written response.";
+
+/** True when the only written completion is the empty delegated notice after tool steps. */
+export function emptyDelegatedToolTurnShouldFail(blocks: MessageBlock[]): boolean {
+  const text = blocks
+    .filter((block): block is Extract<MessageBlock, { kind: "text" }> => block.kind === "text")
+    .map((block) => block.text)
+    .join("")
+    .trim();
+  return text === DELEGATED_EMPTY_NOTICE && blocks.some((block) => block.kind === "steps");
+}
+
 export function completionMessageSegments(
   segments: MessageBlock[],
   options?: {
@@ -7602,6 +7651,8 @@ async function resolveModelKey(
   registerSecrets?: (values: string[]) => void,
 ): Promise<{
   apiKey?: string;
+  accountId?: string;
+  gatewayId?: string;
   baseUrl?: string;
   reasoning?: boolean;
   maxTokens?: number;
@@ -7623,7 +7674,10 @@ async function resolveModelKey(
       const row = await deps.prisma.secret.findFirst({
         where: { id: credential.secretId, userId, spaceId: null },
       });
-      if (!row) return { apiKey: deploymentKeyFor(deps, provider), redact: [] };
+      if (!row) {
+        cloudflareGatewayProviderEnv({ provider });
+        return { apiKey: deploymentKeyFor(deps, provider), redact: [] };
+      }
       const plaintext = deps.secretStore.load(row.ciphertext, row.id);
       registerSecrets?.(secretValuesToRedact(parseModelSecret(plaintext)));
       const persist = persistStoredModelSecret(
@@ -7687,8 +7741,13 @@ async function resolveModelKey(
           (resolved.secret.visionModelIds === undefined &&
             credential.supportsImages === true &&
             credential.defaultModel?.trim() === modelId.trim()));
+      const accountId = resolved.secret.kind === "api_key" ? resolved.secret.accountId : undefined;
+      const gatewayId = resolved.secret.kind === "api_key" ? resolved.secret.gatewayId : undefined;
+      cloudflareGatewayProviderEnv({ provider, accountId, gatewayId });
       return {
         apiKey: resolved.apiKey,
+        accountId,
+        gatewayId,
         baseUrl,
         reasoning:
           resolved.secret.kind === "openai_compatible" ? resolved.secret.reasoning : undefined,
@@ -7741,7 +7800,18 @@ async function resolveModelKey(
       };
     });
   }
+  cloudflareGatewayProviderEnv({ provider });
   return { apiKey: deploymentKeyFor(deps, provider), redact: [] };
+}
+
+function cloudflareRunFields(resolved: { accountId?: string; gatewayId?: string }): {
+  accountId?: string;
+  gatewayId?: string;
+} {
+  return {
+    ...(resolved.accountId ? { accountId: resolved.accountId } : {}),
+    ...(resolved.gatewayId ? { gatewayId: resolved.gatewayId } : {}),
+  };
 }
 
 export function selectRunConnections<

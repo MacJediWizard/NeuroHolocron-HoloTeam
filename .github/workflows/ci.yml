@@ -279,7 +279,7 @@ jobs:
       cancel-in-progress: false
     environment:
       name: production
-      url: https://app.rakazo.com
+      url: https://app.legiara.com
     steps:
       - name: Configure production SSH identity
         env:

@@ -22,6 +22,7 @@ const FILES = [
   ".github/ISSUE_TEMPLATE/bug.yml",
   ".github/ISSUE_TEMPLATE/config.yml",
   ".github/ISSUE_TEMPLATE/self-host.yml",
+  ".github/workflows/ci.yml",
   ".github/workflows/desktop-macos-screenshot.yml",
   ".github/workflows/release-desktop.yml",
   "CONTRIBUTING.md",
