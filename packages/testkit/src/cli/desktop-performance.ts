@@ -224,7 +224,7 @@ async function packagedExecutable() {
   const candidates =
     process.platform === "darwin" ? await findNamed(out, `${PRODUCT_NAME}.app`) : [];
   if (process.platform === "darwin" && candidates[0]) {
-    return path.join(candidates[0], "Contents/MacOS/Rakazo");
+    return path.join(candidates[0], `Contents/MacOS/${PRODUCT_NAME}`);
   }
   const desktopRequire = createRequire(path.join(desktopRoot, "package.json"));
   return desktopRequire("electron") as string;

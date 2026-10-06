@@ -2,7 +2,7 @@
 // Re-run after merging upstream, which reintroduces the upstream name in these files.
 //   tsx scripts/apply-brand.ts          rewrite in place
 //   tsx scripts/apply-brand.ts --check  exit 1 if any file still shows the upstream name
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -68,8 +68,6 @@ const FILES = [
   "docs/self-host.md",
   "infra/compose/.env.images.example",
   "infra/compose/backup-prod.sh",
-  "infra/compose/docker-compose.images.yml",
-  "infra/compose/docker-compose.prod.yml",
   "infra/compose/harden-host.sh",
   "infra/compose/install-images-pull-never.smoke.sh",
   "infra/compose/install-images.sh",
@@ -101,6 +99,10 @@ const REWRITES: [RegExp, string][] = [
 ];
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+// Upstream keeps adding compose overlays, so every one of them is covered.
+for (const name of readdirSync(path.join(root, "infra/compose"))) {
+  if (/^docker-compose.*\.yml$/.test(name)) FILES.push(`infra/compose/${name}`);
+}
 const check = process.argv.includes("--check");
 const stale: string[] = [];
 

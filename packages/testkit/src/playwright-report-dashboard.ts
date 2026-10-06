@@ -476,7 +476,7 @@ function renderGalleryPage(input: GalleryInput): string {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
-  <title>${mobile ? "Android screenshots" : "Run screenshots"} · Rakazo</title>
+  <title>${mobile ? "Android screenshots" : "Run screenshots"} · ${PRODUCT_NAME}</title>
   <style>
     ${SHARED_PAGE_STYLES}
     body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #312e81 0, #09090b 36rem); }
@@ -527,7 +527,7 @@ function renderGalleryPage(input: GalleryInput): string {
   <main>
     <header>
       <div>
-        <p class="eyebrow">Rakazo · visual review</p>
+        <p class="eyebrow">${PRODUCT_NAME} · visual review</p>
         <h1>${mobile ? "Android screenshots" : input.pullRequestNumber ? `PR #${input.pullRequestNumber} screenshots` : "Run screenshots"}</h1>
         ${mobile ? "" : '<p class="subtitle">Review intentional checkpoints separately from automatic failure captures.</p>'}
       </div>
