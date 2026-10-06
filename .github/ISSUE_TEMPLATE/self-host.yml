@@ -7,9 +7,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        For **security vulnerabilities**, email [security@legiara.com](mailto:security@legiara.com). See [SECURITY.md](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/SECURITY.md).
+        For **security vulnerabilities**, email [security@legiara.com](mailto:security@legiara.com). See [SECURITY.md](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/SECURITY.md).
 
-        Setup steps are in [README.md](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/README.md). Do not paste `.env` contents or API keys.
+        Setup steps are in [README.md](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/README.md). Do not paste `.env` contents or API keys.
 
   - type: dropdown
     id: step
