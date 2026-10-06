@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   blockedAuthPaths,
@@ -47,7 +48,7 @@ describe("passwordResetEmail", () => {
 
     expect(message).toMatchObject({
       to: "ada@example.test",
-      subject: "Reset your Rakazo password",
+      subject: `Reset your ${PRODUCT_NAME} password`,
     });
     expect(message.text).toContain("https://rakazo.test/reset-password?token=secret&next=1");
     expect(message.html).toContain("&lt;Ada &amp; &quot;team&quot;&gt;");

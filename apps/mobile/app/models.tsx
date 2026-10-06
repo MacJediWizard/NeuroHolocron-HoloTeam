@@ -7,6 +7,7 @@ import {
   OPENAI_COMPATIBLE_BASE_URL_HINT,
   OPENAI_COMPATIBLE_PROVIDER_ID,
   openAiCompatibleConnectReady,
+  PRODUCT_NAME,
   parseModelContextWindow,
   parseModelMaxImagesPerPrompt,
   parseModelMaxTokens,
@@ -552,7 +553,9 @@ export default function Models() {
                   <Text style={styles.helpLabel}>{t("Setup help")}</Text>
                 </Pressable>
                 {showEndpointHelp ? (
-                  <Text style={styles.hint}>{t(OPENAI_COMPATIBLE_BASE_URL_HINT)}</Text>
+                  <Text style={styles.hint}>
+                    {t(OPENAI_COMPATIBLE_BASE_URL_HINT, { PRODUCT_NAME })}
+                  </Text>
                 ) : null}
                 <Pressable
                   accessibilityRole="button"
@@ -934,7 +937,8 @@ export default function Models() {
             {selected.auth === "oauth" && !subscriptionSignIn ? (
               <Text style={styles.secondary}>
                 {t(
-                  "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider.",
+                  "This subscription sign-in is not available in {PRODUCT_NAME} yet. Use a deployment credential or choose another provider.",
+                  { PRODUCT_NAME },
                 )}
               </Text>
             ) : null}

@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@rakazo/adapter-kit": "workspace:*",
+    "@rakazo/contracts": "workspace:*",
     "@rakazo/core": "workspace:*",
     "@rakazo/db": "workspace:*",
     "better-auth": "1.7.4"

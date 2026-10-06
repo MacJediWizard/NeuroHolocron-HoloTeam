@@ -13,6 +13,7 @@ import {
   expect,
   type Page,
 } from "@playwright/test";
+import { PRODUCT_NAME } from "@rakazo/contracts/brand";
 import { abortableDelay } from "@rakazo/core";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
 import { createThreadMessage, type PrismaClient } from "@rakazo/db";
@@ -220,7 +221,8 @@ function startPreview(env: NodeJS.ProcessEnv) {
 
 async function packagedExecutable() {
   const out = path.join(desktopRoot, "out");
-  const candidates = process.platform === "darwin" ? await findNamed(out, "Rakazo.app") : [];
+  const candidates =
+    process.platform === "darwin" ? await findNamed(out, `${PRODUCT_NAME}.app`) : [];
   if (process.platform === "darwin" && candidates[0]) {
     return path.join(candidates[0], "Contents/MacOS/Rakazo");
   }
@@ -749,7 +751,7 @@ function environmentFingerprint(versions: { electron?: string; chrome?: string }
 
 async function measureBundles() {
   const web = await directorySize(path.join(webRoot, "dist"));
-  const applications = await findNamed(path.join(desktopRoot, "out"), "Rakazo.app");
+  const applications = await findNamed(path.join(desktopRoot, "out"), `${PRODUCT_NAME}.app`);
   const desktop = applications[0] ? await directorySize(applications[0]) : null;
   return { web, desktop };
 }

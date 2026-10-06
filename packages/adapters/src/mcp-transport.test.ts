@@ -26,11 +26,12 @@ describe("MCP transport seam", () => {
       {},
       {},
       {
-        fetch: vi.fn(async () =>
-          new UndiciResponse(JSON.stringify({ error: "rate_limited" }), {
-            status: 429,
-            headers: { "content-type": "application/json", "retry-after": "23" },
-          }) as unknown as globalThis.Response,
+        fetch: vi.fn(
+          async () =>
+            new UndiciResponse(JSON.stringify({ error: "rate_limited" }), {
+              status: 429,
+              headers: { "content-type": "application/json", "retry-after": "23" },
+            }) as unknown as globalThis.Response,
         ),
         resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }],
       },

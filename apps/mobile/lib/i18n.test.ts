@@ -1,6 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("expo-localization", () => ({
@@ -51,7 +52,7 @@ describe("mobile i18n", () => {
     const { resetI18nForTests, t } = await import("./i18n");
     resetI18nForTests("zh-CN");
     expect(t("Account")).toBe("账户");
-    expect(t("Sign in to Rakazo")).toBe("登录 Rakazo");
+    expect(t("Sign in to {PRODUCT_NAME}", { PRODUCT_NAME })).toBe(`登录 ${PRODUCT_NAME}`);
     expect(t("New bot")).toBe("新建 Bot");
     expect(t("{runs} runs · {tokens} tokens", { runs: 3, tokens: 12 })).toBe(
       "3 次运行 · 12 个 token",
@@ -60,7 +61,7 @@ describe("mobile i18n", () => {
 
     resetI18nForTests("ru");
     expect(t("Account")).toBe("Аккаунт");
-    expect(t("Sign in to Rakazo")).toBe("Войти в Rakazo");
+    expect(t("Sign in to {PRODUCT_NAME}", { PRODUCT_NAME })).toBe(`Войти в ${PRODUCT_NAME}`);
     expect(t("New bot")).toBe("Новый бот");
     expect(t("{runs} runs · {tokens} tokens", { runs: 3, tokens: 12 })).toBe(
       "Запусков: 3 · токенов: 12",

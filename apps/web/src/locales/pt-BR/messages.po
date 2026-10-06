@@ -736,8 +736,8 @@ msgid "Choose a new password"
 msgstr "Escolha uma nova senha"
 
 #: src/pages/ModelSettingsOverlay.tsx:312
-msgid "Choose which connected model Rakazo uses."
-msgstr "Escolha qual modelo conectado a Rakazo usa."
+msgid "Choose which connected model {PRODUCT_NAME} uses."
+msgstr "Escolha qual modelo conectado a {PRODUCT_NAME} usa."
 
 #: src/pages/shell/dialogs.tsx:261
 msgid "Clear"
@@ -1406,8 +1406,8 @@ msgid "Create your first bot"
 msgstr "Crie seu primeiro bot"
 
 #: src/pages/Auth.tsx:38
-msgid "Create your Rakazo"
-msgstr "Crie o seu Rakazo"
+msgid "Create your {PRODUCT_NAME}"
+msgstr "Crie o seu {PRODUCT_NAME}"
 
 #: src/components/AskCard.tsx:21
 msgid "Created"
@@ -2637,8 +2637,8 @@ msgstr "Cole uma chave de substituição"
 
 #: src/pages/ModelSettingsOverlay.tsx:432
 #: src/pages/Onboarding.tsx:406
-msgid "Paste the OpenAI-compatible address from your server. Rakazo adds /v1 if needed."
-msgstr "Cole o endereço compatível com OpenAI do seu servidor. Rakazo adiciona /v1 se necessário."
+msgid "Paste the OpenAI-compatible address from your server. {PRODUCT_NAME} adds /v1 if needed."
+msgstr "Cole o endereço compatível com OpenAI do seu servidor. {PRODUCT_NAME} adiciona /v1 se necessário."
 
 #: src/pages/VoiceSettingsOverlay.tsx:231
 msgid "Paste your API key"
@@ -2924,8 +2924,8 @@ msgid "Retry screen"
 msgstr ""
 
 #: src/pages/McpOAuthCallback.tsx:62
-msgid "Return to Rakazo"
-msgstr "Retorno a Rakazo"
+msgid "Return to {PRODUCT_NAME}"
+msgstr "Retorno a {PRODUCT_NAME}"
 
 #. placeholder {0}: doc.revision
 #: src/pages/KnowledgeSection.tsx:180
@@ -3220,8 +3220,8 @@ msgid "Sign in"
 msgstr "Entrar"
 
 #: src/pages/Auth.tsx:36
-msgid "Sign in to Rakazo"
-msgstr "Entrar no Rakazo"
+msgid "Sign in to {PRODUCT_NAME}"
+msgstr "Entrar no {PRODUCT_NAME}"
 
 #: src/pages/Auth.tsx:223
 #: src/pages/Welcome.tsx:32
@@ -3482,8 +3482,8 @@ msgid "This server is already connected. Disconnect it first to authorize again.
 msgstr "Este servidor já está conectado. Desconecte-o primeiro para autorizar novamente."
 
 #: src/pages/ModelSettingsOverlay.tsx:709
-msgid "This subscription sign-in is not available in Rakazo yet. Use a deployment credential or choose another provider."
-msgstr "Este login de assinatura ainda não está disponível no Rakazo. Use uma credencial de implantação ou escolha outro provedor."
+msgid "This subscription sign-in is not available in {PRODUCT_NAME} yet. Use a deployment credential or choose another provider."
+msgstr "Este login de assinatura ainda não está disponível no {PRODUCT_NAME}. Use uma credencial de implantação ou escolha outro provedor."
 
 #: src/pages/RoutineSchedule.tsx:207
 msgid "Time of day"

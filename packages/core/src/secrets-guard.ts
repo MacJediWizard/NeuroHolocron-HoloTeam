@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from "@rakazo/contracts/brand";
 export const DEV_AUTH_SECRET_PLACEHOLDER = "dev-secret-change-me-please-32chars";
 export const DEV_ENCRYPTION_KEY_PLACEHOLDER = "dev-encryption-key";
 export const DEV_SUPERVISOR_TOKEN_PLACEHOLDER = "dev-supervisor-token-change-me-32chars";
@@ -7,8 +8,7 @@ export const EXAMPLE_SUPERVISOR_TOKEN_PLACEHOLDER =
 export const EXAMPLE_SCREEN_PROXY_SECRET_PLACEHOLDER =
   "replace-with-32-plus-character-screen-proxy-secret";
 
-const RUNTIME_SECRETS_ERROR =
-  "Set BETTER_AUTH_SECRET and ENCRYPTION_KEY to long random strings before starting Rakazo outside local development or tests.";
+const RUNTIME_SECRETS_ERROR = `Set BETTER_AUTH_SECRET and ENCRYPTION_KEY to long random strings before starting ${PRODUCT_NAME} outside local development or tests.`;
 
 const DEDICATED_SECRET_PLACEHOLDERS = new Set([
   DEV_SUPERVISOR_TOKEN_PLACEHOLDER,

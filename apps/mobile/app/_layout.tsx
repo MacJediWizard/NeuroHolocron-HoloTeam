@@ -1,3 +1,4 @@
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { DarkTheme, Stack, ThemeProvider } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useState } from "react";
@@ -69,7 +70,7 @@ export default function Layout() {
                   contentStyle: { backgroundColor: String(native.page) },
                 }}
               >
-                <Stack.Screen name="index" options={{ headerShown: false, title: "Rakazo" }} />
+                <Stack.Screen name="index" options={{ headerShown: false, title: PRODUCT_NAME }} />
                 <Stack.Screen name="sign-in" options={{ headerShown: false }} />
                 <Stack.Screen
                   name="integration-setup"

@@ -1,8 +1,7 @@
 {
   "expo": {
-    "name": "Rakazo",
-    "slug": "rakazo",
-    "owner": "inbox-zero",
+    "name": "Legiara",
+    "slug": "legiara",
     "scheme": "rakazo",
     "version": "1.0.3",
     "orientation": "portrait",
@@ -27,14 +26,14 @@
         "expo-notifications",
         {
           "icon": "./assets/notification-icon.png",
-          "color": "#2965EC"
+          "color": "#F80010"
         }
       ],
       [
         "expo-image-picker",
         {
-          "photosPermission": "Rakazo uses your photo library so you can attach images to a bot message.",
-          "cameraPermission": "Rakazo uses the camera so you can attach photos to a bot message.",
+          "photosPermission": "Legiara uses your photo library so you can attach images to a bot message.",
+          "cameraPermission": "Legiara uses the camera so you can attach photos to a bot message.",
           "microphonePermission": false
         }
       ],
@@ -42,7 +41,7 @@
       "./plugins/with-worklets-headers"
     ],
     "ios": {
-      "bundleIdentifier": "com.rakazo.app",
+      "bundleIdentifier": "com.legiara.app",
       "buildNumber": "1",
       "supportsTablet": false,
       "icon": "../../packages/ui-tokens/assets/Rakazo.icon",
@@ -50,16 +49,16 @@
         "usesNonExemptEncryption": false
       },
       "infoPlist": {
-        "NSCameraUsageDescription": "Rakazo uses the camera so you can attach photos to a bot message.",
-        "NSPhotoLibraryUsageDescription": "Rakazo uses your photo library so you can attach images to a bot message.",
-        "NSLocalNetworkUsageDescription": "Rakazo connects to a self-hosted Rakazo server on your local network.",
+        "NSCameraUsageDescription": "Legiara uses the camera so you can attach photos to a bot message.",
+        "NSPhotoLibraryUsageDescription": "Legiara uses your photo library so you can attach images to a bot message.",
+        "NSLocalNetworkUsageDescription": "Legiara connects to a self-hosted Legiara server on your local network.",
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
         }
       }
     },
     "android": {
-      "package": "com.rakazo.app",
+      "package": "com.legiara.app",
       "versionCode": 10,
       "softwareKeyboardLayoutMode": "resize",
       "icon": "./assets/icon.png",
@@ -74,16 +73,10 @@
     },
     "extra": {
       "router": {},
-      "supportsRTL": true,
-      "eas": {
-        "projectId": "07f7eb04-45e3-47fe-9374-99a2f991131e"
-      }
+      "supportsRTL": true
     },
     "runtimeVersion": {
       "policy": "appVersion"
-    },
-    "updates": {
-      "url": "https://u.expo.dev/07f7eb04-45e3-47fe-9374-99a2f991131e"
     }
   }
 }

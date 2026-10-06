@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { PRODUCT_NAME, SOURCE_REPO } from "@rakazo/contracts";
 import { readBoundedResponseBytes } from "@rakazo/core";
 import { Agent } from "undici";
 import {
@@ -109,7 +110,7 @@ export async function fetchSafeWebText(
       resolve,
       dispatcher,
       maxBytes,
-      userAgent: options.userAgent ?? "Rakazo/0.1 (+https://github.com/elie222/rakazo)",
+      userAgent: options.userAgent ?? `${PRODUCT_NAME}/0.1 (+https://github.com/${SOURCE_REPO})`,
       headers: options.headers,
       signal,
       redirectsRemaining: MAX_REDIRECTS,

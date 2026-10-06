@@ -1,3 +1,4 @@
+import { SOURCE_REPO } from "@rakazo/contracts";
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_UPDATE_BRANCH,
@@ -17,9 +18,7 @@ import {
 
 describe("normalizeRepoUrl", () => {
   it("accepts the official repository and https forks", () => {
-    expect(normalizeRepoUrl(OFFICIAL_REPO_URL)).toEqual({
-      url: "https://github.com/elie222/rakazo",
-    });
+    expect(normalizeRepoUrl(OFFICIAL_REPO_URL)).toEqual({ url: OFFICIAL_REPO_URL });
     expect(normalizeRepoUrl("  https://github.com/me/rakazo.git/  ")).toEqual({
       url: "https://github.com/me/rakazo.git",
     });
@@ -78,9 +77,9 @@ describe("repoIdentity", () => {
   });
 
   it("only calls the real upstream official", () => {
-    expect(isOfficialRepoUrl("git@github.com:elie222/rakazo.git")).toBe(true);
+    expect(isOfficialRepoUrl(`git@github.com:${SOURCE_REPO}.git`)).toBe(true);
     expect(isOfficialRepoUrl("https://github.com/attacker/rakazo")).toBe(false);
-    expect(isOfficialRepoUrl("https://githubb.com/elie222/rakazo")).toBe(false);
+    expect(isOfficialRepoUrl(`https://githubb.com/${SOURCE_REPO}`)).toBe(false);
   });
 });
 

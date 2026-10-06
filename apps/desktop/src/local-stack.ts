@@ -2,6 +2,7 @@ import { copyFile, lstat, mkdir, readFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import path from "node:path";
 import type { DesktopLocalStackState } from "@rakazo/contracts";
+import { PRODUCT_NAME } from "@rakazo/contracts/brand";
 import {
   classifyDockerFailure,
   composeSupportsWaitTimeout,
@@ -259,8 +260,8 @@ export function stackFailureMessage(
       return "Docker Compose is missing. Install Docker Desktop or the docker-compose-plugin, then retry.";
     case "other":
       return phase === "pulling"
-        ? "Downloading Rakazo images failed. Check the output below, then retry."
-        : "Rakazo services did not start. Check the output below, then retry.";
+        ? `Downloading ${PRODUCT_NAME} images failed. Check the output below, then retry.`
+        : `${PRODUCT_NAME} services did not start. Check the output below, then retry.`;
   }
 }
 
