@@ -34,16 +34,6 @@ export function sendRemotePaste(
   sendKey: (keysym: number, code: string, down?: boolean) => void,
 ): void;
 
-export function pasteHostText(
-  rfb: {
-    viewOnly?: boolean;
-    clipboardPasteFrom?: (text: string) => void;
-    sendKey?: (keysym: number, code: string, down?: boolean) => void;
-    _rfbConnectionState?: string;
-  },
-  text: string,
-): boolean;
-
 type EventTargetLike = {
   addEventListener: (
     type: string,
@@ -56,6 +46,50 @@ type EventTargetLike = {
     options?: boolean | { capture?: boolean },
   ) => void;
 };
+
+export function pasteHostText(
+  rfb: {
+    viewOnly?: boolean;
+    clipboardPasteFrom?: (text: string) => void;
+    sendKey?: (keysym: number, code: string, down?: boolean) => void;
+    _rfbConnectionState?: string;
+  },
+  text: string,
+): boolean;
+
+export function readHostClipboardText(
+  clipboard?: {
+    readText?: () => Promise<string>;
+  } | null,
+): Promise<string | null>;
+
+type PasteTargetLike = {
+  focus?: () => void;
+  blur?: () => void;
+  value?: string;
+  setSelectionRange?: (start: number, end: number) => void;
+};
+
+export function attachMobilePaste(
+  rfb: {
+    viewOnly?: boolean;
+    clipboardPasteFrom?: (text: string) => void;
+    sendKey?: (keysym: number, code: string, down?: boolean) => void;
+    _rfbConnectionState?: string;
+  },
+  options?: {
+    button?: (EventTargetLike & { hidden?: boolean }) | null;
+    clipboard?: { readText?: () => Promise<string> };
+    fallbackFocus?: PasteTargetLike | null;
+  },
+): () => void;
+
+export function attachRemoteClipboardCopy(
+  rfb: EventTargetLike | null | undefined,
+  options?: {
+    clipboard?: { writeText?: (text: string) => Promise<void> } | null;
+  },
+): () => void;
 
 export function attachHostClipboardPaste(
   rfb: {

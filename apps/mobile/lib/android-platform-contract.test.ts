@@ -103,7 +103,11 @@ describe("Android mobile platform contract", () => {
     expect(service).toContain('putString("rakazo.spaceId", run.spaceId)');
     expect(thread).toContain("export default function ThreadRoute()");
     expect(thread).toContain("selectSpace(requestedSpaceId)");
-    expect(thread).toContain("routeMatchesSelectedSpace) return <Thread />");
+    expect(thread).toContain(
+      "threadSpaceSwitchResult(requestedSpaceId, switched, selectedSpaceId())",
+    );
+    expect(thread).toContain('t("Could not switch spaces")');
+    expect(service).toMatch(/&threadId=\$\{Uri\.encode\(run\.threadId\)\}/);
     expect(service).toContain('if (run.groupId != null) put("groupId", run.groupId)');
     expect(service).toContain('if (message.optString("runId") != run.runId) continue');
     expect(service).toContain('if (block.optString("kind") == "handoff") return null');
@@ -129,6 +133,71 @@ describe("Android mobile platform contract", () => {
     );
     expect(service).toContain('putString("rakazo.botId", run.botId)');
     expect(service).toMatch(/if \(working\.isEmpty\(\)\) \{[\s\S]*stop\(\)[\s\S]*return[\s\S]*\}/);
+  });
+
+  it("keeps markdown boundary checks portable to Android and preserves Unicode whitespace edges", () => {
+    const service = readFileSync(
+      resolve(
+        mobileRoot,
+        "modules/rakazo-notifications/android/src/main/java/com/rakazo/notifications/RakazoNotificationService.kt",
+      ),
+      "utf8",
+    );
+
+    // Desktop Java accepts (?U), so a JVM-only regex test would miss Android's
+    // ICU parser failure. Keep the exact native source under the Android
+    // contract test and exercise the equivalent boundary semantics here.
+    const slash = String.fromCharCode(92);
+    const quote = String.fromCharCode(34);
+    const unicodeWhiteSpaceClass = `${slash}${slash}p{Z}${slash}${slash}u0009-${slash}${slash}u000D${slash}${slash}u0085`;
+    expect(service).toContain(
+      `private val NON_SPACE_AT_END = Regex(${quote}[^${unicodeWhiteSpaceClass}]${slash}${slash}z${quote})`,
+    );
+    expect(service).toContain(
+      `private val NON_SPACE_AT_START = Regex(${quote}^[^${unicodeWhiteSpaceClass}]${quote})`,
+    );
+    expect(service).not.toMatch(/Regex\(\s*["']\(\?U\)/);
+
+    const javascriptUnicodeWhiteSpaceClass = `${slash}p{Separator}${slash}u0009-${slash}u000D${slash}u0085`;
+    const nonSpaceAtEnd = new RegExp(`[^${javascriptUnicodeWhiteSpaceClass}]$`, "u");
+    const nonSpaceAtStart = new RegExp(`^[^${javascriptUnicodeWhiteSpaceClass}]`, "u");
+    const unicodeWhiteSpace = [
+      "\u0009",
+      "\u000A",
+      "\u000B",
+      "\u000C",
+      "\u000D",
+      "\u0020",
+      "\u0085",
+      "\u00A0",
+      "\u1680",
+      "\u2000",
+      "\u2001",
+      "\u2002",
+      "\u2003",
+      "\u2004",
+      "\u2005",
+      "\u2006",
+      "\u2007",
+      "\u2008",
+      "\u2009",
+      "\u200A",
+      "\u2028",
+      "\u2029",
+      "\u202F",
+      "\u205F",
+      "\u3000",
+    ];
+
+    for (const whitespace of unicodeWhiteSpace) {
+      expect(nonSpaceAtEnd.test(`text${whitespace}`)).toBe(false);
+      expect(nonSpaceAtStart.test(`${whitespace}text`)).toBe(false);
+    }
+    expect(nonSpaceAtEnd.test("text")).toBe(true);
+    expect(nonSpaceAtStart.test("text")).toBe(true);
+    // Zero-width space is not in Unicode White_Space and must remain content.
+    expect(nonSpaceAtEnd.test("text\u200B")).toBe(true);
+    expect(nonSpaceAtStart.test("\u200Btext")).toBe(true);
   });
 
   it("centers the latest-message control and clears a thread's Android notifications when read", () => {

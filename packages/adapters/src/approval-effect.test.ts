@@ -7,8 +7,12 @@ import {
   approvedCatalogReplay,
   approvedReplayArgs,
   boundDirectApprovalRequest,
+  catalogApprovalConnectorId,
   catalogApprovalDetails,
+  catalogApprovalMatchesLiveRoute,
   catalogApprovalRequest,
+  catalogExecuteToolName,
+  catalogToolPrefix,
   claimApprovedEffect,
   claimIntendedEffect,
   completeExternalEffect,
@@ -281,7 +285,10 @@ describe("resolveDuplicateEffectGate", () => {
   it("returns denial without executing", () => {
     expect(resolveDuplicateEffectGate({ status: "denied" }, "destination.write")).toEqual({
       action: "return",
-      result: { error: "User denied this action." },
+      result: {
+        error:
+          "The user denied this action. Do not retry or rephrase it; tell the user and ask what they want instead.",
+      },
     });
   });
 
@@ -503,5 +510,29 @@ describe("approvalPausedToolResult", () => {
       details: { approval: "paused" },
     });
     expect(isApprovalPausedResult({ ok: true })).toBe(false);
+  });
+});
+
+describe("catalog wrapper names", () => {
+  it("maps MCP to connectors and leaves other connector ids unchanged", () => {
+    expect(catalogToolPrefix("mcp")).toBe("connectors");
+    expect(catalogToolPrefix("installed")).toBe("installed");
+    expect(catalogExecuteToolName("mcp")).toBe("connectors_execute_tool");
+    expect(catalogExecuteToolName("installed")).toBe("installed_execute_tool");
+    expect(catalogApprovalConnectorId("connectors_execute_tool")).toBe("mcp");
+    expect(catalogApprovalConnectorId("mcp_execute_tool")).toBe("mcp");
+    expect(catalogApprovalConnectorId("installed_execute_tool")).toBe("installed");
+  });
+
+  it("matches a connectors_execute_tool approval to a live MCP route", () => {
+    expect(
+      catalogApprovalMatchesLiveRoute(
+        {
+          toolName: "connectors_execute_tool",
+          args: { id: "server-1:send_message", arguments: { text: "approved" } },
+        },
+        { connectorId: "mcp", resourceId: "server-1", toolName: "send_message" },
+      ),
+    ).toBe(true);
   });
 });

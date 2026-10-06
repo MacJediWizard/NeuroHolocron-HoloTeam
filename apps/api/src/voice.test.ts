@@ -1,11 +1,17 @@
+import * as adapters from "@rakazo/adapters";
 import type { Actor } from "@rakazo/contracts";
+import type { PrismaClient } from "@rakazo/db";
 import { Hono } from "hono";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  disconnectVoiceCredential,
+  fishSpeechModelValue,
   MAX_SPEAK_REQUEST_BYTES,
   MAX_TRANSCRIBE_REQUEST_BYTES,
   mountVoiceHttpRoutes,
+  synthesizeVoice,
   toVoiceStatus,
+  updateVoiceSpeechModel,
   type VoiceDeps,
 } from "./voice.js";
 
@@ -109,5 +115,369 @@ describe("voice HTTP routes", () => {
 
     expect(response.status).toBe(413);
     expect(cancel).toHaveBeenCalledOnce();
+  });
+});
+
+const actor = { userId: "user-1", spaceId: "space-1" } as Actor;
+
+function makeDisconnectDeps(
+  overrides: {
+    existing?: Array<{ id: string; secretId: string; userId: string; provider: string }>;
+    modelReferences?: number;
+    voiceReferences?: number;
+  } = {},
+) {
+  const rows = overrides.existing ?? [];
+  const findMany = vi.fn().mockResolvedValue(rows);
+  const preferenceDeleteMany = vi.fn().mockResolvedValue({ count: rows.length });
+  const credentialDeleteMany = vi.fn().mockResolvedValue({ count: rows.length });
+  const modelCount = vi.fn().mockResolvedValue(overrides.modelReferences ?? 0);
+  const voiceCount = vi.fn().mockResolvedValue(overrides.voiceReferences ?? 0);
+  const secretDeleteMany = vi.fn().mockResolvedValue({ count: 1 });
+  const prisma = {
+    userVoiceCredential: {
+      findMany,
+      deleteMany: credentialDeleteMany,
+      count: voiceCount,
+    },
+    spaceVoicePreference: { deleteMany: preferenceDeleteMany },
+    userModelCredential: { count: modelCount },
+    secret: { deleteMany: secretDeleteMany },
+    $transaction: vi.fn(),
+  };
+  prisma.$transaction.mockImplementation(async (callback: (tx: typeof prisma) => unknown) =>
+    callback(prisma),
+  );
+  const deps = {
+    prisma: prisma as unknown as PrismaClient,
+    secrets: { put: vi.fn(), load: vi.fn() },
+  } as unknown as VoiceDeps;
+  return {
+    deps,
+    findMany,
+    preferenceDeleteMany,
+    credentialDeleteMany,
+    secretDeleteMany,
+    transaction: prisma.$transaction,
+  };
+}
+
+describe("disconnectVoiceCredential", () => {
+  it("removes the actor credential, clears its default, and deletes an unreferenced secret", async () => {
+    const existing = {
+      id: "cred-1",
+      secretId: "secret-1",
+      userId: actor.userId,
+      provider: "scripted",
+    };
+    const { deps, findMany, preferenceDeleteMany, credentialDeleteMany, secretDeleteMany } =
+      makeDisconnectDeps({ existing: [existing] });
+
+    await expect(disconnectVoiceCredential(deps, actor, { provider: "scripted" })).resolves.toEqual(
+      {
+        ok: true,
+      },
+    );
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { userId: actor.userId, provider: "scripted" },
+    });
+    expect(preferenceDeleteMany).toHaveBeenCalledWith({
+      where: { userId: actor.userId, credentialId: { in: ["cred-1"] } },
+    });
+    expect(credentialDeleteMany).toHaveBeenCalledWith({
+      where: { userId: actor.userId, id: { in: ["cred-1"] } },
+    });
+    expect(secretDeleteMany).toHaveBeenCalledWith({ where: { id: "secret-1" } });
+  });
+
+  it("removes every actor credential for that provider", async () => {
+    const { deps, preferenceDeleteMany, credentialDeleteMany, secretDeleteMany } =
+      makeDisconnectDeps({
+        existing: [
+          {
+            id: "cred-new",
+            secretId: "secret-new",
+            userId: actor.userId,
+            provider: "scripted",
+          },
+          {
+            id: "cred-old",
+            secretId: "secret-old",
+            userId: actor.userId,
+            provider: "scripted",
+          },
+        ],
+      });
+
+    await expect(disconnectVoiceCredential(deps, actor, { provider: "scripted" })).resolves.toEqual(
+      {
+        ok: true,
+      },
+    );
+
+    expect(preferenceDeleteMany).toHaveBeenCalledWith({
+      where: { userId: actor.userId, credentialId: { in: ["cred-new", "cred-old"] } },
+    });
+    expect(credentialDeleteMany).toHaveBeenCalledWith({
+      where: { userId: actor.userId, id: { in: ["cred-new", "cred-old"] } },
+    });
+    expect(secretDeleteMany).toHaveBeenCalledWith({ where: { id: "secret-new" } });
+    expect(secretDeleteMany).toHaveBeenCalledWith({ where: { id: "secret-old" } });
+  });
+
+  it("keeps a secret while another credential still references it", async () => {
+    const { deps, credentialDeleteMany, secretDeleteMany } = makeDisconnectDeps({
+      existing: [
+        {
+          id: "cred-1",
+          secretId: "secret-shared",
+          userId: actor.userId,
+          provider: "scripted",
+        },
+      ],
+      voiceReferences: 1,
+    });
+
+    await expect(disconnectVoiceCredential(deps, actor, { provider: "scripted" })).resolves.toEqual(
+      {
+        ok: true,
+      },
+    );
+
+    expect(credentialDeleteMany).toHaveBeenCalled();
+    expect(secretDeleteMany).not.toHaveBeenCalled();
+  });
+
+  it("does not delete another actor's credential", async () => {
+    const { deps, findMany, preferenceDeleteMany, credentialDeleteMany, secretDeleteMany } =
+      makeDisconnectDeps();
+
+    await expect(
+      disconnectVoiceCredential(deps, { ...actor, userId: "intruder" }, { provider: "scripted" }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: { userId: "intruder", provider: "scripted" },
+    });
+    expect(preferenceDeleteMany).not.toHaveBeenCalled();
+    expect(credentialDeleteMany).not.toHaveBeenCalled();
+    expect(secretDeleteMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects a blank provider before opening a transaction", async () => {
+    const { deps, transaction } = makeDisconnectDeps();
+
+    await expect(disconnectVoiceCredential(deps, actor, { provider: "   " })).rejects.toMatchObject(
+      {
+        code: "BAD_REQUEST",
+      },
+    );
+    expect(transaction).not.toHaveBeenCalled();
+  });
+});
+
+describe("fishSpeechModelValue", () => {
+  it("trims a Fish model id and treats blank as no override", () => {
+    expect(fishSpeechModelValue("  s1  ")).toBe("s1");
+    expect(fishSpeechModelValue(" ")).toBeNull();
+  });
+
+  it("rejects a model id that cannot be a Fish header", () => {
+    expect(() => fishSpeechModelValue("s1\ninjected")).toThrow(
+      "That speech model id is not valid.",
+    );
+  });
+});
+
+describe("updateVoiceSpeechModel", () => {
+  function speechDeps(preference: { id: string; voiceId: string; isDefault: boolean } | null) {
+    const credential = {
+      id: "cred-1",
+      userId: actor.userId,
+      provider: "fish-audio",
+      secretId: "secret-1",
+    };
+    const update = vi
+      .fn()
+      .mockImplementation(async ({ data }: { data: { speechModel: string | null } }) => ({
+        speechModel: data.speechModel,
+      }));
+    const create = vi.fn();
+    const prisma = {
+      userVoiceCredential: { findFirst: vi.fn().mockResolvedValue(credential) },
+      spaceVoicePreference: {
+        findUnique: vi.fn().mockResolvedValue(preference),
+        create,
+        update,
+        updateMany: vi.fn(),
+        upsert: vi.fn(),
+      },
+      $transaction: vi.fn(),
+    };
+    prisma.$transaction.mockImplementation(async (callback: (tx: typeof prisma) => unknown) =>
+      callback(prisma),
+    );
+    return {
+      deps: { prisma, secrets: { put: vi.fn(), load: vi.fn() } } as unknown as VoiceDeps,
+      create,
+      update,
+      updateMany: prisma.spaceVoicePreference.updateMany,
+    };
+  }
+
+  it("stores the override without changing the selected voice", async () => {
+    const { deps, update, updateMany } = speechDeps({
+      id: "pref-1",
+      voiceId: "voice-1",
+      isDefault: false,
+    });
+
+    await expect(
+      updateVoiceSpeechModel(deps, actor, { provider: "fish-audio", speechModel: " s1 " }),
+    ).resolves.toMatchObject({
+      provider: "fish-audio",
+      voiceId: "voice-1",
+      speechModel: "s1",
+      isDefault: false,
+    });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "pref-1" },
+      data: { speechModel: "s1" },
+    });
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("clears the override when the model is blank", async () => {
+    const { deps, update } = speechDeps({ id: "pref-1", voiceId: "voice-1", isDefault: true });
+
+    await expect(
+      updateVoiceSpeechModel(deps, actor, { provider: "fish-audio", speechModel: " " }),
+    ).resolves.toMatchObject({ speechModel: "" });
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "pref-1" },
+      data: { speechModel: null },
+    });
+  });
+
+  it("stores a model before a voice is chosen without replacing the default", async () => {
+    const { deps, create, update, updateMany } = speechDeps(null);
+    create.mockResolvedValue({
+      isDefault: false,
+      voiceId: "",
+      speechModel: "s1",
+    });
+
+    await expect(
+      updateVoiceSpeechModel(deps, actor, { provider: "fish-audio", speechModel: "s1" }),
+    ).resolves.toMatchObject({
+      provider: "fish-audio",
+      voiceId: "",
+      speechModel: "s1",
+      isDefault: false,
+    });
+    expect(create).toHaveBeenCalledWith({
+      data: {
+        spaceId: actor.spaceId,
+        userId: actor.userId,
+        credentialId: "cred-1",
+        speechModel: "s1",
+      },
+    });
+    expect(update).not.toHaveBeenCalled();
+    expect(updateMany).not.toHaveBeenCalled();
+  });
+
+  it("rejects speech models for other providers before writing", async () => {
+    const { deps, update } = speechDeps({ id: "pref-1", voiceId: "voice-1", isDefault: true });
+
+    await expect(
+      updateVoiceSpeechModel(deps, actor, { provider: "elevenlabs", speechModel: "s1" }),
+    ).rejects.toThrow("Speech model applies to Fish Audio.");
+    expect(update).not.toHaveBeenCalled();
+  });
+});
+
+describe("synthesizeVoice", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("sends the speech model stored on that connection", async () => {
+    const synthesize = vi
+      .fn()
+      .mockResolvedValue({ bytes: new Uint8Array(), mimeType: "audio/mpeg" });
+    vi.spyOn(adapters, "createVoiceProvider").mockReturnValue({ synthesize } as never);
+    const prisma = {
+      spaceVoicePreference: {
+        findFirst: vi.fn().mockResolvedValue({
+          isDefault: true,
+          voiceId: "voice-1",
+          speechModel: "s1",
+          credential: {
+            id: "cred-1",
+            userId: actor.userId,
+            provider: "fish-audio",
+            secretId: "secret-1",
+            createdAt: new Date(0),
+            updatedAt: new Date(0),
+          },
+        }),
+      },
+      secret: {
+        findFirst: vi.fn().mockResolvedValue({ id: "secret-1", ciphertext: "cipher" }),
+      },
+    };
+    const deps = {
+      prisma,
+      secrets: { load: vi.fn().mockReturnValue("fish-key"), put: vi.fn() },
+    } as unknown as VoiceDeps;
+
+    await synthesizeVoice(deps, actor, { text: "Hello" });
+
+    expect(synthesize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "Hello",
+        voiceId: "voice-1",
+        apiKey: "fish-key",
+        model: "s1",
+      }),
+      expect.anything(),
+    );
+  });
+
+  it("omits the model when the connection has no override", async () => {
+    const synthesize = vi
+      .fn()
+      .mockResolvedValue({ bytes: new Uint8Array(), mimeType: "audio/mpeg" });
+    vi.spyOn(adapters, "createVoiceProvider").mockReturnValue({ synthesize } as never);
+    const prisma = {
+      spaceVoicePreference: {
+        findFirst: vi.fn().mockResolvedValue({
+          isDefault: true,
+          voiceId: "voice-1",
+          speechModel: null,
+          credential: {
+            id: "cred-1",
+            userId: actor.userId,
+            provider: "fish-audio",
+            secretId: "secret-1",
+            createdAt: new Date(0),
+            updatedAt: new Date(0),
+          },
+        }),
+      },
+      secret: {
+        findFirst: vi.fn().mockResolvedValue({ id: "secret-1", ciphertext: "cipher" }),
+      },
+    };
+    const deps = {
+      prisma,
+      secrets: { load: vi.fn().mockReturnValue("fish-key"), put: vi.fn() },
+    } as unknown as VoiceDeps;
+
+    await synthesizeVoice(deps, actor, { text: "Hello" });
+
+    expect(synthesize.mock.calls[0]?.[0]).toMatchObject({ model: undefined });
   });
 });

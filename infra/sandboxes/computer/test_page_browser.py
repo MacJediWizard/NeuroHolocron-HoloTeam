@@ -70,6 +70,32 @@ class PageBrowserTest(unittest.TestCase):
                 helper.act(Mock(), "session", [{"kind": "fill", "ref": "first"}])
             ensure.assert_not_called()
 
+    def test_binds_saved_login_fill_to_its_origin_in_the_same_evaluation(self):
+        with patch.object(helper, "ensure_helpers"), patch.object(helper, "snapshot", return_value={"ok": True}), \
+                patch.object(helper, "eval_json") as evaluate:
+            evaluate.side_effect = [True, {}]
+            helper.act(Mock(), "session", [
+                {"kind": "fill", "ref": "e1", "text": "fake-password", "origin": "https://login.example.test"},
+            ])
+        self.assertEqual(
+            evaluate.call_args_list[1].args[2],
+            'window.__rakazoPageBrowser.fill("e1", "fake-password", "https://login.example.test")',
+        )
+
+    def test_rejects_origin_outside_fill_before_any_action(self):
+        with patch.object(helper, "ensure_helpers") as ensure:
+            with self.assertRaisesRegex(RuntimeError, "origin"):
+                helper.act(Mock(), "session", [
+                    {"kind": "type", "ref": "e1", "text": "x", "origin": "https://login.example.test"},
+                ])
+            ensure.assert_not_called()
+
+    def test_reads_arguments_from_one_stdin_line_only(self):
+        payload = b'{"actions": []}\nrest'
+        with patch.object(helper.os, "read", side_effect=[payload[i:i + 1] for i in range(len(payload))]) as read:
+            self.assertEqual(helper.read_stdin_line(), '{"actions": []}')
+        self.assertEqual(read.call_count, len(b'{"actions": []}\n'))
+
     def test_discovery_cannot_leave_loopback_endpoint(self):
         with patch.object(helper, "http_get_json", return_value={"webSocketDebuggerUrl": "ws://example.test:9222/session"}):
             with self.assertRaisesRegex(RuntimeError, "Unexpected CDP"):

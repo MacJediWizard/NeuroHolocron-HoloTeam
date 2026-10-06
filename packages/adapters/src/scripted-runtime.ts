@@ -111,6 +111,8 @@ export class ScriptedAgentRuntime implements AgentRuntime {
             type: "usage",
             inputTokens: 12,
             outputTokens: 40,
+            cacheReadTokens: 0,
+            cacheWriteTokens: 0,
             provider: "scripted",
             model: "scripted",
           };
@@ -150,6 +152,16 @@ export function inferScript(
     ];
   }
   // Before every content-based intent so payload text cannot steal the branch.
+  const shellCommand = /run the shell command\s+([\s\S]+)$/i.exec(prompt)?.[1]?.trim();
+  if (shellCommand) {
+    return [
+      {
+        assistant: "running it on my computer.",
+        toolCalls: [{ name: "shell", args: { command: shellCommand } }],
+        complete: true,
+      },
+    ];
+  }
   if (lower.includes("message the bot named") || lower.includes("message bot named")) {
     const name = namedBot(prompt) ?? "Peer";
     const message =
@@ -195,6 +207,27 @@ export function inferScript(
       },
     ];
   }
+  if (lower.includes("show a login card")) {
+    return [
+      {
+        assistant: "i need that sign-in in a protected card.",
+        toolCalls: [
+          {
+            name: "request_secret",
+            args: {
+              label: "Example sign-in",
+              purpose: "password",
+              credential: {
+                name: "example_login",
+                origin: "https://login.example.test",
+                auth: { type: "login" },
+              },
+            },
+          },
+        ],
+      },
+    ];
+  }
   if (
     lower.includes("masked secret card") ||
     lower.includes("show a secret card") ||
@@ -217,6 +250,46 @@ export function inferScript(
             },
           },
         ],
+      },
+    ];
+  }
+  if (lower.includes("mcp approval card")) {
+    return [
+      {
+        assistant: "i will register that server for your approval.",
+        toolCalls: [
+          {
+            name: "add_mcp_server",
+            args: {
+              name: "Fixture MCP",
+              transport: "stdio",
+              command: "echo",
+              assignToSelf: true,
+            },
+          },
+        ],
+      },
+    ];
+  }
+  if (lower.includes("quote markdown fixture")) {
+    const marker = /quote markdown fixture\s+(\S+)/i.exec(prompt)?.[1] ?? "md-fixture";
+    return [
+      {
+        assistant: `${marker}
+1. list-a
+2. list-b
+
+| k | v |
+| --- | --- |
+| cell-a | cell-b |
+| cell-c | cell-d |
+
+\`\`\`
+code-a
+---
+code-b
+\`\`\``,
+        complete: true,
       },
     ];
   }
@@ -336,6 +409,30 @@ export function inferScript(
       },
     ];
   }
+  if (
+    lower.includes("silence finish notifications") ||
+    lower.includes("turn off finish notifications")
+  ) {
+    return [
+      {
+        assistant: "silencing finish notifications.",
+        toolCalls: [{ name: "update_bot", args: { notifyOnFinish: false } }],
+        complete: true,
+      },
+    ];
+  }
+  if (
+    lower.includes("resume finish notifications") ||
+    lower.includes("turn on finish notifications")
+  ) {
+    return [
+      {
+        assistant: "enabling finish notifications.",
+        toolCalls: [{ name: "update_bot", args: { notifyOnFinish: true } }],
+        complete: true,
+      },
+    ];
+  }
   if (lower.includes("subagent") || lower.includes("delegate to a helper")) {
     return [
       {
@@ -412,6 +509,36 @@ export function inferScript(
     ];
   }
   if (
+    lower.includes("save shared memory") ||
+    lower.includes("update shared memory") ||
+    lower.includes("write shared memory")
+  ) {
+    const contentMatch =
+      /\b(?:with|content):\s*([\s\S]+)$/i.exec(prompt) ?? /\bwith\s+([\s\S]+)$/i.exec(prompt);
+    const content = contentMatch?.[1]?.trim();
+    const header = contentMatch ? prompt.slice(0, contentMatch.index) : prompt;
+    const named =
+      /(?:named|called|path|file)\s+([A-Za-z0-9._/-]+)/i.exec(header)?.[1] ??
+      /shared memory\s+([A-Za-z0-9._/-]+\.[A-Za-z0-9]+)/i.exec(header)?.[1];
+    const path = named && named.toLowerCase() !== "with" ? named : "MEMORY.md";
+    if (!content) {
+      return [
+        {
+          assistant:
+            "say what to save, for example: save shared memory MEMORY.md with: the new facts.",
+          complete: true,
+        },
+      ];
+    }
+    return [
+      {
+        assistant: "saving that to shared memory.",
+        toolCalls: [{ name: "save_shared_memory", args: { path, content } }],
+        complete: true,
+      },
+    ];
+  }
+  if (
     lower.includes("write") &&
     (lower.includes("file") || lower.includes("home") || lower.includes("note"))
   ) {
@@ -420,11 +547,8 @@ export function inferScript(
     const filePath =
       /(?:called|named)\s+([A-Za-z0-9._/-]+)/i.exec(prompt)?.[1] ?? "notes/result.txt";
     return [
-      { assistant: "writing that into my home now." },
-      {
-        toolCalls: [{ name: "write_file", args: { path: filePath, content } }],
-        complete: true,
-      },
+      { toolCalls: [{ name: "write_file", args: { path: filePath, content } }] },
+      { assistant: "writing that into my home now.", complete: true },
     ];
   }
   if (lower.includes("remember")) {

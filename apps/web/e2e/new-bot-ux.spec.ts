@@ -130,7 +130,20 @@ test("later bot waits before showing the focus card; sending cancels it", async 
   await expect(page.getByText("What do you want me on first?", { exact: true })).toHaveCount(0);
   const composer = page.getByPlaceholder(/Message/);
   await composer.fill("I'll set this up myself");
+  // Send must finish before the delay is advanced: cancel runs after a successful
+  // RPC, and promptFocus will still post if the clock fires while send is in flight.
+  const sent = page.waitForResponse(
+    (response) => response.url().includes("/rpc/threads/send") && response.ok(),
+  );
   await page.keyboard.press("Enter");
+  await sent;
+  // Scope to the user bubble: the assistant reply can echo this phrase as a substring.
+  await expect(
+    page
+      .getByTestId("transcript")
+      .getByTestId("message-user-bubble")
+      .getByText("I'll set this up myself", { exact: true }),
+  ).toBeVisible();
   await page.clock.fastForward(12_000);
   await expect(page.getByText("What do you want me on first?", { exact: true })).toHaveCount(0);
 });

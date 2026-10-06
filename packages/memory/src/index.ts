@@ -10,6 +10,7 @@ import type {
   MemoryStore,
   PortableFile,
 } from "@rakazo/adapter-kit";
+import { MEMORY_REVISION_CONFLICT_ERROR } from "@rakazo/adapter-kit";
 import { Prisma, type PrismaClient, withTransactionRetry } from "@rakazo/db";
 
 export class MarkdownMemoryStore implements MemoryStore {
@@ -83,6 +84,10 @@ export class MarkdownMemoryStore implements MemoryStore {
               path: request.path,
             },
           });
+          if (request.expectedRevision !== undefined) {
+            const live = existing?.revision ?? 0;
+            if (live !== request.expectedRevision) throw new Error(MEMORY_REVISION_CONFLICT_ERROR);
+          }
           const doc = existing
             ? await tx.memoryDocument.update({
                 where: { id: existing.id },

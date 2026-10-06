@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { previewSnippet } from "./preview.js";
 
 describe("previewSnippet", () => {
+  it("preserves the address in an autolink snippet", () => {
+    expect(previewSnippet("Contact <_ops_@example.test> **today**")).toBe(
+      "Contact _ops_@example.test today",
+    );
+  });
+  it("preserves identifiers in last-message previews", () => {
+    expect(previewSnippet("Updated **DATABASE_POOL_SIZE**")).toBe("Updated DATABASE_POOL_SIZE");
+  });
   it("keeps a short last message as a single plain line", () => {
     expect(previewSnippet("venue booked, contract sent")).toBe("venue booked, contract sent");
   });

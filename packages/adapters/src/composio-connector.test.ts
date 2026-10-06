@@ -8,12 +8,14 @@ import {
   CompositeConnector,
   collectLogIds,
   collectPages,
+  composioResultError,
   executeSessionKey,
   filterCatalog,
   isComposioEnabled,
   isNoAuthToolkitError,
   mergeConnectedPlugins,
   needsLivePluginSync,
+  pickReusableConnection,
   planLiveConnectionSync,
   sanitizeComposioError,
 } from "./composio-connector.js";
@@ -23,6 +25,7 @@ const composioSdkState = vi.hoisted(() => ({
   created: [] as Array<{ userId: string; config: Record<string, unknown> }>,
   directoryFails: false,
   executions: [] as Array<{ tool: string; args: Record<string, unknown> }>,
+  executeResult: null as null | { data: Record<string, unknown>; error: string | null },
   connectedAccounts: {
     list: async (_query?: Record<string, unknown>) => ({ items: [] as Array<{ id: string }> }),
     waitForConnection: async (id: string, _timeout?: number) => ({ id: `resolved-${id}` }),
@@ -49,7 +52,7 @@ const composioSdkState = vi.hoisted(() => ({
         args: Record<string, unknown>,
       ) => Promise<{
         data: Record<string, unknown>;
-        error: null;
+        error: string | null;
         logId: string;
       }>;
     }
@@ -117,7 +120,10 @@ vi.mock("@composio/core", () => ({
             : [],
         execute: async (tool: string, args: Record<string, unknown>) => {
           composioSdkState.executions.push({ tool, args });
-          return { data: { ok: true }, error: null, logId: "log-github" };
+          return {
+            ...(composioSdkState.executeResult ?? { data: { ok: true }, error: null }),
+            logId: "log-github",
+          };
         },
       };
       composioSdkState.sessions.set(session.sessionId, session);
@@ -217,6 +223,71 @@ describe("composio tool mapping", () => {
     expect(sanitizeComposioError("COMPOSIO_API_KEY=ak_shouldnotleak")).not.toContain(
       "ak_shouldnotleak",
     );
+    expect(sanitizeComposioError('COMPOSIO_API_KEY="alpha beta"')).toBe(
+      'COMPOSIO_API_KEY="[redacted]"',
+    );
+    expect(sanitizeComposioError("COMPOSIO_API_KEY plain-secret-value")).toBe(
+      "COMPOSIO_API_KEY=[redacted]",
+    );
+    expect(sanitizeComposioError('COMPOSIO_API_KEY "alpha beta"')).toBe(
+      "COMPOSIO_API_KEY=[redacted]",
+    );
+    expect(sanitizeComposioError("denied password=p@ss;word")).toBe('denied password="[redacted]"');
+    expect(sanitizeComposioError("denied password=bad;status=failed")).toBe(
+      'denied password="[redacted]";status=failed',
+    );
+    expect(sanitizeComposioError('denied password="p\\"secret"')).toBe(
+      'denied password="[redacted]"',
+    );
+  });
+
+  it("keeps each tool's error when a multi-execute batch fails", () => {
+    const data = {
+      results: [
+        { tool_slug: "TOOL_OK", response: { successful: true, data: {} } },
+        {
+          tool_slug: "TOOL_MISSING",
+          error: "The requested message was not found.",
+          response: { successful: false, data: { status_code: 404 } },
+        },
+        {
+          tool_slug: "TOOL_NESTED",
+          error: "",
+          response: { successful: false, error: "Query failed." },
+        },
+        null,
+        "not-an-object",
+      ],
+    };
+    expect(composioResultError("2 out of 3 tools failed", data)).toBe(
+      "2 out of 3 tools failed: TOOL_MISSING: The requested message was not found.; TOOL_NESTED: Query failed.",
+    );
+    const longSecret = `${"p".repeat(470)} password="alpha beta-secret-tail" done ${"q".repeat(80)}`;
+    const longMessage = composioResultError("1 out of 1 tools failed", {
+      results: [{ tool_slug: "TOOL", error: longSecret }],
+    });
+    expect(longMessage).toContain("[redacted]");
+    expect(longMessage).not.toContain("beta-secret");
+    expect(composioResultError("1 out of 1 tools failed", { results: [] })).toBe(
+      "1 out of 1 tools failed",
+    );
+    expect(composioResultError("Session expired", null)).toBe("Session expired");
+    const long = composioResultError("2 out of 2 tools failed", {
+      results: [
+        { tool_slug: "TOOL_LONG", error: "x".repeat(800) },
+        { tool_slug: "TOOL_LATER", error: "Still reported." },
+      ],
+    });
+    expect(long).toContain(`TOOL_LONG: ${"x".repeat(500)}…`);
+    expect(long).toContain("TOOL_LATER: Still reported.");
+    const many = composioResultError("7 out of 7 tools failed", {
+      results: Array.from({ length: 7 }, (_, index) => ({
+        tool_slug: `TOOL_${index}`,
+        error: "Failed.",
+      })),
+    });
+    expect(many).toContain("TOOL_4: Failed.; +2 more");
+    expect(many).not.toContain("TOOL_5");
   });
 
   it("paginates until the cursor ends", async () => {
@@ -260,98 +331,204 @@ describe("composio tool mapping", () => {
     );
   });
 
+  function stubActiveAccounts(ids: string[]) {
+    const previous = composioSdkState.connectedAccounts.list;
+    composioSdkState.connectedAccounts.list = async () => ({
+      items: ids.map((id) => ({ id })),
+    });
+    return () => {
+      composioSdkState.connectedAccounts.list = previous;
+    };
+  }
+
   it("pins every connected account into multi-account execute sessions", async () => {
     composioSdkState.created.length = 0;
     composioSdkState.sessions.clear();
     composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts(["ca-personal", "ca-work"]);
 
-    const connector = new ComposioConnector();
-    await connector.discoverTools({
-      operationId: "composio-multi-account",
-      traceId: "composio-multi-account",
-      spaceId: "workspace",
-      userId: "user-1",
-      signal: new AbortController().signal,
-      connectedConnections: [
-        {
-          id: "connection-personal",
-          connectorId: "composio",
-          externalId: "github",
-          displayName: "Personal",
-          providerRef: "ca-personal",
-        },
-        {
-          id: "connection-work",
-          connectorId: "composio",
-          externalId: "GITHUB",
-          displayName: "Work",
-          providerRef: "ca-work",
-        },
-        {
-          id: "connection-personal-dup",
-          connectorId: "composio",
-          externalId: "GitHub",
-          displayName: "Personal again",
-          providerRef: "ca-personal",
-        },
-        {
-          id: "connection-noauth",
-          connectorId: "composio",
-          externalId: "GITHUB",
-          displayName: "Legacy",
-          providerRef: "github",
-        },
-      ],
-    });
+    try {
+      const connector = new ComposioConnector();
+      await connector.discoverTools({
+        operationId: "composio-multi-account",
+        traceId: "composio-multi-account",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+        connectedConnections: [
+          {
+            id: "connection-personal",
+            connectorId: "composio",
+            externalId: "github",
+            displayName: "Personal",
+            providerRef: "ca-personal",
+          },
+          {
+            id: "connection-work",
+            connectorId: "composio",
+            externalId: "GITHUB",
+            displayName: "Work",
+            providerRef: "ca-work",
+          },
+          {
+            id: "connection-personal-dup",
+            connectorId: "composio",
+            externalId: "GitHub",
+            displayName: "Personal again",
+            providerRef: "ca-personal",
+          },
+          {
+            id: "connection-noauth",
+            connectorId: "composio",
+            externalId: "GITHUB",
+            displayName: "Legacy",
+            providerRef: "github",
+          },
+        ],
+      });
 
-    expect(composioSdkState.created.at(-1)).toEqual({
-      userId: "user-1",
-      config: {
-        manageConnections: false,
-        sandbox: { enable: false },
-        toolkits: ["GITHUB"],
-        connectedAccounts: { GITHUB: ["ca-personal", "ca-work"] },
-        multiAccount: {
-          enable: true,
-          maxAccountsPerToolkit: 10,
-          requireExplicitSelection: true,
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GITHUB"],
+          connectedAccounts: { GITHUB: ["ca-personal", "ca-work"] },
+          multiAccount: {
+            enable: true,
+            maxAccountsPerToolkit: 10,
+            requireExplicitSelection: true,
+          },
         },
-      },
-    });
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("drops a dead sibling account id so it cannot poison discovery", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts(["ca_current"]);
+
+    try {
+      const connector = new ComposioConnector();
+      await expect(
+        connector.discoverTools({
+          operationId: "composio-dead-sibling",
+          traceId: "composio-dead-sibling",
+          spaceId: "workspace",
+          userId: "user-1",
+          signal: new AbortController().signal,
+          connectedConnections: [
+            {
+              id: "connection-revoked",
+              connectorId: "composio",
+              externalId: "github",
+              displayName: "GitHub",
+              providerRef: "ca_old",
+            },
+            {
+              id: "connection-live",
+              connectorId: "composio",
+              externalId: "github",
+              displayName: "GitHub",
+              providerRef: "ca_current",
+            },
+          ],
+        }),
+      ).resolves.toContainEqual(expect.objectContaining({ name: "GITHUB_GET_REPOS" }));
+
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GITHUB"],
+          connectedAccounts: { GITHUB: ["ca_current"] },
+        },
+      });
+    } finally {
+      restore();
+    }
+  });
+
+  it("omits stale account ids when the provider lists no ACTIVE accounts", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts([]);
+
+    try {
+      const connector = new ComposioConnector();
+      await connector.discoverTools({
+        operationId: "composio-empty-active",
+        traceId: "composio-empty-active",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+        connectedConnections: [
+          {
+            id: "connection-revoked",
+            connectorId: "composio",
+            externalId: "github",
+            displayName: "GitHub",
+            providerRef: "ca_old",
+          },
+        ],
+      });
+
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GITHUB"],
+        },
+      });
+    } finally {
+      restore();
+    }
   });
 
   it("pins a single concrete account without enabling multi-account mode", async () => {
     composioSdkState.created.length = 0;
     composioSdkState.sessions.clear();
     composioToolkitDirectory.invalidate();
+    const restore = stubActiveAccounts(["ca-work"]);
 
-    const connector = new ComposioConnector();
-    await connector.discoverTools({
-      operationId: "composio-single-account",
-      traceId: "composio-single-account",
-      spaceId: "workspace",
-      userId: "user-1",
-      signal: new AbortController().signal,
-      connectedConnections: [
-        {
-          id: "connection-work",
-          connectorId: "composio",
-          externalId: "gmail",
-          displayName: "Work",
-          providerRef: "ca-work",
+    try {
+      const connector = new ComposioConnector();
+      await connector.discoverTools({
+        operationId: "composio-single-account",
+        traceId: "composio-single-account",
+        spaceId: "workspace",
+        userId: "user-1",
+        signal: new AbortController().signal,
+        connectedConnections: [
+          {
+            id: "connection-work",
+            connectorId: "composio",
+            externalId: "gmail",
+            displayName: "Work",
+            providerRef: "ca-work",
+          },
+        ],
+      });
+
+      expect(composioSdkState.created.at(-1)).toEqual({
+        userId: "user-1",
+        config: {
+          manageConnections: false,
+          sandbox: { enable: false },
+          toolkits: ["GMAIL"],
+          connectedAccounts: { GMAIL: ["ca-work"] },
         },
-      ],
-    });
-
-    expect(composioSdkState.created.at(-1)).toEqual({
-      userId: "user-1",
-      config: {
-        manageConnections: false,
-        sandbox: { enable: false },
-        toolkits: ["GMAIL"],
-        connectedAccounts: { GMAIL: ["ca-work"] },
-      },
-    });
+      });
+    } finally {
+      restore();
+    }
   });
 
   it("omits connectedAccounts and multiAccount for legacy slug-only refs", async () => {
@@ -448,6 +625,138 @@ describe("composio tool mapping", () => {
     ]);
     await expect(connector.connectionReady(context, "github")).resolves.toBe(true);
     await expect(connector.connectedAccountId("user-1", "github")).resolves.toBe("ca-github");
+  });
+
+  it("emits each failed tool's error from a failed batch", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.executions.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+    composioSdkState.executeResult = {
+      data: {
+        results: [
+          {
+            tool_slug: "GITHUB_GET_REPOS",
+            error:
+              'Repository not found. access_token="opaque-access-value" client_secret: "opaque-client-secret" api_key=opaque-api-key password=opaque-password',
+            response: { successful: false },
+          },
+        ],
+      },
+      error: "1 out of 1 tools failed",
+    };
+
+    const connector = new ComposioConnector();
+    const context: AdapterContext = {
+      operationId: "composio-batch-failure",
+      traceId: "composio-batch-failure",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+      connectedConnections: [
+        {
+          id: "connection-github",
+          connectorId: "composio",
+          externalId: "github",
+          displayName: "GitHub",
+        },
+      ],
+    };
+
+    const events: ConnectorEvent[] = [];
+    try {
+      for await (const event of connector.execute(
+        { tool: "COMPOSIO_MULTI_EXECUTE_TOOL", args: {}, executionId: "composio-batch-failure" },
+        context,
+      )) {
+        events.push(event);
+      }
+    } finally {
+      composioSdkState.executeResult = null;
+    }
+    expect(events).toEqual([
+      {
+        type: "error",
+        message:
+          '1 out of 1 tools failed: GITHUB_GET_REPOS: Repository not found. access_token="[redacted]" client_secret: "[redacted]" api_key="[redacted]" password="[redacted]"',
+      },
+    ]);
+  });
+
+  it("redacts credential values in successful tool results without dropping the payload", async () => {
+    composioSdkState.created.length = 0;
+    composioSdkState.executions.length = 0;
+    composioSdkState.sessions.clear();
+    composioToolkitDirectory.invalidate();
+    composioSdkState.executeResult = {
+      data: {
+        body: "Reset your password: hunter2 today",
+        quoted: 'cfg password="x"',
+        secret: { a: 1 },
+        has_password: true,
+        flag: "has_password: true",
+        joined: "password=p@ss;word",
+        escaped: 'note password="p\\"secret" tail',
+        meta: { name: "ada", api_key: "live-key-value" },
+        lookup_ak_ABC123: "first",
+        lookup_ak_DEF456: "second",
+        COMPOSIO_API_KEY: "plain-secret-value",
+        id: 1,
+      },
+      error: null,
+    };
+
+    const connector = new ComposioConnector();
+    const context: AdapterContext = {
+      operationId: "composio-payload-redaction",
+      traceId: "composio-payload-redaction",
+      spaceId: "workspace",
+      userId: "user-1",
+      signal: new AbortController().signal,
+      connectedConnections: [
+        {
+          id: "connection-github",
+          connectorId: "composio",
+          externalId: "github",
+          displayName: "GitHub",
+        },
+      ],
+    };
+
+    const events: ConnectorEvent[] = [];
+    try {
+      for await (const event of connector.execute(
+        { tool: "GITHUB_GET_REPOS", args: {}, executionId: "composio-payload-redaction" },
+        context,
+      )) {
+        events.push(event);
+      }
+    } finally {
+      composioSdkState.executeResult = null;
+    }
+
+    expect(events).toEqual([
+      {
+        type: "result",
+        data: {
+          data: {
+            body: 'Reset your password: "[redacted]" today',
+            quoted: 'cfg password="[redacted]"',
+            secret: "[redacted]",
+            has_password: true,
+            flag: "has_password: true",
+            joined: 'password="[redacted]"',
+            escaped: 'note password="[redacted]" tail',
+            meta: { name: "ada", api_key: "[redacted]" },
+            "lookup_[redacted]": "first",
+            "lookup_[redacted]~2": "second",
+            COMPOSIO_API_KEY: "[redacted]",
+            id: 1,
+          },
+          logId: "log-github",
+        },
+      },
+    ]);
   });
 
   it("resolves connection-request ids to connected-account ids and skips sibling refs", async () => {
@@ -663,7 +972,7 @@ describe("composio tool mapping", () => {
     ).toEqual({ connectIds: [], revokeIds: [] });
   });
 
-  it("reconnects existing error or revoked rows instead of inserting duplicates", () => {
+  it("reconnects existing error rows instead of inserting duplicates", () => {
     expect(
       planLiveConnectionSync(
         [
@@ -674,8 +983,30 @@ describe("composio tool mapping", () => {
         ["gmail", "slack", "github", "slack"],
       ),
     ).toEqual({
-      connectIds: ["row-err", "row-old"],
+      connectIds: ["row-err"],
       revokeIds: [],
+    });
+  });
+
+  it("does not revive a revoked sibling when a live row shares the provider slug", () => {
+    expect(
+      planLiveConnectionSync(
+        [
+          { id: "row-old", provider: "gmail", status: "revoked", displayName: "Gmail" },
+          { id: "row-live", provider: "gmail", status: "connected", displayName: "Gmail" },
+        ],
+        ["gmail"],
+      ),
+    ).toEqual({ connectIds: [], revokeIds: [] });
+    expect(
+      pickReusableConnection([
+        { id: "row-old", status: "revoked" },
+        { id: "row-live", status: "connected" },
+      ]),
+    ).toBeUndefined();
+    expect(pickReusableConnection([{ id: "row-old", status: "revoked" }])).toEqual({
+      id: "row-old",
+      status: "revoked",
     });
   });
 

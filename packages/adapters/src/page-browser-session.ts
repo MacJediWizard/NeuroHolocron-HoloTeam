@@ -24,6 +24,9 @@ const INTERACTIVE_SELECTOR = [
   "[contenteditable='true']",
 ].join(",");
 
+/** Saved logins are typed only into these input types. Textareas stay out: a username is an input. */
+const LOGIN_FILL_INPUT_TYPES = new Set(["text", "email", "password", "tel"]);
+
 type DomWindow = JSDOM["window"];
 type DomElement = InstanceType<DomWindow["Element"]>;
 
@@ -31,6 +34,8 @@ type DomElement = InstanceType<DomWindow["Element"]>;
 export class PageBrowserSession {
   private dom: JSDOM;
   private refs = new Map<string, DomElement>();
+  /** Fields holding a saved login; snapshots never report their values. */
+  private loginFilled = new WeakSet<DomElement>();
   private nextRef = 1;
 
   constructor(
@@ -137,8 +142,34 @@ export class PageBrowserSession {
       return;
     }
     if (action.kind === "fill" || action.kind === "type") {
+      if (action.origin) {
+        const page = new URL(this.url);
+        let saved: URL;
+        try {
+          saved = new URL(action.origin);
+        } catch {
+          throw new Error("Website logins can only be filled on HTTPS.");
+        }
+        // Private-LAN HTTP never qualifies, even when the page origin matches.
+        if (saved.protocol !== "https:" || page.protocol !== "https:") {
+          throw new Error("Website logins can only be filled on HTTPS.");
+        }
+        if (page.origin !== saved.origin) {
+          throw new Error("The page is not on the site this login was saved for.");
+        }
+        const inputType = el instanceof win.HTMLInputElement ? el.type : "";
+        if (!LOGIN_FILL_INPUT_TYPES.has(inputType)) {
+          throw new Error(
+            "A saved login can only be typed into a text, email, password, or telephone field.",
+          );
+        }
+      }
       const text = action.text;
-      if (el instanceof win.HTMLInputElement || el instanceof win.HTMLTextAreaElement) {
+      const formField = el instanceof win.HTMLInputElement || el instanceof win.HTMLTextAreaElement;
+      if (formField) {
+        // Only a plain fill replaces a saved login; typing appends to it.
+        if (action.origin) this.loginFilled.add(el);
+        else if (action.kind === "fill") this.loginFilled.delete(el);
         if (action.kind === "fill") el.value = text;
         else el.value = `${el.value}${text}`;
         el.dispatchEvent(new win.Event("input", { bubbles: true }));
@@ -175,7 +206,7 @@ export class PageBrowserSession {
       this.refs.set(ref, node);
       const role = roleFor(win, node);
       const name = nameFor(win, node);
-      const value = valueFor(win, node);
+      const value = this.loginFilled.has(node) ? undefined : valueFor(win, node);
       const tag = node.tagName.toLowerCase();
       const entry: BrowserSnapshotNode = { ref, role, name, tag };
       if (value !== undefined) entry.value = value;

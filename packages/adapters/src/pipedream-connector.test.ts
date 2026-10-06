@@ -16,6 +16,88 @@ const context: AdapterContext = {
   signal: new AbortController().signal,
 };
 
+const FAKE_CONFIG = {
+  clientId: "fake-client-id",
+  clientSecret: "fake-client-secret",
+  projectId: "fake-project-id",
+  environment: "development" as const,
+  identitySecret: "fake-identity-secret",
+};
+
+const TEST_NETWORK = { resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }] };
+
+/** Serve the token endpoint plus one MCP server per app slug, keyed on `x-pd-app-slug`. */
+function pipedreamMcpFetch(
+  toolsByApp: Record<string, string[]>,
+  calls: Array<{ app: string | null; name: string; args: unknown }> = [],
+) {
+  return vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+    const request = input instanceof Request ? input : new Request(input, init);
+    if (new URL(request.url).pathname === "/v1/oauth/token") {
+      return Response.json({ access_token: "fake-access-token", expires_in: 3_600 });
+    }
+    const app = request.headers.get("x-pd-app-slug");
+    const message = JSON.parse(await request.text()) as {
+      id?: number;
+      method?: string;
+      params?: { name?: string; arguments?: unknown };
+    };
+    if (message.method === "initialize") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          protocolVersion: "2025-06-18",
+          capabilities: { tools: {} },
+          serverInfo: { name: "pipedream-test", version: "1" },
+        },
+      });
+    }
+    if (message.method === "tools/list") {
+      return Response.json({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: {
+          tools: (toolsByApp[app ?? ""] ?? []).map((name) => ({
+            name,
+            description: `Run ${name}`,
+            inputSchema: {
+              type: "object",
+              properties: { text: { type: "string", description: `schema-marker-${app}-${name}` } },
+              required: ["text"],
+            },
+          })),
+        },
+      });
+    }
+    if (message.method === "tools/call") {
+      calls.push({ app, name: message.params?.name ?? "", args: message.params?.arguments });
+      return Response.json({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { content: [{ type: "text", text: "ok" }] },
+      });
+    }
+    return new Response(null, { status: 202 });
+  });
+}
+
+function connectedContext(...apps: string[]): AdapterContext {
+  return {
+    ...context,
+    connectedConnections: apps.map((app) => ({
+      id: `connection-${app}`,
+      connectorId: "pipedream",
+      externalId: app,
+      displayName: app,
+    })),
+  };
+}
+
+function appTools(app: string, count: number): Record<string, string[]> {
+  return { [app]: Array.from({ length: count }, (_, index) => `${app}_tool_${index}`) };
+}
+
 describe("pipedreamConfigFromEnv", () => {
   it("maps shared environment values and normalizes unsupported environments", () => {
     expect(
@@ -81,6 +163,26 @@ describe("PipedreamConnector", () => {
         context,
       ),
     ).rejects.toThrow("secure HTTPS connect URL");
+  });
+
+  it("reports the status when a token response carries no JSON body", async () => {
+    const connector = new PipedreamConnector(
+      {
+        clientId: "fake-client-id",
+        clientSecret: "fake-client-secret",
+        projectId: "fake-project-id",
+        environment: "development",
+        identitySecret: "fake-identity-secret",
+      },
+      { fetch: vi.fn().mockResolvedValue(new Response("", { status: 502 })) },
+    );
+
+    await expect(
+      connector.begin(
+        { provider: "gmail", redirectUrl: "https://rakazo.example.test/app" },
+        context,
+      ),
+    ).rejects.toThrow("Pipedream authentication failed: 502");
   });
 
   it("rejects an oversized token response before buffering it", async () => {
@@ -327,6 +429,162 @@ describe("PipedreamConnector", () => {
       name: "TimeoutError",
       remoteRevokePreDelete: true,
     });
+  });
+
+  it("exposes 20 app tools directly and switches to the catalog at 21", async () => {
+    for (const count of [20, 21]) {
+      const connector = new PipedreamConnector(FAKE_CONFIG, {
+        ...TEST_NETWORK,
+        fetch: pipedreamMcpFetch(appTools("gmail", count)),
+      });
+
+      const tools = await connector.discoverTools(connectedContext("gmail"));
+
+      if (count === 20) {
+        expect(tools).toHaveLength(20);
+        expect(tools[0]?.route).toEqual(
+          expect.objectContaining({ connectorId: "pipedream", resourceId: "gmail" }),
+        );
+      } else {
+        expect(tools.map((tool) => tool.name)).toEqual([
+          "pipedream_search_tools",
+          "pipedream_load_tool",
+          "pipedream_execute_tool",
+        ]);
+        expect(JSON.stringify(tools)).not.toContain("schema-marker");
+      }
+    }
+  });
+
+  it("includes every connected app when more than 20 apps have one tool each", async () => {
+    const apps = Array.from({ length: 21 }, (_, index) => `app_${index}`);
+    const toolsByApp = Object.fromEntries(apps.map((app) => [app, [`${app}_tool`]]));
+    const connector = new PipedreamConnector(FAKE_CONFIG, {
+      ...TEST_NETWORK,
+      fetch: pipedreamMcpFetch(toolsByApp),
+    });
+    const context = connectedContext(...apps);
+    const [search] = await connector.discoverTools(context);
+
+    expect(search?.name).toBe("pipedream_search_tools");
+
+    const events = [];
+    for await (const event of connector.execute(
+      { tool: search!.name, args: {}, executionId: "search-many-apps", route: search!.route },
+      context,
+    )) {
+      events.push(event);
+    }
+
+    const index = (events[0] as { data?: { index?: Array<{ group: string }> } })?.data?.index;
+    expect(index?.map((entry) => entry.group).sort()).toEqual([...apps].sort());
+    expect(index).toHaveLength(21);
+  });
+
+  it("keeps other apps when one connected app fails discovery", async () => {
+    const healthy = pipedreamMcpFetch(appTools("gmail", 21));
+    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      const request = input instanceof Request ? input : new Request(input, init);
+      if (new URL(request.url).pathname === "/v1/oauth/token") {
+        return Response.json({ access_token: "fake-access-token", expires_in: 3_600 });
+      }
+      if (request.headers.get("x-pd-app-slug") === "broken") {
+        return new Response("upstream down", { status: 503 });
+      }
+      return healthy(input, init);
+    });
+    const connector = new PipedreamConnector(FAKE_CONFIG, { ...TEST_NETWORK, fetch });
+    const tools = await connector.discoverTools(connectedContext("broken", "gmail"));
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "pipedream_search_tools",
+      "pipedream_load_tool",
+      "pipedream_execute_tool",
+    ]);
+  });
+
+  it("lists catalog names grouped by connected app", async () => {
+    const connector = new PipedreamConnector(FAKE_CONFIG, {
+      ...TEST_NETWORK,
+      fetch: pipedreamMcpFetch({
+        gmail: ["send_email", "list_threads"],
+        ...appTools("slack", 20),
+      }),
+    });
+    const context = connectedContext("gmail", "slack");
+    const [search] = await connector.discoverTools(context);
+
+    const events = [];
+    for await (const event of connector.execute(
+      { tool: search!.name, args: {}, executionId: "search", route: search!.route },
+      context,
+    )) {
+      events.push(event);
+    }
+
+    expect(events).toEqual([
+      {
+        type: "result",
+        data: {
+          index: [
+            { group: "gmail", names: ["list_threads", "send_email"] },
+            { group: "slack", names: expect.arrayContaining(["slack_tool_0"]) },
+          ],
+        },
+      },
+    ]);
+  });
+
+  it("routes a catalog execute call to the app that owns the tool", async () => {
+    const calls: Array<{ app: string | null; name: string; args: unknown }> = [];
+    const connector = new PipedreamConnector(FAKE_CONFIG, {
+      ...TEST_NETWORK,
+      fetch: pipedreamMcpFetch({ gmail: ["send_email"], ...appTools("slack", 20) }, calls),
+    });
+    const context = connectedContext("gmail", "slack");
+    const execute = (await connector.discoverTools(context)).at(-1)!;
+    const call = {
+      tool: execute.name,
+      args: { id: "gmail:send_email", arguments: { text: "hello" } },
+      executionId: "execute",
+      route: execute.route,
+    };
+
+    await expect(connector.resolveCall(call, context)).resolves.toEqual(
+      expect.objectContaining({
+        call: expect.objectContaining({
+          tool: "send_email",
+          args: { text: "hello" },
+          route: expect.objectContaining({ resourceId: "gmail", toolName: "send_email" }),
+        }),
+      }),
+    );
+
+    const events = [];
+    for await (const event of connector.execute(call, context)) events.push(event);
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "result",
+        data: expect.objectContaining({ isError: false }),
+      }),
+    ]);
+    expect(calls).toEqual([{ app: "gmail", name: "send_email", args: { text: "hello" } }]);
+  });
+
+  it("leaves a direct app route to the normal execute path", async () => {
+    const connector = new PipedreamConnector(FAKE_CONFIG, TEST_NETWORK);
+
+    await expect(
+      connector.resolveCall(
+        {
+          tool: "send_email",
+          args: {},
+          executionId: "direct",
+          route: { connectorId: "pipedream", resourceId: "gmail", toolName: "send_email" },
+        },
+        connectedContext("gmail"),
+      ),
+    ).resolves.toBeUndefined();
   });
 
   it("runs catalog, connection, discovery, execution, and revoke against the protocol emulator", async () => {

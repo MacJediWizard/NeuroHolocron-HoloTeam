@@ -3,8 +3,17 @@ export * from "./agent-environment.js";
 export * from "./ai-consent.js";
 export * from "./artifacts.js";
 export * from "./auto-review.js";
+export * from "./auto-review-factory.js";
 export * from "./background-job-handlers.js";
+export * from "./bot-avatar.js";
 export * from "./bot-messages.js";
+export {
+  forgetBotSecret,
+  getBotSecretMetadata,
+  listBotSecretMetadata,
+  normalizeSecretDestination,
+  storeBotSecret,
+} from "./bot-secrets.js";
 export * from "./box-emulator.js";
 export * from "./box-sandbox.js";
 export * from "./browser-emulator.js";
@@ -34,6 +43,8 @@ export * from "./computer-support.js";
 export * from "./computer-tools.js";
 export * from "./computer-update.js";
 export * from "./computer-workspace.js";
+export * from "./createos-sandbox.js";
+export * from "./current-time.js";
 export * from "./cursor-cloud-agent.js";
 export * from "./daytona-emulator.js";
 export * from "./daytona-sandbox.js";
@@ -58,6 +69,7 @@ export * from "./home.js";
 export * from "./host-aware-sandbox.js";
 export * from "./installed-connectors.js";
 export * from "./integration-provider-settings.js";
+export * from "./jev-auto-review.js";
 export * from "./job-reconciler.js";
 export * from "./keyless-http-web.js";
 export * from "./mcp-connector.js";
@@ -77,6 +89,8 @@ export * from "./none-sandbox.js";
 export * from "./openai-compatible-url.js";
 export * from "./openai-voice.js";
 export * from "./page-browser-session.js";
+export * from "./pi-catalog-availability.js";
+export * from "./pi-codex-catalog.js";
 export * from "./pi-credentials.js";
 export * from "./pi-models.js";
 export * from "./pi-oauth.js";
@@ -84,6 +98,7 @@ export * from "./pi-openai-compatible-provider.js";
 export * from "./pi-runtime.js";
 export * from "./pi-session.js";
 export * from "./pipedream-connector.js";
+export * from "./private-endpoint.js";
 export * from "./realtime.js";
 export * from "./release-watch.js";
 export * from "./remote-mcp.js";
@@ -93,6 +108,7 @@ export * from "./sandbox-provider-env.js";
 export * from "./schedule-tools.js";
 export * from "./scratchpad-context.js";
 export * from "./scratchpad-tools.js";
+export * from "./scripted-auto-review.js";
 export * from "./scripted-runtime.js";
 export * from "./scripted-voice.js";
 export * from "./secrets.js";
@@ -101,6 +117,7 @@ export { SerenityMemoryProvider } from "./serenity-memory-provider.js";
 export * from "./skill-tools.js";
 export * from "./smtp-email.js";
 export { SupermemoryMemoryProvider } from "./supermemory-memory-provider.js";
+export * from "./task-catalog.js";
 export * from "./teaching-session.js";
 export * from "./team-chat-messaging.js";
 export * from "./third-party-connector-emulator.js";

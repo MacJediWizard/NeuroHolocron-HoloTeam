@@ -147,7 +147,8 @@ export function mergeConnectedPlugins(
     const include =
       row.status === "connected" ||
       row.status === undefined ||
-      live.has(composioSlugKey(row.provider));
+      ((row.status === "pending" || row.status === "error") &&
+        live.has(composioSlugKey(row.provider)));
     if (!include) continue;
     const current = byProvider.get(composioSlugKey(row.provider));
     if (!current || composioSlugKey(current.displayName) === composioSlugKey(current.provider)) {
@@ -158,6 +159,16 @@ export function mergeConnectedPlugins(
     }
   }
   return [...byProvider.values()];
+}
+
+/** Reuse a revoked/error row only when this provider has no live sibling. */
+export function pickReusableConnection<T extends { id: string; status: string }>(
+  rows: T[],
+): T | undefined {
+  if (rows.some((row) => row.status === "connected" || row.status === "pending")) {
+    return undefined;
+  }
+  return rows.find((row) => row.status === "revoked" || row.status === "error");
 }
 
 export function planLiveConnectionSync(
@@ -172,10 +183,10 @@ export function planLiveConnectionSync(
   for (const slug of live) {
     if (connectedProviders.has(slug)) continue;
     const matches = rows.filter((row) => composioSlugKey(row.provider) === slug);
-    const reusable =
-      matches.find((row) => row.status === "pending" || row.status === "error") ??
-      matches.find((row) => row.status === "revoked") ??
-      matches[0];
+    // Recover in-flight pending/error rows only. A revoked sibling stays
+    // revoked even when another row (or the upstream listing) is live for
+    // the same slug — reviving it would reattach a dead providerRef.
+    const reusable = matches.find((row) => row.status === "pending" || row.status === "error");
     if (!reusable) continue;
     connectIds.push(reusable.id);
     connectedProviders.add(slug);
@@ -246,6 +257,7 @@ export class ComposioConnector implements ComposioProvider {
     const canonicalByKey = new Map(
       canonicalToolkits.map((toolkit) => [composioSlugKey(toolkit), toolkit]),
     );
+    const liveAccountIds = await this.listActiveAccountIds(userId, canonicalToolkits);
     const accountIdsByToolkit = new Map<string, Set<string>>();
     for (const connection of connections) {
       const accountId = connection.providerRef?.trim();
@@ -253,6 +265,9 @@ export class ComposioConnector implements ComposioProvider {
       // No-auth and legacy rows store the toolkit slug rather than a remote
       // connected-account id. Only concrete account ids can scope a session.
       if (composioSlugKey(accountId) === composioSlugKey(connection.externalId)) continue;
+      // Drop refs the provider no longer lists as ACTIVE so a revoked sibling
+      // with a deleted account cannot fail the whole tool-router session.
+      if (liveAccountIds && !liveAccountIds.has(accountId)) continue;
       const toolkit = canonicalByKey.get(composioSlugKey(connection.externalId));
       if (!toolkit) continue;
       const ids = accountIdsByToolkit.get(toolkit) ?? new Set<string>();
@@ -368,7 +383,10 @@ export class ComposioConnector implements ComposioProvider {
       );
       const result = await session.execute(call.tool, call.args ?? {});
       if (result.error) {
-        yield { type: "error", message: sanitizeComposioError(result.error) };
+        yield {
+          type: "error",
+          message: sanitizeComposioError(composioResultError(result.error, result.data)),
+        };
         return;
       }
       const logId = collectLogIds(result)[0] ?? "";
@@ -465,6 +483,26 @@ export class ComposioConnector implements ComposioProvider {
   async connectedAccountId(userId: string, slug: string): Promise<string | undefined> {
     const ids = await this.listConnectedAccountIds(userId, slug);
     return ids[0];
+  }
+
+  private async listActiveAccountIds(
+    userId: string,
+    toolkits: string[],
+  ): Promise<Set<string> | null> {
+    try {
+      const listed = await this.sdk().connectedAccounts.list({
+        userIds: [userId],
+        ...(toolkits.length > 0 ? { toolkitSlugs: toolkits } : {}),
+        statuses: ["ACTIVE"],
+      });
+      // A successful list is the allowlist, including empty. Only a thrown
+      // lookup leaves filtering skipped so an outage does not strip every pin.
+      return new Set(
+        (listed.items ?? []).map((item) => item.id).filter((id): id is string => Boolean(id)),
+      );
+    } catch {
+      return null;
+    }
   }
 
   async listConnectedAccountIds(
@@ -734,22 +772,91 @@ export function isNoAuthToolkitError(error: unknown): boolean {
   );
 }
 
+/**
+ * COMPOSIO_MULTI_EXECUTE_TOOL reports a failed batch as "N out of M tools
+ * failed" and puts each tool's real error in `data.results`. Keep those, or the
+ * model cannot tell "message not found" apart from a broken integration.
+ */
+export function composioResultError(summary: string, data: unknown): string {
+  const results = (data as { results?: unknown } | null | undefined)?.results;
+  if (!Array.isArray(results)) return summary;
+  const details = results.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const item = entry as {
+      tool_slug?: unknown;
+      error?: unknown;
+      response?: { error?: unknown } | null;
+    };
+    const error = [item.error, item.response?.error].find(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    if (!error) return [];
+    const redacted = redactConnectorText(error);
+    const detail = redacted.length > 500 ? `${redacted.slice(0, 500)}…` : redacted;
+    return [typeof item.tool_slug === "string" ? `${item.tool_slug}: ${detail}` : detail];
+  });
+  if (details.length === 0) return summary;
+  const shown = details.slice(0, 5);
+  const more = details.length - shown.length;
+  return `${summary}: ${shown.join("; ")}${more > 0 ? `; +${more} more` : ""}`;
+}
+
 export function sanitizeComposioError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return redactConnectorText(message);
 }
 
+const CREDENTIAL_FIELD_NAME =
+  "composio[_-]?api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|client[_-]?secret|api[_-]?key|password|passwd|secret";
+
+const CREDENTIAL_FIELD_KEY = new RegExp(`^(?:${CREDENTIAL_FIELD_NAME})$`, "i");
+
+const CREDENTIAL_ASSIGNMENT = new RegExp(
+  `(["']?\\b(?:${CREDENTIAL_FIELD_NAME})\\b["']?\\s*[=:]\\s*)` +
+    `(?:"(?:\\\\.|[^"\\\\])*"|'(?:\\\\.|[^'\\\\])*'|[^\\s,&;}]+(?:;(?![A-Za-z0-9_]+[=:])[^\\s,&;}]+)*)`,
+  "gi",
+);
+
 function sanitizePayload(data: unknown): unknown {
-  try {
-    return JSON.parse(redactConnectorText(JSON.stringify(data)));
-  } catch {
-    return { ok: true };
-  }
+  return redactConnectorData(data);
+}
+
+function redactConnectorData(data: unknown): unknown {
+  if (typeof data === "string") return redactConnectorText(data);
+  if (Array.isArray(data)) return data.map((item) => redactConnectorData(item));
+  if (!data || typeof data !== "object") return data;
+  const seen = new Map<string, number>();
+  return Object.fromEntries(
+    Object.entries(data).map(([key, value]) => [
+      distinctRedactedKey(redactSecretLiterals(key), seen),
+      isCredentialField(key) ? "[redacted]" : redactConnectorData(value),
+    ]),
+  );
+}
+
+function distinctRedactedKey(key: string, seen: Map<string, number>): string {
+  const count = (seen.get(key) ?? 0) + 1;
+  seen.set(key, count);
+  return count === 1 ? key : `${key}~${count}`;
+}
+
+function isCredentialField(key: string): boolean {
+  return CREDENTIAL_FIELD_KEY.test(key);
 }
 
 function redactConnectorText(value: string): string {
+  return redactSecretLiterals(
+    value
+      .replace(CREDENTIAL_ASSIGNMENT, '$1"[redacted]"')
+      .replace(
+        /COMPOSIO_API_KEY(?!\s*[=:])\s+(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\S+)/gi,
+        "COMPOSIO_API_KEY=[redacted]",
+      ),
+  );
+}
+
+function redactSecretLiterals(value: string): string {
   return value
-    .replace(/COMPOSIO_API_KEY[=:]?\s*\S+/gi, "COMPOSIO_API_KEY=[redacted]")
     .replace(/ak_[A-Za-z0-9]+/g, "[redacted]")
     .replace(/ck_[A-Za-z0-9]+/g, "[redacted]")
     .replace(/sk-or-v1-[A-Za-z0-9]+/g, "[redacted]")

@@ -47,6 +47,7 @@ it.skipIf(process.env.VERIFY_DOCKER_TEAM_SCREENS !== "1").each([false, true])(
         closeall: stopAllDesktopBrowsersCommand(env),
         viewPort: screenPorts(0, env).viewPort,
         controlPort: screenPorts(0, env).controlPort,
+        gh: "gh --version",
       };
       for (const [bot, index] of [
         ["a", 0],
@@ -63,6 +64,7 @@ it.skipIf(process.env.VERIFY_DOCKER_TEAM_SCREENS !== "1").each([false, true])(
           ? releaseDesktopCommand(`bot-${bot}`, `run-${bot}:1`, env)
           : stopExtraScreenCommand(index, `bot-${bot}`, env);
         commands[`profile${bot}`] = browserProfilePathForScreen(`bot-${bot}`, env);
+        commands[`display${bot}`] = String(screenPorts(index, env).displayNumber);
         commands[`control${bot}`] = managed
           ? desktopControlCommand(`bot-${bot}`, `run-${bot}:1`, env, true, `control-${bot}`)
           : interactiveScreenCommand(true, `control-${bot}`, screenPorts(index, env));

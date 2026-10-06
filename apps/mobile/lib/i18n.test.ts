@@ -67,12 +67,22 @@ describe("mobile i18n", () => {
       "Запусков: 3 · токенов: 12",
     );
     expect(t("Delete {name}?", { name: "Scout" })).toBe("Удалить Scout?");
+
+    resetI18nForTests("de");
+    expect(t("Account")).toBe("Konto");
+    expect(t("Sign in to {PRODUCT_NAME}", { PRODUCT_NAME })).toBe(`Bei ${PRODUCT_NAME} anmelden`);
+    expect(t("New bot")).toBe("Neuer Bot");
+    expect(t("{runs} runs · {tokens} tokens", { runs: 3, tokens: 12 })).toBe(
+      "3 Ausführungen · 12 Token",
+    );
+    expect(t("Delete {name}?", { name: "Scout" })).toBe("Scout löschen?");
   });
 
-  it("preserves interpolations in the Chinese and Russian catalogs", async () => {
+  it("preserves interpolations in every non-English catalog", async () => {
     const { ZH_MESSAGES } = await import("./locales/zh");
     const { RU_MESSAGES } = await import("./locales/ru");
-    for (const messages of [ZH_MESSAGES, RU_MESSAGES]) {
+    const { DE_MESSAGES } = await import("./locales/de");
+    for (const messages of [ZH_MESSAGES, RU_MESSAGES, DE_MESSAGES]) {
       const empty = Object.entries(messages).filter(([, value]) => !value.trim());
       const interpolationMismatches = Object.entries(messages).filter(([id, value]) => {
         const tokens = (message: string) =>
@@ -84,9 +94,10 @@ describe("mobile i18n", () => {
     }
   });
 
-  it("translates every mobile chrome t() id in both non-English catalogs", async () => {
+  it("translates every mobile chrome t() id in every non-English catalog", async () => {
     const { ZH_MESSAGES } = await import("./locales/zh");
     const { RU_MESSAGES } = await import("./locales/ru");
+    const { DE_MESSAGES } = await import("./locales/de");
     const { EMPTY_PLUGIN_CATALOG_MESSAGE, SLASH_ACTIONS } = await import("@rakazo/core");
     const { OPENAI_COMPATIBLE_BASE_URL_HINT } = await import("@rakazo/contracts");
     const mobileRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -98,6 +109,13 @@ describe("mobile i18n", () => {
       "Sign-up did not return a session",
       "{count} model",
       "{count} models",
+      // Labels the t() literal scan cannot see: built from maps or ternaries.
+      "System",
+      "Light",
+      "Dark",
+      "Allow once",
+      "Always allow",
+      "Deny",
     ]);
     for (const file of collectSourceFiles(mobileRoot)) {
       const source = readFileSync(file, "utf8");
@@ -105,7 +123,7 @@ describe("mobile i18n", () => {
         ids.add(JSON.parse(`"${match[1]}"`) as string);
       }
     }
-    for (const messages of [ZH_MESSAGES, RU_MESSAGES]) {
+    for (const messages of [ZH_MESSAGES, RU_MESSAGES, DE_MESSAGES]) {
       const missing = [...ids].filter((id) => !messages[id]?.trim()).sort();
       expect(missing).toEqual([]);
     }
@@ -140,6 +158,17 @@ describe("mobile i18n", () => {
     expect(dateLocaleForUi()).toBe("ru");
   });
 
+  it("normalizes a regional German stored locale before activation", async () => {
+    const { getItemAsync } = await import("expo-secure-store");
+    vi.mocked(getItemAsync).mockResolvedValue("de-CH");
+    const { bootstrapI18n, dateLocaleForUi, getActiveUiLocale, t } = await import("./i18n");
+
+    await expect(bootstrapI18n()).resolves.toBe("de");
+    expect(getActiveUiLocale()).toBe("de");
+    expect(t("Language")).toBe("Sprache");
+    expect(dateLocaleForUi()).toBe("de");
+  });
+
   it("keeps the last locale when rapid setUiLocale calls finish out of order", async () => {
     const { setItemAsync } = await import("expo-secure-store");
     const { applyMobileUiDirection } = await import("./ui-direction");
@@ -147,7 +176,7 @@ describe("mobile i18n", () => {
     resetI18nForTests("en");
 
     const gates = new Map<string, { release: () => void; wait: Promise<void> }>();
-    for (const locale of ["en", "zh-CN", "ru"] as const) {
+    for (const locale of ["en", "zh-CN", "ru", "de"] as const) {
       let release!: () => void;
       const wait = new Promise<void>((resolve) => {
         release = resolve;

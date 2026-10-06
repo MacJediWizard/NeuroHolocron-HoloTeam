@@ -1,5 +1,6 @@
 import type { ComputerMode, ComputerReleaseReason } from "@rakazo/contracts";
 import { useLocalSearchParams, useNavigation } from "expo-router";
+import * as ScreenOrientation from "expo-screen-orientation";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Modal, Pressable, Text, View } from "react-native";
 import {
@@ -14,12 +15,14 @@ import { NativeSymbol } from "../components/native-symbol";
 import { currentApiBase, rpc } from "../lib/api";
 import {
   COMPUTER_HEARTBEAT_MS,
+  COMPUTER_LIFECYCLE_TIMEOUT_MS,
   type ComputerStatus,
   computerLabel,
   controlLabel,
   embeddableScreenUrl,
   previewPlaceholder,
   readScreenUrl,
+  retainScreenSource,
   SCREEN_URL_OPEN_ATTEMPTS,
 } from "../lib/computer";
 import { createComputerRefresh } from "../lib/computer-refresh";
@@ -100,7 +103,8 @@ export default function Computer() {
     const showBooting = overlay && needsBoot;
     if (showBooting) setBootingCount((count) => count + 1);
     try {
-      if (needsBoot) await rpc("computer/boot", { botId });
+      if (needsBoot)
+        await rpc("computer/boot", { botId }, { timeoutMs: COMPUTER_LIFECYCLE_TIMEOUT_MS });
       if (!action.isActive()) return false;
       if (takeControl) await rpc("computer/takeover", { botId });
       if (!action.isActive()) return false;
@@ -129,6 +133,19 @@ export default function Computer() {
       force: true,
     }).catch(() => undefined);
   }, [readyBotId, botId, computer?.state, switching]);
+
+  useEffect(() => {
+    // Let the full-screen desktop rotate to landscape; the rest of the app stays portrait.
+    const lock = computerOpen
+      ? ScreenOrientation.OrientationLock.DEFAULT
+      : ScreenOrientation.OrientationLock.PORTRAIT_UP;
+    void ScreenOrientation.lockAsync(lock).catch(() => undefined);
+    return () => {
+      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(
+        () => undefined,
+      );
+    };
+  }, [computerOpen]);
 
   useEffect(() => {
     if (!botId || computer?.state !== "running") return;
@@ -183,7 +200,7 @@ export default function Computer() {
         });
       }
       if (!action.isActive()) return;
-      await rpc("bots/setComputer", { botId, mode });
+      await rpc("bots/setComputer", { botId, mode }, { timeoutMs: COMPUTER_LIFECYCLE_TIMEOUT_MS });
       if (!action.isActive()) return;
       setComputer(null);
       setScreenUrl(null);
@@ -223,11 +240,12 @@ export default function Computer() {
           <ScreenWebView
             url={embeddedScreenUrl}
             interactive={false}
-            onError={() =>
+            onError={() => {
+              refreshController.invalidateScreen();
               setScreenError(
                 t("Could not load the desktop. This device cannot reach the screen URL."),
-              )
-            }
+              );
+            }}
           />
         ) : (
           <View style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16 }}>
@@ -292,6 +310,7 @@ export default function Computer() {
         visible={booting || computerOpen}
         animationType="fade"
         presentationStyle="fullScreen"
+        supportedOrientations={["portrait", "landscape-left", "landscape-right"]}
         onRequestClose={() => {
           if (!booting) setComputerOpen(false);
         }}
@@ -350,34 +369,46 @@ export default function Computer() {
                   gap: 12,
                   borderBottomWidth: 1,
                   borderBottomColor: tokens.border,
-                  paddingHorizontal: 18,
-                  paddingVertical: 14,
+                  paddingHorizontal: 14,
+                  paddingVertical: 4,
                 }}
               >
-                <View style={{ flex: 1, minWidth: 0, gap: 8 }}>
+                <View
+                  style={{
+                    flex: 1,
+                    minWidth: 0,
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 8,
+                  }}
+                >
                   <Text
                     numberOfLines={1}
-                    style={{ color: tokens.foreground, fontSize: 15.5, fontWeight: "500" }}
+                    style={{
+                      flexShrink: 1,
+                      color: tokens.foreground,
+                      fontSize: 15.5,
+                      fontWeight: "500",
+                    }}
                   >
                     {label}
                   </Text>
                   {hasControl ? (
                     <View
                       style={{
-                        alignSelf: "flex-start",
                         borderRadius: 999,
                         backgroundColor: tokens.muted,
-                        paddingHorizontal: 11,
-                        paddingVertical: 4,
+                        paddingHorizontal: 9,
+                        paddingVertical: 3,
                       }}
                     >
-                      <Text style={{ color: tokens.success, fontSize: 13 }}>
+                      <Text numberOfLines={1} style={{ color: tokens.success, fontSize: 12 }}>
                         {t("You have control")}
                       </Text>
                     </View>
                   ) : null}
                 </View>
-                <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                   {hasControl ? (
                     <ComputerReleaseActions
                       takeoverRequested={computer?.takeoverRequested ?? false}
@@ -395,9 +426,9 @@ export default function Computer() {
                         borderWidth: 1,
                         borderColor: tokens.border,
                         paddingHorizontal: 12,
-                        paddingVertical: 8,
+                        paddingVertical: 6,
                         borderRadius: 10,
-                        minHeight: 44,
+                        minHeight: 36,
                         justifyContent: "center",
                       }}
                     >
@@ -409,8 +440,8 @@ export default function Computer() {
                     hitSlop={8}
                     onPress={() => setComputerOpen(false)}
                     style={{
-                      minWidth: 44,
-                      minHeight: 44,
+                      minWidth: 36,
+                      minHeight: 36,
                       alignItems: "center",
                       justifyContent: "center",
                     }}
@@ -429,11 +460,12 @@ export default function Computer() {
                   <ScreenWebView
                     url={embeddedScreenUrl}
                     interactive={hasControl}
-                    onError={() =>
+                    onError={() => {
+                      refreshController.invalidateScreen();
                       setScreenError(
                         t("Could not load the desktop. This device cannot reach the screen URL."),
-                      )
-                    }
+                      );
+                    }}
                   />
                 ) : (
                   <View
@@ -478,13 +510,13 @@ function ComputerReleaseActions({
           onPress={() => void onRelease(action.reason)}
           hitSlop={8}
           style={{
-            minHeight: 44,
+            minHeight: 36,
             justifyContent: "center",
             borderWidth: 1,
             borderColor: action.primary ? tokens.primary : tokens.border,
             backgroundColor: action.primary ? tokens.primary : tokens.muted,
             paddingHorizontal: 12,
-            paddingVertical: 8,
+            paddingVertical: 6,
             borderRadius: 10,
           }}
         >
@@ -507,14 +539,17 @@ function ScreenWebView({
   onError: () => void;
 }) {
   const tokens = useMobileTokens();
+  const sourceUrl = useRef(url);
+  sourceUrl.current = retainScreenSource(sourceUrl.current, url);
   return (
     <WebView
-      key={url}
-      source={{ uri: url }}
+      key={sourceUrl.current}
+      source={{ uri: sourceUrl.current }}
       style={{ flex: 1, backgroundColor: tokens.background }}
       pointerEvents={interactive ? "auto" : "none"}
       javaScriptEnabled
       domStorageEnabled
+      keyboardDisplayRequiresUserAction={false}
       allowsInlineMediaPlayback
       mediaPlaybackRequiresUserAction={false}
       originWhitelist={["*"]}

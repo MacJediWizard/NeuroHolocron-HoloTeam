@@ -34,14 +34,16 @@ import {
   executeLazyCatalogControl,
   isLazyCatalogControlRoute,
   lazyCatalogTools,
+  MAX_DESCRIPTION_LENGTH,
   resolveCatalogCall,
 } from "./lazy-tool-catalog.js";
+import { actorMayUsePrivateEndpoint } from "./private-endpoint.js";
+import type { RemoteTransportDependencies, RemoteUrlPolicy } from "./remote-mcp.js";
 import {
   assertSafeRemoteUrl,
   callRemoteMcpTool,
   createSafeRemoteFetch,
   listRemoteMcpTools,
-  type RemoteTransportDependencies,
 } from "./remote-mcp.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
@@ -94,13 +96,29 @@ type InstalledRow = {
 };
 
 export type RemoteConnectorDependencies = RemoteTransportDependencies;
+type RemoteRequestPolicy = RemoteConnectorDependencies & RemoteUrlPolicy;
 
 export class InstalledConnectorProvider implements ConnectorProvider {
   constructor(
     private readonly prisma: PrismaClient,
     private readonly secrets: EncryptedSecretStore,
     private readonly remote: RemoteConnectorDependencies = {},
+    /** Instance flag letting every user reach loopback / LAN endpoints. */
+    private readonly allowPrivateEndpoint = false,
   ) {}
+
+  /** Decided per request from the install owner's current standing, so an install saved
+   * before an ownership change cannot keep reaching private endpoints. */
+  private async remoteFor(context: AdapterContext): Promise<RemoteRequestPolicy> {
+    return {
+      ...this.remote,
+      allowPrivateEndpoint: await actorMayUsePrivateEndpoint(
+        this.prisma,
+        context.userId,
+        this.allowPrivateEndpoint,
+      ),
+    };
+  }
 
   describe() {
     return {
@@ -135,10 +153,16 @@ export class InstalledConnectorProvider implements ConnectorProvider {
       },
       orderBy: { createdAt: "asc" },
     });
+    // Only MCP installs reach the network during discovery.
+    const remote = installs.some((install) => install.kind === "mcp")
+      ? await this.remoteFor(context)
+      : this.remote;
     const tools: ConnectorTool[] = [];
     for (let offset = 0; offset < installs.length; offset += 4) {
       const groups = await Promise.all(
-        installs.slice(offset, offset + 4).map((install) => this.discoverInstall(install, context)),
+        installs
+          .slice(offset, offset + 4)
+          .map((install) => this.discoverInstall(install, context, remote)),
       );
       tools.push(...groups.flat());
     }
@@ -148,20 +172,20 @@ export class InstalledConnectorProvider implements ConnectorProvider {
   private async discoverInstall(
     install: InstalledRow,
     context: AdapterContext,
+    remote: RemoteRequestPolicy,
   ): Promise<ConnectorTool[]> {
     const catalogGroup = catalogGroupLabel(install.name, install.kind, install.id);
     try {
       if (install.kind === "mcp") {
         const config = McpConfigSchema.parse(install.config);
         const credential = await this.loadCredential(install, context);
-        const remote = await listRemoteMcpTools({
+        const tools = await listRemoteMcpTools({
+          ...remote,
           endpoint: install.source,
           headers: connectorHeaders(config, credential),
           signal: context.signal,
-          fetch: this.remote.fetch,
-          resolveHostname: this.remote.resolveHostname,
         });
-        return remote.map((tool) => ({
+        return tools.map((tool) => ({
           ...tool,
           route: {
             connectorId: "installed",
@@ -175,9 +199,13 @@ export class InstalledConnectorProvider implements ConnectorProvider {
         const config = ApiConfigSchema.parse(install.config);
         return config.operations.map((operation) => ({
           name: operation.name ?? operation.id,
-          description: operation.description ?? `${operation.method} ${operation.path}`,
+          description: operationDescription(
+            `${operation.method} ${operation.path}`,
+            operation.description,
+          ),
           inputSchema: operation.inputSchema,
-          readOnly: operation.readOnly,
+          // The stored method is authoritative: a read-only flag cannot make a write a read.
+          readOnly: operation.readOnly && operation.method === "GET",
           route: {
             connectorId: "installed",
             resourceId: install.id,
@@ -190,9 +218,12 @@ export class InstalledConnectorProvider implements ConnectorProvider {
         const config = GraphqlConfigSchema.parse(install.config);
         return config.operations.map((operation) => ({
           name: operation.name ?? operation.id,
-          description: operation.description ?? `${operation.operationType} ${operation.fieldName}`,
+          description: operationDescription(
+            `${operation.operationType} ${operation.fieldName}`,
+            operation.description,
+          ),
           inputSchema: operation.inputSchema,
-          readOnly: operation.readOnly,
+          readOnly: operation.readOnly && operation.operationType === "query",
           route: {
             connectorId: "installed",
             resourceId: install.id,
@@ -240,15 +271,15 @@ export class InstalledConnectorProvider implements ConnectorProvider {
     let credential: string | undefined;
     try {
       credential = await this.loadCredential(install, context);
+      const remote = await this.remoteFor(context);
       if (install.kind === "mcp") {
         const config = McpConfigSchema.parse(install.config);
         const result = await callRemoteMcpTool(
           {
+            ...remote,
             endpoint: install.source,
             headers: connectorHeaders(config, credential),
             signal: context.signal,
-            fetch: this.remote.fetch,
-            resolveHostname: this.remote.resolveHostname,
           },
           call.route?.toolName ?? call.tool,
           call.args,
@@ -272,7 +303,7 @@ export class InstalledConnectorProvider implements ConnectorProvider {
           call.args,
           credential,
           context.signal,
-          this.remote,
+          remote,
         );
         yield {
           type: "result",
@@ -292,7 +323,7 @@ export class InstalledConnectorProvider implements ConnectorProvider {
         call.args,
         credential,
         context.signal,
-        this.remote,
+        remote,
       );
       yield {
         type: "result",
@@ -328,16 +359,18 @@ export async function verifyMcpInstall(input: {
   credential?: string;
   signal?: AbortSignal;
   remote?: RemoteConnectorDependencies;
+  /** Loopback / LAN endpoint escape: deployment owner or instance flag. */
+  allowPrivateEndpoint?: boolean;
 }): Promise<{ config: Record<string, unknown>; toolCount: number }> {
   assertNoSensitiveQuery(input.source);
   const config = McpConfigSchema.parse(input.config);
   requireCredential(config.auth, input.credential);
   const tools = await listRemoteMcpTools({
+    ...input.remote,
     endpoint: input.source,
     headers: connectorHeaders(config, input.credential),
     signal: input.signal,
-    fetch: input.remote?.fetch,
-    resolveHostname: input.remote?.resolveHostname,
+    allowPrivateEndpoint: input.allowPrivateEndpoint,
   });
   if (tools.length === 0) throw new Error("MCP server returned no tools");
   return { config, toolCount: tools.length };
@@ -349,28 +382,26 @@ export async function prepareApiInstall(input: {
   credential?: string;
   signal?: AbortSignal;
   remote?: RemoteConnectorDependencies;
+  /** Loopback / LAN endpoint escape: deployment owner or instance flag. */
+  allowPrivateEndpoint?: boolean;
 }): Promise<{ source: string; config: Record<string, unknown>; operationCount: number }> {
   const auth = AuthSchema.parse(input.config.auth);
   requireCredential(auth, input.credential);
   const headers = PublicHeadersSchema.parse(input.config.headers);
   assertNoSensitiveQuery(input.source);
+  const remote = { ...input.remote, allowPrivateEndpoint: input.allowPrivateEndpoint };
   let source = input.source;
   let operationsValue = input.config.operations;
   if (input.config.openApi === true || input.config.openapi === true) {
     const documentUrl = new URL(input.source);
     const documentHeaders: Record<string, string> = { accept: "application/json", ...headers };
     applyCredential(documentUrl, documentHeaders, auth, input.credential);
-    const document = await loadOpenApiDocument(
-      documentUrl,
-      documentHeaders,
-      input.signal,
-      input.remote,
-    );
+    const document = await loadOpenApiDocument(documentUrl, documentHeaders, input.signal, remote);
     const imported = importOpenApiDocument(document);
     source = imported.baseUrl;
     operationsValue = imported.operations;
   }
-  await assertSafeRemoteUrl(source, input.remote?.resolveHostname);
+  await assertSafeRemoteUrl(source, remote.resolveHostname, remote);
   const config = ApiConfigSchema.parse({ auth, headers, operations: operationsValue });
   return {
     source,
@@ -383,9 +414,9 @@ async function loadOpenApiDocument(
   url: URL,
   headers: Record<string, string>,
   signal?: AbortSignal,
-  remote: RemoteConnectorDependencies = {},
+  remote: RemoteRequestPolicy = {},
 ): Promise<Record<string, unknown>> {
-  const safeFetch = createSafeRemoteFetch(remote.fetch, remote.resolveHostname);
+  const safeFetch = createSafeRemoteFetch(remote.fetch, remote.resolveHostname, remote);
   try {
     const response = await safeFetch(url, {
       headers,
@@ -488,6 +519,12 @@ export function importOpenApiDocument(document: Record<string, unknown>): {
   return { baseUrl, operations };
 }
 
+/** Lead with the validated route; the provider's prose is bounded and labeled as the provider's. */
+function operationDescription(route: string, provided: string | undefined): string {
+  const prose = provided?.trim().slice(0, MAX_DESCRIPTION_LENGTH);
+  return prose && prose !== route ? `${route}. Provider description: ${prose}` : route;
+}
+
 function connectorHeaders(
   config: z.infer<typeof McpConfigSchema>,
   credential?: string,
@@ -507,7 +544,7 @@ async function executeApiOperation(
   args: Record<string, unknown>,
   credential: string | undefined,
   signal: AbortSignal,
-  remote: RemoteConnectorDependencies,
+  remote: RemoteRequestPolicy,
 ): Promise<unknown> {
   const consumed = new Set<string>();
   const path = operation.path.replace(/\{([^}]+)\}/g, (_match, name: string) => {
@@ -550,7 +587,7 @@ async function executeApiOperation(
     headers["content-type"] = "application/json";
   }
   applyCredential(url, headers, config.auth, credential);
-  const safeFetch = createSafeRemoteFetch(remote.fetch, remote.resolveHostname);
+  const safeFetch = createSafeRemoteFetch(remote.fetch, remote.resolveHostname, remote);
   try {
     const response = await safeFetch(url, {
       method: operation.method,

@@ -11,6 +11,8 @@ import {
 } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { createApp } from "../../../apps/api/src/app.ts";
+import type { BotIntroHarness } from "./discard-bot-intro.js";
+import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
 import { sessionCookieHeader } from "./index.js";
 
 type App = { request: (input: string, init?: RequestInit) => Response | Promise<Response> };
@@ -30,6 +32,7 @@ process.env.AGENT_RUNTIME = "scripted";
 
 const hasDb = process.env.VERIFY_DATABASE === "1" && Boolean(process.env.DATABASE_URL);
 const describeWithDatabase = hasDb ? describe : describe.skip;
+let botIntroHarness: BotIntroHarness | undefined;
 
 describeWithDatabase("API authorization and resource isolation", () => {
   let handles: AppHandles;
@@ -49,6 +52,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
       composio: new ComposioEmulator(),
     });
     app = handles.app;
+    botIntroHarness = handles;
   });
 
   afterAll(async () => {
@@ -181,6 +185,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
       ["voice/status"],
       ["voice/credentials"],
       ["voice/connect", { provider: "elevenlabs", apiKey: "not-a-real-key" }],
+      ["voice/disconnect", { provider: "elevenlabs" }],
       ["voice/setVoice", { voiceId: "missing-voice" }],
       ["voice/voices", {}],
       ["voice/prepare", { text: "Nope" }],
@@ -1005,6 +1010,39 @@ describeWithDatabase("API authorization and resource isolation", () => {
     await expect(handles.prisma.space.findUnique({ where: { id: shared.id } })).resolves.toBeNull();
   });
 
+  it("keeps the Better Auth organization routes closed to product sessions", async () => {
+    const cookie = await signup(app, `org-routes-${stamp}@rakazo.test`, "Org Routes");
+    const actor = await rpc<Actor>(app, cookie, "me");
+    const marker = await rpc<Space>(app, cookie, "spaces/create", { name: "Marker" });
+
+    for (const route of ["delete", "leave", "update", "list"]) {
+      const res = await app.request(`/api/auth/organization/${route}`, {
+        method: route === "list" ? "GET" : "POST",
+        headers: {
+          ...(route === "list" ? {} : { "content-type": "application/json" }),
+          cookie,
+          origin: "http://127.0.0.1:5173",
+        },
+        body:
+          route === "list"
+            ? undefined
+            : JSON.stringify({ organizationId: actor.spaceId, data: { name: "Renamed" } }),
+      });
+      expect(res.status, route).toBe(404);
+    }
+
+    await expect(
+      handles.prisma.space.findMany({
+        where: { id: { in: [actor.spaceId, marker.id] } },
+        select: { id: true },
+      }),
+    ).resolves.toHaveLength(2);
+    await expect(
+      handles.prisma.member.count({ where: { userId: actor.userId } }),
+    ).resolves.toBeGreaterThan(0);
+    expect((await raw(app, cookie, "me")).status).toBe(200);
+  });
+
   it("blocks bot creation after empty space deletion is claimed", async () => {
     const cookie = await signup(app, `space-race-${stamp}@rakazo.test`, "Space Race");
     const actor = await rpc<Actor>(app, cookie, "me");
@@ -1285,7 +1323,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
     expect(await partialClear.text()).toMatch(/both be set or both cleared/i);
   });
 
-  it("chooses the newest duplicate provider credential when selecting a default", async () => {
+  it("binds a new default to the space preference credential, not a newer unused duplicate", async () => {
     const cookie = await signup(app, `model-duplicates-${stamp}@rakazo.test`, "Model Duplicates");
     const actor = await rpc<Actor>(app, cookie, "me");
     const olderSecret = await handles.prisma.secret.create({
@@ -1343,20 +1381,49 @@ describeWithDatabase("API authorization and resource isolation", () => {
       where: { userId: actor.userId, spaceId: actor.spaceId },
     });
     expect(preferences.filter((row) => row.isDefault).map((row) => row.credentialId)).toEqual([
-      newer.id,
+      older.id,
     ]);
-    expect(preferences.find((row) => row.credentialId === newer.id)).toMatchObject({
+    expect(preferences.find((row) => row.credentialId === older.id)).toMatchObject({
       isDefault: true,
       modelId: "newer/selected",
     });
-    expect(preferences.find((row) => row.credentialId === older.id)).toMatchObject({
-      isDefault: false,
-      modelId: "older/model",
-    });
+    expect(preferences.find((row) => row.credentialId === newer.id)).toBeUndefined();
     const listed = await rpc<ModelCredential[]>(app, cookie, "models/credentials");
     expect(
       listed.filter((row) => row.provider === "duplicate-provider").map((row) => row.id),
     ).toEqual([newer.id, older.id]);
+  });
+
+  it("never hands out session tokens and asks for the password before account deletion", async () => {
+    const email = `sessions-${stamp}@rakazo.test`;
+    const cookie = await signup(app, email, "Sessions");
+    const second = await app.request("/api/auth/sign-in/email", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
+      body: JSON.stringify({ email, password: "password12" }),
+    });
+    const { token } = (await second.json()) as { token: string };
+    expect(token).toEqual(expect.any(String));
+
+    const listed = await app.request("/api/auth/list-sessions", { headers: { cookie } });
+    expect(listed.status).toBe(200);
+    const text = await listed.text();
+    const sessions = JSON.parse(text) as Array<Record<string, unknown>>;
+    expect(sessions).toHaveLength(2);
+    for (const session of sessions) expect(session).not.toHaveProperty("token");
+    expect(text).not.toContain(token);
+    const current = (await (
+      await app.request("/api/auth/get-session", { headers: { cookie } })
+    ).json()) as { session: Record<string, unknown> };
+    expect(current.session).not.toHaveProperty("token");
+
+    const deleted = await app.request("/api/auth/delete-user", {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: "http://127.0.0.1:5173" },
+      body: JSON.stringify({}),
+    });
+    expect(deleted.status).toBe(400);
+    expect(await handles.prisma.user.findUnique({ where: { email } })).not.toBeNull();
   });
 
   it("restricts deployment settings to the deployment owner", async () => {
@@ -1530,7 +1597,7 @@ async function rpc<T>(
   if (response.status >= 400 || payload.error) {
     throw new Error(`${procedure} ${response.status}: ${payload.error?.message ?? text}`);
   }
-  return payload.json as T;
+  return discardBotIntroFromCreate(botIntroHarness, cookie, procedure, payload.json as T);
 }
 
 async function expectDenied(

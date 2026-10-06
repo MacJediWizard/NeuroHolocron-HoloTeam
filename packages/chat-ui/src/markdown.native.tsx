@@ -1,12 +1,18 @@
 import { type ColorTokens, darkTokens, type ResolvedAppearance } from "@rakazo/ui-tokens";
 import Markdown, {
+  createMarkdownIt,
   MarkdownStream,
   type RenderRules,
 } from "@ronradtke/react-native-markdown-display";
-import { memo, useMemo } from "react";
-import { Linking, StyleSheet, Text, View } from "react-native";
+import type { ReactNode } from "react";
+import { memo, useMemo, useState } from "react";
+import type { StyleProp, ViewStyle } from "react-native";
+import { Linking, ScrollView, StyleSheet, Text, View } from "react-native";
 import type { ChatMarkdownProps } from "./markdown";
-import { sanitizeMarkdownUrl } from "./markdown";
+import { linkifyExplicitUrls, plainTextLinkParts, sanitizeMarkdownUrl } from "./markdown";
+
+// One shared parser: the Markdown components memoize on its identity.
+const markdownParser = linkifyExplicitUrls(createMarkdownIt());
 
 function markdownStyles(palette: ColorTokens) {
   return StyleSheet.create({
@@ -108,9 +114,49 @@ async function openSafeLink(url: string) {
   if (await Linking.canOpenURL(safeUrl)) await Linking.openURL(safeUrl);
 }
 
+// The library lays table rows out as flex rows of equal-width cells bound to the
+// bubble width, so wide tables collapse into unreadable slivers. Give each row a
+// minimum width per column and let wide tables scroll horizontally instead.
+const TABLE_MIN_COLUMN_WIDTH = 96;
+
+function TableScrollView({
+  children,
+  style,
+}: {
+  children?: ReactNode;
+  style?: StyleProp<ViewStyle>;
+}) {
+  // Percentage widths do not resolve inside a horizontal ScrollView, so the
+  // content floor comes from the measured viewport: narrow tables still fill
+  // the bubble while wider rows grow the scrollable content.
+  const [viewportWidth, setViewportWidth] = useState(0);
+  return (
+    <ScrollView
+      horizontal
+      style={style}
+      onLayout={(event) => setViewportWidth(event.nativeEvent.layout.width)}
+    >
+      <View style={{ minWidth: viewportWidth }}>{children}</View>
+    </ScrollView>
+  );
+}
+
 // Keep links as Text so they stay inside textgroup; Pressable (a View) is laid out
 // outside the text flow and collapses the bubble height, overlapping later messages.
 const renderRules: RenderRules = {
+  table: (node, children, _parent, styleMap) => (
+    <TableScrollView key={node.key} style={styleMap._VIEW_SAFE_table}>
+      {children}
+    </TableScrollView>
+  ),
+  tr: (node, children, _parent, styleMap) => (
+    <View
+      key={node.key}
+      style={[styleMap._VIEW_SAFE_tr, { minWidth: node.children.length * TABLE_MIN_COLUMN_WIDTH }]}
+    >
+      {children}
+    </View>
+  ),
   link: (node, children, _parent, styleMap) => (
     <Text
       accessibilityRole="link"
@@ -125,6 +171,39 @@ const renderRules: RenderRules = {
   ),
 };
 
+type LinkifiedTextProps = {
+  children: string;
+  color: string;
+  linkColor: string;
+};
+
+export const LinkifiedText = memo(function LinkifiedText({
+  children,
+  color,
+  linkColor,
+}: LinkifiedTextProps) {
+  return (
+    <Text style={{ color, fontSize: 15.5, lineHeight: 23 }}>
+      {plainTextLinkParts(children).map((part, index) =>
+        part.type === "text" ? (
+          part.value
+        ) : (
+          <Text
+            accessibilityRole="link"
+            key={index}
+            style={{ color: linkColor, textDecorationLine: "underline" }}
+            onPress={() => {
+              void openSafeLink(part.href);
+            }}
+          >
+            {part.value}
+          </Text>
+        ),
+      )}
+    </Text>
+  );
+});
+
 export const ChatMarkdown = memo(function ChatMarkdown({
   children,
   streaming = false,
@@ -134,6 +213,7 @@ export const ChatMarkdown = memo(function ChatMarkdown({
   const styles = useMemo(() => markdownStyles(palette), [palette]);
   const sharedProps = {
     colorScheme,
+    markdownit: markdownParser,
     style: styles,
     rules: renderRules,
     allowedImageHandlers: ["https://", "http://"],

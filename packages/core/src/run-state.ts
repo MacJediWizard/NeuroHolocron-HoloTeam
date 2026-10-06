@@ -8,6 +8,12 @@ export const ACTIVE_RUN_STATUSES = [
   "waiting_takeover",
 ] as const satisfies readonly RunStatus[];
 const TERMINAL: RunStatus[] = ["completed", "failed", "cancelled"];
+/**
+ * These turns carry their own prompt and must not take a user message as steering.
+ * Routine and webhook runs are not the conversation. The creation intro has no tools;
+ * a message that lands during it waits, and the continuation after the intro finishes answers it.
+ */
+const NON_CONVERSATIONAL_RUN_TRIGGERS = new Set(["routine", "webhook", "created"]);
 
 const allowed: Record<RunStatus, RunStatus[]> = {
   queued: ["leased", "cancelled"],
@@ -36,6 +42,11 @@ export function isActive(status: RunStatus): boolean {
 
 export function isTerminal(status: RunStatus): boolean {
   return TERMINAL.includes(status);
+}
+
+/** Whether a run's turn is part of the thread's conversation and may take user steering. */
+export function isConversationalRun(trigger: string | null | undefined): boolean {
+  return !NON_CONVERSATIONAL_RUN_TRIGGERS.has(trigger ?? "");
 }
 
 export function nextFence(current: number): number {

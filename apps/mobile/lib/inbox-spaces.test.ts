@@ -54,6 +54,7 @@ const bot: MobileBot = {
   modelProvider: null,
   modelId: null,
   thinkingLevel: null,
+  autoSpeak: false,
 };
 
 describe("spaceInboxItems", () => {
@@ -109,6 +110,25 @@ describe("spaceInboxItems", () => {
     };
     const items = spaceInboxItems([space({ isDefault: true, bots: [bot], groups: [group] })]);
     expect(items.map((item) => item.type)).toEqual(["bot", "group"]);
+    expect(items[0]).toMatchObject({ type: "bot", depth: 0, hasChildren: false });
+  });
+
+  it("nests child bots under their parent and can collapse them", () => {
+    const parent = { ...bot, id: "parent", parentBotId: null };
+    const child = { ...bot, id: "child", parentBotId: "parent" };
+    const expanded = spaceInboxItems([space({ isDefault: true, bots: [parent, child] })]);
+    expect(expanded.map((item) => ("bot" in item ? [item.bot.id, item.depth] : item.type))).toEqual(
+      [
+        ["parent", 0],
+        ["child", 1],
+      ],
+    );
+    expect(expanded[0]).toMatchObject({ hasChildren: true });
+    const collapsed = spaceInboxItems(
+      [space({ isDefault: true, bots: [parent, child] })],
+      new Set(["parent"]),
+    );
+    expect(collapsed.map((item) => ("bot" in item ? item.bot.id : item.type))).toEqual(["parent"]);
   });
 
   it("keeps empty spaces beside a populated space", () => {

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ComposioEmulator } from "@rakazo/adapters";
 import { describe, expect, it } from "vitest";
+import { discardBotIntroRun } from "./discard-bot-intro.js";
 import { sessionCookieHeader } from "./index.js";
 import { startModelEmulator } from "./model-emulator.js";
 
@@ -41,6 +42,18 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
               ok: true,
               path: "notes/result.txt",
             });
+          },
+          response: {
+            type: "tool",
+            id: "product-shell",
+            name: "shell",
+            arguments: { command: "wc -c notes/result.txt" },
+          },
+        },
+        {
+          expect(request) {
+            const result = request.messages.findLast((message) => message.role === "tool");
+            expect(result?.tool_call_id).toBe("product-shell");
           },
           response: { type: "text", text: "Saved notes/result.txt." },
         },
@@ -88,6 +101,7 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
         instructions: "Complete the task.",
         notifyOnFinish: false,
       });
+      await discardBotIntroRun(handles, cookie, bot.id);
       await rpc(handles.app, cookie, "bots/update", {
         botId: bot.id,
         modelProvider: model.model.provider,
@@ -129,8 +143,31 @@ describe.skipIf(!databaseAvailable)("offline Pi product journey", () => {
         where: { botId: bot.id, type: "agent.tool.called" },
         select: { payload: true },
       });
-      expect(tools).toHaveLength(1);
+      expect(tools).toHaveLength(2);
       expect(JSON.stringify(tools[0])).toContain("write_file");
+      const commands = await rpc<Array<Record<string, unknown>>>(
+        handles.app,
+        cookie,
+        "computer/commands",
+        { botId: bot.id },
+      );
+      expect(commands).toEqual([
+        expect.objectContaining({
+          executionId: "product-write",
+          kind: "write_file",
+          command: "notes/result.txt",
+          status: "done",
+          exitCode: 0,
+          bytes: 5,
+        }),
+        expect.objectContaining({
+          executionId: "product-shell",
+          kind: "shell",
+          command: "wc -c notes/result.txt",
+          status: "done",
+          exitCode: 0,
+        }),
+      ]);
     } finally {
       try {
         await stop?.();

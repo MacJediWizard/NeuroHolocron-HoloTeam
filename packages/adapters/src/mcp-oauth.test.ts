@@ -14,6 +14,19 @@ const TEST_NETWORK = {
   resolveHostname: async () => [{ address: "203.0.113.10", family: 4 }],
 };
 
+function logicalHref(input: string | URL | Request, init?: RequestInit): string {
+  const url = new URL(
+    typeof input === "string" || input instanceof URL ? String(input) : input.url,
+  );
+  const host = new Headers(input instanceof Request ? input.headers : init?.headers).get("host");
+  if (host) url.host = host;
+  return url.href;
+}
+
+function deploymentOwner(ownerUserId: string) {
+  return { findUnique: vi.fn(async () => ({ ownerUserId })) };
+}
+
 function oauthSessionStore() {
   return {
     count: vi.fn().mockResolvedValue(0),
@@ -141,7 +154,7 @@ describe("MCP OAuth", () => {
         "fetch",
         vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
           const request = input instanceof Request ? input : new Request(input, init);
-          const url = new URL(request.url);
+          const url = new URL(logicalHref(input, init));
           requests.push(`${request.method} ${url.toString()}`);
 
           if (url.href === `${mcpOrigin}/mcp` && request.method === "POST") {
@@ -228,6 +241,7 @@ describe("MCP OAuth", () => {
           deleteMany: vi.fn().mockResolvedValue({ count: 1 }),
         },
         mcpOAuthSession: oauthSessionStore(),
+        deploymentSettings: deploymentOwner("user-1"),
         $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
       };
       const broker = new McpOAuthBroker(prisma as never, { put } as never, TEST_NETWORK);
@@ -285,8 +299,9 @@ describe("MCP OAuth", () => {
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const request = input instanceof Request ? input : new Request(input, init);
-        fetchCalls.push(`${request.method} ${request.url}`);
-        if (request.url === "http://insecure.example.test/mcp") {
+        const url = logicalHref(input, init);
+        fetchCalls.push(`${request.method} ${url}`);
+        if (url === "http://insecure.example.test/mcp") {
           return new Response(null, {
             status: 401,
             headers: {
@@ -295,7 +310,7 @@ describe("MCP OAuth", () => {
             },
           });
         }
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+        throw new Error(`Unexpected request: ${request.method} ${url}`);
       }),
     );
     const prisma = {
@@ -324,6 +339,69 @@ describe("MCP OAuth", () => {
     expect(fetchCalls).toEqual([]);
   });
 
+  it.each([
+    ["http://localhost:3100/api/auth/get-session", /HTTPS/],
+    ["http://127.0.0.1:3100/mcp", /HTTPS/],
+    ["https://localhost:3100/mcp", /private/],
+  ])("refuses loopback %s for a user who is not the deployment owner", async (endpoint, reason) => {
+    const fetch = vi.fn(async () => new Response("internal handler body", { status: 405 }));
+    const prisma = {
+      mcpServer: {
+        findFirst: vi.fn().mockResolvedValue({ id: "server-1", endpoint, secretId: null }),
+      },
+      secret: { findFirst: vi.fn() },
+      mcpOAuthSession: oauthSessionStore(),
+      deploymentSettings: deploymentOwner("owner"),
+    };
+    const broker = new McpOAuthBroker(prisma as never, { put: vi.fn() } as never, {
+      fetch,
+      resolveHostname: async () => [{ address: "127.0.0.1", family: 4 }],
+    });
+
+    await expect(
+      broker.begin({
+        serverId: "server-1",
+        spaceId: "workspace-1",
+        userId: "user-1",
+        redirectUri: "http://127.0.0.1:5173/mcp/oauth/callback",
+      }),
+    ).rejects.toThrow(reason);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("does not reflect upstream response text when starting OAuth fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("UPSTREAM_BODY_MARKER internal detail", { status: 500 })),
+    );
+    const prisma = {
+      mcpServer: {
+        findFirst: vi.fn().mockResolvedValue({
+          id: "server-1",
+          endpoint: "https://mcp.example.test/mcp",
+          secretId: null,
+        }),
+      },
+      secret: { findFirst: vi.fn() },
+      mcpOAuthSession: oauthSessionStore(),
+    };
+    const broker = new McpOAuthBroker(prisma as never, { put: vi.fn() } as never, TEST_NETWORK);
+
+    const error = await broker
+      .begin({
+        serverId: "server-1",
+        spaceId: "workspace-1",
+        userId: "user-1",
+        redirectUri: "http://127.0.0.1:5173/mcp/oauth/callback",
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe("Could not start MCP OAuth");
+  });
+
   it("completes a persisted OAuth session after the API process restarts", async () => {
     const sessionId = "5d259fd9-b9fa-478e-a268-cc778816a043";
     let tokenRequestBody = "";
@@ -331,8 +409,9 @@ describe("MCP OAuth", () => {
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const request = input instanceof Request ? input : new Request(input, init);
-        if (request.url !== "https://auth.example.test/token") {
-          throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+        const url = logicalHref(input, init);
+        if (url !== "https://auth.example.test/token") {
+          throw new Error(`Unexpected request: ${request.method} ${url}`);
         }
         tokenRequestBody = await request.text();
         return Response.json({ access_token: "fresh", token_type: "bearer" });
@@ -556,8 +635,9 @@ describe("MCP OAuth", () => {
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const request = input instanceof Request ? input : new Request(input, init);
-        requestedUrls.push(request.url);
-        if (request.url === "https://mcp.example.test/mcp") {
+        const url = logicalHref(input, init);
+        requestedUrls.push(url);
+        if (url === "https://mcp.example.test/mcp") {
           return new Response(null, {
             status: 401,
             headers: {
@@ -566,7 +646,7 @@ describe("MCP OAuth", () => {
             },
           });
         }
-        if (request.url.startsWith("https://mcp.example.test/.well-known/")) {
+        if (url.startsWith("https://mcp.example.test/.well-known/")) {
           return new Response(null, {
             status: 302,
             headers: {
@@ -574,7 +654,7 @@ describe("MCP OAuth", () => {
             },
           });
         }
-        throw new Error(`Unexpected request: ${request.method} ${request.url}`);
+        throw new Error(`Unexpected request: ${request.method} ${url}`);
       }),
     );
     const prisma = {
@@ -609,7 +689,7 @@ describe("MCP OAuth", () => {
       "fetch",
       vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
         const request = input instanceof Request ? input : new Request(input, init);
-        const url = new URL(request.url);
+        const url = new URL(logicalHref(input, init));
         requests.push(`${request.method} ${url.toString()}`);
 
         if (url.href === "https://mcp.example.test/mcp" && request.method === "POST") {
@@ -689,7 +769,7 @@ describe("MCP setup with an existing access token", () => {
     async (endpoint) => {
       const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
         const request = new Request(input, init);
-        expect(request.url).toBe(endpoint);
+        expect(logicalHref(input, init)).toBe(endpoint);
         expect(request.headers.get("authorization")).toBe("Bearer fake-executor-token");
         if (request.method !== "POST") return new Response(null, { status: 405 });
         const body = (await request.json()) as { id?: number; method: string };
@@ -711,6 +791,7 @@ describe("MCP setup with an existing access token", () => {
         },
         secret: { findFirst: vi.fn(async () => ({ id: "secret", ciphertext: "encrypted" })) },
         mcpOAuthSession: oauthSessionStore(),
+        deploymentSettings: deploymentOwner("user"),
       };
       const secrets = {
         load: vi.fn(() => JSON.stringify({ secret: "fake-executor-token" })),

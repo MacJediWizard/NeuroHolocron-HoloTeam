@@ -344,6 +344,8 @@ EVAL_HELPERS = r"""
 (() => {
   if (window.__rakazoPageBrowser) return true;
   const refMap = new Map();
+  // Fields holding a saved login: snapshots never report their values, whatever their type.
+  const loginFilled = new WeakSet();
   // New snapshots/documents never recycle references. Retain exact nodes, not selectors.
   function newRef() {
     return `e${Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, "0")).join("")}`;
@@ -424,7 +426,7 @@ EVAL_HELPERS = r"""
           ref,
           role: roleOf(el),
           name: String(nameOf(el)).slice(0, 200),
-          value: el.type === "password" ? undefined
+          value: el.type === "password" || loginFilled.has(el) ? undefined
             : ["checkbox", "radio"].includes(el.type) ? (el.checked ? "checked" : "unchecked")
             : "value" in el ? String(el.value ?? "").slice(0, 2000) : undefined,
           tag: el.tagName.toLowerCase(),
@@ -454,10 +456,26 @@ EVAL_HELPERS = r"""
       el.click();
       return { url: location.href, title: (document.title || "").slice(0, 200) };
     },
-    fill(ref, value) {
+    fill(ref, value, origin) {
+      // Checked in the same evaluation as the fill, so a navigation cannot slip in between.
+      // Private-LAN plain HTTP is not a login target, even when the page origin matches.
+      if (origin) {
+        let saved = null;
+        try { saved = new URL(origin); } catch { /* rejected below */ }
+        if (!saved || saved.protocol !== "https:" || location.protocol !== "https:") {
+          throw new Error("Website logins can only be filled on HTTPS.");
+        }
+        if (location.origin !== saved.origin) {
+          throw new Error("The page is not on the site this login was saved for.");
+        }
+      }
       const el = this.resolve(ref);
       if (!el) throw new Error(`Unknown element ref: ${ref}`);
       if (el.readOnly) throw new Error("Element is read-only");
+      // A username is an input. Textareas, search boxes, and editable page content stay out.
+      if (origin && !(el instanceof HTMLInputElement && ["text", "email", "password", "tel"].includes(el.type))) {
+        throw new Error("A saved login can only be typed into a text, email, password, or telephone field.");
+      }
       el.focus();
       if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement || el instanceof HTMLSelectElement) {
         if (el instanceof HTMLInputElement && !["text", "search", "email", "url", "tel", "password", "number"].includes(el.type)) {
@@ -469,6 +487,8 @@ EVAL_HELPERS = r"""
         if (el.value !== String(value)) throw new Error("Input did not accept the requested value");
         el.dispatchEvent(new Event("input", { bubbles: true }));
         el.dispatchEvent(new Event("change", { bubbles: true }));
+        if (origin) loginFilled.add(el);
+        else loginFilled.delete(el);
       } else if (el.isContentEditable) {
         el.textContent = String(value);
         el.dispatchEvent(new Event("input", { bubbles: true }));
@@ -480,7 +500,11 @@ EVAL_HELPERS = r"""
     type(ref, text) {
       const el = this.resolve(ref);
       if (!el) throw new Error(`Unknown element ref: ${ref}`);
-      return this.fill(ref, `${"value" in el ? el.value : el.textContent || ""}${text}`);
+      // Appending keeps any saved login in the field, so the field stays hidden from snapshots.
+      const holdsLogin = loginFilled.has(el);
+      const result = this.fill(ref, `${"value" in el ? el.value : el.textContent || ""}${text}`);
+      if (holdsLogin) loginFilled.add(el);
+      return result;
     },
   };
   return true;
@@ -558,6 +582,10 @@ def act(client: CdpClient, session_id: str, actions: list[dict[str, Any]]) -> di
             raise RuntimeError("Element ref is required")
         if step["kind"] != "click" and not isinstance(step.get("text"), str):
             raise RuntimeError("Text is required")
+        if step.get("origin") is not None and (
+            step["kind"] != "fill" or not isinstance(step["origin"], str)
+        ):
+            raise RuntimeError("An origin applies only to fill")
     ensure_helpers(client, session_id)
     completed = 0
     uncertain = False
@@ -570,6 +598,8 @@ def act(client: CdpClient, session_id: str, actions: list[dict[str, Any]]) -> di
             arguments = json.dumps(ref)
             if kind != "click":
                 arguments += ", " + json.dumps(step["text"])
+            if step.get("origin"):
+                arguments += ", " + json.dumps(step["origin"])
             uncertain = True
             data = eval_json(client, session_id, f"window.__rakazoPageBrowser.{kind}({arguments})")
             if not isinstance(data, dict):
@@ -592,7 +622,21 @@ def exit_when_stdin_closes() -> None:
         os._exit(130)
 
 
+def read_stdin_line() -> str:
+    """Read one line from fd 0 unbuffered, leaving the rest of stdin for the EOF watcher."""
+    data = bytearray()
+    while len(data) < 1_048_576:
+        chunk = os.read(0, 1)
+        if not chunk or chunk == b"\n":
+            break
+        data += chunk
+    return data.decode("utf-8")
+
+
 def run(argv: list[str]) -> int:
+    stdin_args = (
+        read_stdin_line() if os.environ.get("RAKAZO_BROWSER_ARGS_STDIN") == "1" else None
+    )
     if os.environ.get("RAKAZO_BROWSER_WATCH_STDIN") == "1":
         threading.Thread(target=exit_when_stdin_closes, daemon=True).start()
     if len(argv) < 2:
@@ -608,8 +652,9 @@ def run(argv: list[str]) -> int:
         return 2
     command = argv[1]
     args: dict[str, Any] = {}
-    if len(argv) >= 3 and argv[2].strip():
-        args = json.loads(argv[2])
+    raw_args = stdin_args if stdin_args is not None else (argv[2] if len(argv) >= 3 else "")
+    if raw_args.strip():
+        args = json.loads(raw_args)
     port = cdp_port()
     try:
         wait_for_cdp(port)

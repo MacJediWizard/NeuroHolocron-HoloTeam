@@ -512,9 +512,10 @@ async function installBundledRenderer(
   targetUrl: string,
   targetSession: Session,
   partition: string | null,
+  managedLocalStack: boolean,
 ) {
   if (!app.isPackaged || process.env.RAKAZO_DISABLE_BUNDLED_RENDERER === "1") return;
-  if (!servesBundledRenderer(targetUrl)) return;
+  if (!servesBundledRenderer(targetUrl, managedLocalStack)) return;
   const webUrl = new URL(targetUrl);
   const installationKey = `${partition ?? "default"}:${webUrl.protocol}`;
   if (bundledRendererInstallations.has(installationKey)) return;
@@ -524,6 +525,10 @@ async function installBundledRenderer(
     const forward = () => {
       return targetSession.fetch(request, forwardedRendererRequestInit(request, webUrl.origin));
     };
+    // Mode can change on the same origin/session; only managed "new" keeps the overlay.
+    if (partition !== "local-server-settings" && currentSetup?.mode !== "new") {
+      return forward();
+    }
     if (request.method !== "GET" && request.method !== "HEAD") {
       return forward();
     }
@@ -564,7 +569,7 @@ function oauthPopupWindowOptions() {
     frame: true,
     titleBarStyle: "default" as const,
     autoHideMenuBar: true,
-    backgroundColor: "#0D0D0E",
+    backgroundColor: "#0B0C0E",
     webPreferences: {
       preload: "",
       nodeIntegration: false,
@@ -648,7 +653,7 @@ async function showLocalSettings() {
     const partition = "local-server-settings";
     const targetSession = session.fromPartition(partition);
     installSessionPermissions(targetSession, () => null);
-    await installBundledRenderer(url, targetSession, partition);
+    await installBundledRenderer(url, targetSession, partition, true);
     const win = new BrowserWindow({
       ...browserWindowOptions(process.platform),
       title: "Local Server Settings",
@@ -878,7 +883,12 @@ async function openAppOnce(targetUrl: string) {
     if (documentError !== null) {
       throw new Error(documentError);
     }
-    await installBundledRenderer(targetUrl, target.value, target.partition);
+    await installBundledRenderer(
+      targetUrl,
+      target.value,
+      target.partition,
+      currentSetup?.mode === "new",
+    );
     const created = createWindow(targetUrl, target.partition);
     win = created.win;
     await created.loaded;

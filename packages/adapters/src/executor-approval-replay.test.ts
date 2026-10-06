@@ -2,6 +2,7 @@ import type { ConnectorTool } from "@rakazo/adapter-kit";
 import { approvalEffectKey } from "@rakazo/core/node/approval-effect-key";
 import { describe, expect, it } from "vitest";
 import {
+  approvalReplayResourceError,
   approvedCatalogReplay,
   approvedReplayArgs,
   boundDirectApprovalRequest,
@@ -76,7 +77,7 @@ describe("executor approval replay", () => {
         {
           kind: "mcp__demo__send_message",
           request: catalogApprovalRequest(
-            "mcp_execute_tool",
+            "connectors_execute_tool",
             { id: "server-1:send_message", arguments: { text: "approved exactly" } },
             "__rakazoCatalogTool",
           ),
@@ -86,7 +87,7 @@ describe("executor approval replay", () => {
     );
 
     expect(continuation).toContain(
-      'mcp_execute_tool: {"id":"server-1:send_message","arguments":{"text":"approved exactly"}}',
+      'connectors_execute_tool: {"id":"server-1:send_message","arguments":{"text":"approved exactly"}}',
     );
     expect(continuation).not.toContain("__rakazoCatalogTool");
   });
@@ -166,6 +167,129 @@ describe("executor approval replay", () => {
       'installed_execute_tool: {"id":"install-A:notes.write","arguments":{"text":"approved exactly"}}',
     );
     expect(afterGrowth).not.toContain("notes.write:");
+  });
+
+  it("renders a catalog wrapper continuation when a bound MCP tool is no longer exposed", () => {
+    const request = boundDirectApprovalRequest(
+      { connectorId: "mcp", resourceId: "server-1", toolName: "send_message" },
+      { text: "approved exactly" },
+      "__rakazoCatalogTool",
+    );
+    const afterGrowth = buildApprovalContinuation(
+      [{ kind: "mcp__demo__send_message", request }],
+      JSON.stringify,
+      { exposedToolNames: new Set(["connectors_execute_tool"]) },
+    );
+
+    expect(afterGrowth).toContain(
+      'connectors_execute_tool: {"id":"server-1:send_message","arguments":{"text":"approved exactly"}}',
+    );
+    expect(afterGrowth).not.toContain("mcp__demo__send_message:");
+    expect(afterGrowth).not.toContain("mcp_execute_tool:");
+  });
+
+  it("resumes a legacy mcp_execute_tool envelope as connectors_execute_tool when that wrapper is exposed", () => {
+    const route = {
+      connectorId: "mcp",
+      resourceId: "server-1",
+      toolName: "send_message",
+      resourceRevision: 2,
+    };
+    const request = catalogApprovalRequest(
+      "mcp_execute_tool",
+      { id: "server-1:send_message", arguments: { text: "approved exactly" } },
+      "__rakazoCatalogTool",
+      route,
+    );
+    const continuation = buildApprovalContinuation(
+      [{ kind: "mcp__demo__send_message", request }],
+      JSON.stringify,
+      { exposedToolNames: new Set(["connectors_execute_tool"]) },
+    );
+
+    expect(continuation).toContain(
+      'connectors_execute_tool: {"id":"server-1:send_message","arguments":{"text":"approved exactly"}}',
+    );
+    expect(continuation).not.toContain("mcp_execute_tool:");
+    const queue = createApprovedEffectReplayQueue([{ kind: "mcp__demo__send_message", request }]);
+    const replay = approvedCatalogReplay(
+      queue,
+      "connectors_execute_tool",
+      "__rakazoCatalogTool",
+      true,
+    );
+    expect(replay.error).toBeUndefined();
+    expect(replay.args).toEqual({
+      id: "server-1:send_message",
+      arguments: { text: "approved exactly" },
+    });
+    const resolved = resolveCatalogCall(
+      {
+        tool: "connectors_execute_tool",
+        args: replay.args!,
+        executionId: "approved",
+        route: { connectorId: "mcp", toolName: "__catalog_execute" },
+      },
+      catalogEntries([
+        {
+          name: "mcp__demo__send_message",
+          description: "Send a message",
+          inputSchema: {
+            type: "object",
+            properties: { text: { type: "string" } },
+            required: ["text"],
+          },
+          route,
+        },
+      ]),
+    );
+    expect(resolved.call.args).toEqual({ text: "approved exactly" });
+    expect(resolved.tool.route).toEqual(route);
+    expect(
+      approvalReplayResourceError(resolved.tool.name, true, request, route, "__rakazoCatalogTool"),
+    ).toBeUndefined();
+    expect(
+      approvalReplayResourceError(
+        resolved.tool.name,
+        true,
+        request,
+        { ...route, resourceRevision: 3 },
+        "__rakazoCatalogTool",
+      ),
+    ).toContain("different connector resource");
+    expect(
+      approvalReplayResourceError(
+        resolved.tool.name,
+        true,
+        request,
+        { ...route, resourceId: "server-2" },
+        "__rakazoCatalogTool",
+      ),
+    ).toContain("different connector resource");
+    expect(
+      approvedReplayArgs(queue.take(resolved.tool.name), resolved.call.args, "__rakazoCatalogTool"),
+    ).toEqual({ text: "approved exactly" });
+    expect(queue.assertDrained).not.toThrow();
+  });
+
+  it.each([
+    ["mcp_execute_tool", "installed_execute_tool"],
+    ["installed_execute_tool", "connectors_execute_tool"],
+    ["connectors_execute_tool", "mcp_execute_tool"],
+  ])("does not alias approval %s to unrelated wrapper %s", (stored, called) => {
+    const request = catalogApprovalRequest(
+      stored,
+      { id: "server-1:send_message", arguments: {} },
+      "__rakazoCatalogTool",
+    );
+    const queue = createApprovedEffectReplayQueue([{ kind: "mcp__demo__send_message", request }]);
+    expect(approvedCatalogReplay(queue, called, "__rakazoCatalogTool", true).error).toContain(
+      "must be replayed before",
+    );
+    expect(queue.nextRequest()).toBe(request);
+    expect(
+      approvedCatalogReplay(queue, "connectors_execute_tool", "__rakazoCatalogTool", false),
+    ).toEqual({});
   });
 
   it("renders a uniquified direct name when collision renames the tool under the direct limit", () => {

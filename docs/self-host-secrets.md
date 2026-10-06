@@ -70,6 +70,7 @@ From `.env.images.example` (images installer). Leave blank if unused:
 | Key(s) | When needed |
 | --- | --- |
 | `OPENROUTER_API_KEY` | Deployment-wide OpenRouter models |
+| `TYPESAFE_API_KEY` | Optional TypeSafe Jev Auto Review verifier (`RAKAZO_AUTO_REVIEW_PROVIDER=jev`) |
 | `COMPOSIO_API_KEY` | Composio managed catalog |
 | `E2B_API_KEY` / `DAYTONA_API_KEY` / `BOX_API_KEY` | Remote computers when `SANDBOX_PROVIDER` is not `docker` |
 | `SMTP_URL` / `EMAIL_FROM` | Password-recovery email |
@@ -85,10 +86,10 @@ example.
 bash install-images.sh --prepare-only   # creates .env + fills empties
 # inspect key NAMES only if debugging; never log values
 bash install-images.sh                  # pull + up; preserves .env
-curl -fsS http://127.0.0.1:3100/health
+curl -fsS http://127.0.0.1:3100/internal/health
 ```
 
-If `sandbox` in `/health` is `"none"` or the supervisor never becomes healthy,
+If `sandbox` in `/internal/health` is `"none"` or the supervisor never becomes healthy,
 check that `SANDBOX_SUPERVISOR_TOKEN` is set and non-empty for the Docker
 computer path. A missing token is a setup failure, not an "optional tighten
 later" item.

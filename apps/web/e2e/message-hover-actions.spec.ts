@@ -1,6 +1,15 @@
 import { expect, type Locator, type Page, type Route, test } from "@playwright/test";
 import { captureScreenshot, completeOnboarding, signup } from "./helpers";
 
+/** Submit from the Send control so an in-flight prior send cannot swallow Enter. */
+async function sendComposerMessage(page: Page, composer: Locator, text: string) {
+  await composer.fill(text);
+  const send = page.getByRole("button", { name: "Send", exact: true });
+  await expect(send).toBeEnabled();
+  await send.click();
+  await expect(composer).toHaveValue("");
+}
+
 async function revealHoverRail(row: Locator): Promise<Locator> {
   const rail = row.getByTestId("message-hover-rail");
   await expect
@@ -15,6 +24,29 @@ async function revealHoverRail(row: Locator): Promise<Locator> {
   // Incoming replies can move the row away from the pointer; keep real focus for screenshots.
   await rail.getByRole("button", { name: "More" }).focus();
   return rail;
+}
+
+/** Touch drops the side gutter, so the bubble cap stays wider than the row minus 8rem. */
+async function expectNoTouchSideGutter(frame: Locator) {
+  const widths = await frame.evaluate((element) => {
+    const parentWidth = element.parentElement?.getBoundingClientRect().width ?? 0;
+    const maxWidth = getComputedStyle(element).maxWidth;
+    const rem = Number.parseFloat(getComputedStyle(document.documentElement).fontSize);
+    const parsed = Number.parseFloat(maxWidth);
+    // Touch caps are percentages (84% / 88%). Resolve them against the parent
+    // before comparing with the pixel gutter.
+    const max = maxWidth.endsWith("%") ? (parsed / 100) * parentWidth : parsed;
+    return {
+      parentWidth,
+      max,
+      maxWidth,
+      gutter: 8 * rem,
+    };
+  });
+  expect(widths.parentWidth).toBeGreaterThan(widths.gutter);
+  expect(widths.max, `max-width ${widths.maxWidth}`).toBeGreaterThan(
+    widths.parentWidth - widths.gutter,
+  );
 }
 
 /** Park the pointer outside the message and blur focus so the rail returns to opacity-0. */
@@ -95,8 +127,7 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   const replyText = `hover-reply-${stamp}`;
   const composer = page.getByRole("combobox", { name: /^Message/ });
   await expect(composer).toBeVisible();
-  await composer.fill(parentText);
-  await composer.press("Enter");
+  await sendComposerMessage(page, composer, parentText);
 
   const parentRow = transcript.locator(`[data-message-id]`).filter({ hasText: parentText }).first();
   await expect(parentRow).toBeVisible({ timeout: 20_000 });
@@ -145,8 +176,7 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
 
   // Long user bubble: rail stays ~6px beside the bubble edge, not the full row width.
   const longText = `hover-long-${stamp}-${"x".repeat(220)}`;
-  await composer.fill(longText);
-  await composer.press("Enter");
+  await sendComposerMessage(page, composer, longText);
   const longRow = transcript
     .locator(`[data-message-id]`)
     .filter({ hasText: longText.slice(0, 40) })
@@ -162,6 +192,7 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
       return Math.abs(frameBox.x - (railBox.x + railBox.width));
     })
     .toBeLessThan(8);
+  await captureScreenshot(page, testInfo, "message-bubble-wide-desktop");
 
   // Time appears at the opposite row edge on hover, outside More.
   await revealHoverRail(parentRow);
@@ -242,8 +273,7 @@ test("message hover shows beside-bubble actions; reply links to parent", async (
   await expect(replyChip).toBeVisible();
   await expect(replyChip).toContainText(/Replying to/);
 
-  await composer.fill(replyText);
-  await composer.press("Enter");
+  await sendComposerMessage(page, composer, replyText);
   await expect(replyChip).toHaveCount(0);
 
   const replyRow = transcript.locator(`[data-message-id]`).filter({ hasText: replyText }).first();
@@ -274,8 +304,7 @@ test("reply preview jumps to parent outside the loaded page", async ({ page }) =
   const replyText = `page-reply-${stamp}`;
   const composer = page.getByRole("combobox", { name: /^Message/ });
   await expect(composer).toBeVisible();
-  await composer.fill(parentText);
-  await composer.press("Enter");
+  await sendComposerMessage(page, composer, parentText);
 
   const transcript = page.getByTestId("transcript");
   const parentRow = transcript.locator(`[data-message-id]`).filter({ hasText: parentText }).first();
@@ -285,8 +314,7 @@ test("reply preview jumps to parent outside the loaded page", async ({ page }) =
 
   await parentRow.hover();
   await parentRow.getByRole("button", { name: "Reply" }).click();
-  await composer.fill(replyText);
-  await composer.press("Enter");
+  await sendComposerMessage(page, composer, replyText);
 
   const replyRow = transcript.locator(`[data-message-id]`).filter({ hasText: replyText }).first();
   await expect(replyRow).toBeVisible({ timeout: 20_000 });
@@ -350,6 +378,103 @@ test("reply preview jumps to parent outside the loaded page", async ({ page }) =
   await expect(page.locator(`[data-message-id="${parentId}"]`)).toContainText(parentText);
 });
 
+test("hover time shows the date for a message from an earlier day", async ({ page }, testInfo) => {
+  const stamp = Date.now();
+  await signup(page, `hover-date-${stamp}@rakazo.test`, "password12", "Hover Date");
+  await completeOnboarding(page);
+
+  await expect(page.getByText("What do you want me on first?", { exact: true })).toBeVisible({
+    timeout: 20_000,
+  });
+  await page.getByRole("button", { name: /Day-to-day work/ }).click();
+  const botText = page.getByText(/Got it\./);
+  await expect(botText).toBeVisible({ timeout: 20_000 });
+  const row = page
+    .getByTestId("transcript")
+    .locator("[data-message-id]")
+    .filter({ has: botText })
+    .first();
+  const messageId = await row.getAttribute("data-message-id");
+  if (!messageId) throw new Error("missing message id");
+
+  // Messages are created today, so rewrite createdAt or the hover label stays time-only.
+  const createdAt = await page.evaluate(() => {
+    const date = new Date();
+    date.setDate(date.getDate() - 1);
+    date.setHours(15, 4, 0, 0);
+    return date.toISOString();
+  });
+  await page.evaluate(() => {
+    localStorage.setItem("rakazo.uiLocale", "en");
+  });
+
+  type HydrateMessage = { id?: string; createdAt?: string };
+  type HydrateBody = {
+    json?: {
+      messages?: HydrateMessage[];
+      thread?: { messages?: HydrateMessage[] };
+    };
+  };
+  const rewriteCreatedAt = (body: HydrateBody) => {
+    const messages = [...(body.json?.messages ?? []), ...(body.json?.thread?.messages ?? [])];
+    for (const message of messages) {
+      if (message.id === messageId) message.createdAt = createdAt;
+    }
+  };
+  const hydrateRpc = /\/rpc\/(bootstrap|threads\/get)(?:\?|$)/;
+  const rewriteHydrate = async (route: Route) => {
+    try {
+      const response = await route.fetch();
+      const body = (await response.json()) as HydrateBody;
+      rewriteCreatedAt(body);
+      await route.fulfill({
+        status: response.status(),
+        headers: response.headers(),
+        body: JSON.stringify(body),
+      });
+    } catch (error) {
+      if (/already handled|Target closed|Request context disposed/i.test(String(error))) return;
+      throw error;
+    }
+  };
+  await page.route(hydrateRpc, rewriteHydrate);
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await expect(page.getByRole("combobox", { name: /^Message/ })).toBeVisible({ timeout: 20_000 });
+  const datedRow = page.locator(`[data-message-id="${messageId}"]`);
+  await expect(datedRow).toBeVisible({ timeout: 20_000 });
+  await expect.poll(() => page.evaluate(() => document.documentElement.lang)).toBe("en");
+  await datedRow.scrollIntoViewIfNeeded();
+  await revealHoverRail(datedRow);
+
+  const time = datedRow.getByTestId("message-hover-time");
+  await expect(time).toHaveCSS("opacity", "1");
+  await expect(time).toHaveAttribute("datetime", createdAt);
+  const expected = await page.evaluate((iso) => {
+    const date = new Date(iso);
+    const now = new Date();
+    const locale = document.documentElement.lang || "en";
+    const sameYear = date.getFullYear() === now.getFullYear();
+    const parts = new Intl.DateTimeFormat(locale, {
+      month: "short",
+      day: "numeric",
+      ...(sameYear ? {} : { year: "numeric" }),
+      hour: "numeric",
+      minute: "2-digit",
+    }).formatToParts(date);
+    return {
+      day: parts.find((item) => item.type === "day")?.value ?? "",
+      month: parts.find((item) => item.type === "month")?.value ?? "",
+    };
+  }, createdAt);
+  expect(expected.month).not.toBe("");
+  expect(expected.day).not.toBe("");
+  const month = expected.month.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const day = expected.day.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  await expect(time).toHaveText(new RegExp(`${month}\\s+${day}\\b`));
+  await captureScreenshot(page, testInfo, "message-hover-time-earlier-day");
+});
+
 test.describe("touch message actions", () => {
   test.use({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 844 } });
 
@@ -372,7 +497,17 @@ test.describe("touch message actions", () => {
       .first();
     const rail = row.getByTestId("message-hover-rail");
     await expect(rail).toHaveCSS("opacity", "1");
-    await expect(rail.getByRole("button", { name: "Reply", exact: true })).toBeHidden();
+    await expect(rail.getByRole("button", { name: "Reply", exact: true })).toBeVisible();
+    // Touch puts the action row in-flow under the bubble, not beside it.
+    const botBubble = row.getByTestId("message-bot-bubble").first();
+    const bubbleBox = await botBubble.boundingBox();
+    const railBox = await rail.boundingBox();
+    expect(bubbleBox).not.toBeNull();
+    expect(railBox).not.toBeNull();
+    expect(railBox!.y).toBeGreaterThanOrEqual(bubbleBox!.y + bubbleBox!.height - 1);
+    expect(railBox!.x - bubbleBox!.x).toBeLessThan(8);
+    await expectNoTouchSideGutter(row.getByTestId("message-bubble-frame"));
+    await captureScreenshot(page, testInfo, "message-actions-touch-row");
     await rail.getByRole("button", { name: "React", exact: true }).tap();
     await expect(page.getByRole("button", { name: "🎉", exact: true })).toBeVisible();
     await captureScreenshot(page, testInfo, "message-reaction-picker-touch");
@@ -383,11 +518,29 @@ test.describe("touch message actions", () => {
     await expect(row.getByTestId("message-reactions")).toHaveText("🎉 2");
     await rail.getByRole("button", { name: "More" }).tap();
     await expect(page.getByRole("menuitem", { name: "Copy" })).toBeVisible();
-    await expect(row.getByTestId("message-hover-time")).toHaveCSS("opacity", "1");
-    await expect(row.getByTestId("message-hover-time")).toHaveText(/\d/);
+    const time = row.getByTestId("message-hover-time");
+    await expect(time).toHaveCSS("opacity", "1");
+    await expect(time).toHaveCSS("position", "static");
+    await expect(time).toHaveText(/\d/);
+    const timeBox = await time.boundingBox();
+    const openBubbleBox = await botBubble.boundingBox();
+    const openRailBox = await rail.boundingBox();
+    expect(timeBox).not.toBeNull();
+    expect(openBubbleBox).not.toBeNull();
+    expect(openRailBox).not.toBeNull();
+    // A date uses this same label. Under the actions it cannot cover the bubble.
+    expect(timeBox!.y).toBeGreaterThanOrEqual(openBubbleBox!.y + openBubbleBox!.height - 1);
+    expect(timeBox!.y).toBeGreaterThanOrEqual(openRailBox!.y + openRailBox!.height - 1);
     await expect(page.getByRole("menu").locator("time")).toHaveCount(0);
     await captureScreenshot(page, testInfo, "message-actions-touch-menu");
-    await page.getByRole("menuitem", { name: "Reply", exact: true }).tap();
+    await page.keyboard.press("Escape");
+    const composer = page.getByRole("combobox", { name: /^Message/ });
+    await sendComposerMessage(page, composer, `touch-width-${Date.now()}`);
+    const userRow = page.locator("[data-message-id]").filter({ hasText: "touch-width-" }).first();
+    await expect(userRow).toBeVisible({ timeout: 20_000 });
+    await expectNoTouchSideGutter(userRow.getByTestId("message-bubble-frame"));
+    await rail.scrollIntoViewIfNeeded();
+    await rail.getByRole("button", { name: "Reply", exact: true }).tap();
     await expect(page.getByRole("button", { name: "Cancel reply" })).toBeVisible();
   });
 });

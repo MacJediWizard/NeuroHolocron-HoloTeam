@@ -23,16 +23,16 @@ describe("run connection selection", () => {
       liveSlugs,
     );
 
-    expect(rows.map((row) => row.status)).toEqual(["connected", "connected", "revoked", "revoked"]);
+    expect(rows.map((row) => row.status)).toEqual(["connected", "revoked", "revoked", "revoked"]);
     expect(
       selectRunConnections(
         rows,
         mergeConnectedPlugins(rows, liveSlugs).map((row) => row.provider),
       ),
-    ).toEqual([rows[0], rows[1]]);
+    ).toEqual([rows[0]]);
   });
 
-  it("does not recover a revoked account when persistence fails", async () => {
+  it("does not recover a revoked account from a live provider listing", async () => {
     const rows = [
       {
         id: "slack",
@@ -45,22 +45,68 @@ describe("run connection selection", () => {
     const prisma = {
       connection: { updateMany: vi.fn().mockRejectedValue(new Error("database unavailable")) },
     } as unknown as PrismaClient;
-    await expect(
-      persistLivePluginConnections(prisma, { userId: "user", spaceId: "space" }, rows, ["slack"]),
-    ).rejects.toThrow("database unavailable");
+    await persistLivePluginConnections(prisma, { userId: "user", spaceId: "space" }, rows, [
+      "slack",
+    ]);
+    expect(prisma.connection.updateMany).not.toHaveBeenCalled();
+    expect(rows[0]?.status).toBe("revoked");
     expect(selectRunConnections(rows, ["slack"])).toEqual([]);
   });
 
   it("does not send revoked accounts alongside a reconnected toolkit", () => {
     const oldAccount = {
+      id: "youtube-old",
       connectorId: "composio",
       provider: "youtube",
+      displayName: "YouTube",
       status: "revoked",
       providerRef: "ca_old",
     };
-    const currentAccount = { ...oldAccount, status: "connected", providerRef: "ca_current" };
+    const currentAccount = {
+      ...oldAccount,
+      id: "youtube-live",
+      status: "connected",
+      providerRef: "ca_current",
+    };
     expect(selectRunConnections([oldAccount, currentAccount], ["youtube"])).toEqual([
       currentAccount,
+    ]);
+    expect(
+      selectRunConnections(
+        [oldAccount, currentAccount],
+        mergeConnectedPlugins([oldAccount, currentAccount], ["youtube"]).map((row) => row.provider),
+      ),
+    ).toEqual([currentAccount]);
+  });
+
+  it("does not revive a revoked sibling with a dead providerRef during live persist", async () => {
+    const oldAccount = {
+      id: "gmail-old",
+      connectorId: "composio",
+      provider: "gmail",
+      displayName: "Gmail",
+      status: "revoked",
+      providerRef: "ca_old",
+    };
+    const currentAccount = {
+      ...oldAccount,
+      id: "gmail-live",
+      status: "connected",
+      providerRef: "ca_current",
+    };
+    const rows = [oldAccount, currentAccount];
+    const prisma = {
+      connection: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
+    } as unknown as PrismaClient;
+
+    await persistLivePluginConnections(prisma, { userId: "user", spaceId: "space" }, rows, [
+      "gmail",
+    ]);
+
+    expect(prisma.connection.updateMany).not.toHaveBeenCalled();
+    expect(oldAccount.status).toBe("revoked");
+    expect(selectRunConnections(rows, ["gmail"]).map((row) => row.providerRef)).toEqual([
+      "ca_current",
     ]);
   });
 
@@ -73,5 +119,11 @@ describe("run connection selection", () => {
       pending,
       other,
     ]);
+    expect(
+      selectRunConnections(
+        [revoked, { ...pending, status: "connected" }, other, disconnected],
+        ["youtube"],
+      ),
+    ).toEqual([{ ...pending, status: "connected" }, other]);
   });
 });

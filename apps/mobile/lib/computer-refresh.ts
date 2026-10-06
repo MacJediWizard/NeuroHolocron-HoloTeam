@@ -1,4 +1,30 @@
 import type { ComputerStatus } from "@rakazo/contracts";
+import { SCREEN_URL_RENEW_MS, screenRenewReadAt } from "./computer";
+
+export { SCREEN_URL_RENEW_MS };
+
+/**
+ * Re-reading `computer/screenUrl` on each poll would rotate the URL every two seconds, so polls
+ * only read the screen when the status that shapes it changed, when the held URL nears expiry,
+ * or after the viewer reported the current URL unusable. Renewal is measured from the seal's
+ * own expiry, so a reused capability is refreshed before it expires. The viewer keeps the
+ * connected source across incidental token rotation and applies a URL fetched in the renew
+ * window so the live stream can outlive the original capability.
+ */
+
+function screenKey(status: ComputerStatus) {
+  return [
+    status.state,
+    status.mode,
+    status.kind,
+    status.controlHolder,
+    status.controlBotId,
+    status.screenAvailable,
+    status.screenWidth,
+    status.screenHeight,
+    status.homeRevision,
+  ].join("|");
+}
 
 /** One polling lifecycle per mounted computer target. Explicit refreshes supersede older reads. */
 export function createComputerRefresh(options: {
@@ -15,6 +41,20 @@ export function createComputerRefresh(options: {
   let activeActions = 0;
   let pendingRevision: number | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // A completed read is cached even when it returned null (no screen for this status), so the
+  // status alone decides when to ask again; the viewer clears the cache when a URL stops working.
+  let screenLoaded = false;
+  let screenStatus: string | undefined;
+  let screenReadAt = 0;
+
+  function screenStale(status: ComputerStatus, force: boolean) {
+    return (
+      force ||
+      !screenLoaded ||
+      screenStatus !== screenKey(status) ||
+      Date.now() - screenReadAt >= SCREEN_URL_RENEW_MS
+    );
+  }
 
   function invalidate() {
     revision += 1;
@@ -24,10 +64,10 @@ export function createComputerRefresh(options: {
   function schedule() {
     clearTimeout(timer);
     if (!active || activeActions > 0 || pendingRevision === revision) return;
-    timer = setTimeout(() => void refresh().catch(() => undefined), 2000);
+    timer = setTimeout(() => void refresh({ poll: true }).catch(() => undefined), 2000);
   }
 
-  async function refresh({ screenAttempts = 1 } = {}) {
+  async function refresh({ screenAttempts = 1, poll = false } = {}) {
     if (!active) return;
     invalidate();
     const requestRevision = revision;
@@ -37,12 +77,17 @@ export function createComputerRefresh(options: {
       const status = await options.readStatus();
       if (!current()) return;
       options.onStatus(status);
-      try {
-        const url = await options.readScreen(screenAttempts);
-        if (!current()) return;
-        options.onScreen(url);
-      } catch {
-        // Keep the last URL after a failed read; a successful null clears it.
+      if (screenStale(status, !poll)) {
+        try {
+          const url = await options.readScreen(screenAttempts);
+          if (!current()) return;
+          screenLoaded = true;
+          screenStatus = screenKey(status);
+          screenReadAt = screenRenewReadAt(url, Date.now());
+          options.onScreen(url);
+        } catch {
+          // Keep the last URL after a failed read; a successful null clears it.
+        }
       }
       if (!current()) return;
       options.onReady();
@@ -56,7 +101,11 @@ export function createComputerRefresh(options: {
   }
 
   return {
-    refresh,
+    refresh: (input?: { screenAttempts?: number }) => refresh(input),
+    /** The viewer could not use the current URL: read a fresh one on the next poll. */
+    invalidateScreen() {
+      screenLoaded = false;
+    },
     isActive: () => active,
     beginAction() {
       const started = active;
@@ -95,6 +144,8 @@ export function createComputerRefresh(options: {
       active = false;
       lifetime += 1;
       activeActions = 0;
+      screenLoaded = false;
+      screenStatus = undefined;
       invalidate();
     },
   };

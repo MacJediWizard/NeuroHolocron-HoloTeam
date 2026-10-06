@@ -8,6 +8,8 @@ export class AiConsentBlocked extends Error {
   }
 }
 
+const pendingAiConsent = new Map<string, Promise<void>>();
+
 /** Only user actions that can start AI processing need a foreground disclosure. */
 export function aiDataUsesForProcedure(procedure: string, input?: unknown): AiDataUse[] {
   const path = procedure.replaceAll(".", "/");
@@ -41,15 +43,33 @@ export async function ensureAiDataConsent(options: {
   status(): Promise<AiConsentStatus>;
   prompt(recipient: AiRecipient, privacyUrl?: string): Promise<boolean>;
   allow(input: { scope: string; version: string; keys: string[] }): Promise<unknown>;
+  /** Separates independent API servers before the account-space scope is applied. */
+  coalesceKey?: string;
 }) {
   if (options.uses.length === 0) return;
   try {
     const status = await options.status();
     for (const recipient of status.recipients) {
       if (recipient.allowed || !options.uses.includes(recipient.use)) continue;
-      if (!(await options.prompt(recipient, status.privacyUrl)))
-        throw new Error(AI_CONSENT_REQUIRED);
-      await options.allow({ scope: status.scope, version: status.version, keys: [recipient.key] });
+      const key = [options.coalesceKey ?? "", status.scope, status.version, recipient.key].join(
+        "\u0000",
+      );
+      let pending = pendingAiConsent.get(key);
+      if (!pending) {
+        pending = (async () => {
+          if (!(await options.prompt(recipient, status.privacyUrl)))
+            throw new Error(AI_CONSENT_REQUIRED);
+          await options.allow({
+            scope: status.scope,
+            version: status.version,
+            keys: [recipient.key],
+          });
+        })().finally(() => {
+          if (pendingAiConsent.get(key) === pending) pendingAiConsent.delete(key);
+        });
+        pendingAiConsent.set(key, pending);
+      }
+      await pending;
     }
   } catch (error) {
     throw new AiConsentBlocked(error instanceof Error ? error.message : AI_CONSENT_REQUIRED);

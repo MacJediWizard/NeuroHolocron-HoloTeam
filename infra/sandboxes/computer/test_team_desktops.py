@@ -51,6 +51,35 @@ class Page(BaseHTTPRequestHandler):
         pass
 
 
+def running_programs():
+    names = set()
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            argv = (proc / "cmdline").read_bytes().split(b"\0", 1)[0]
+        except OSError:
+            continue
+        if argv:
+            names.add(argv.decode(errors="replace").rsplit("/", 1)[-1])
+    return names
+
+
+def assert_file_chooser_portals():
+    # Basename match: xdg-desktop-portal-gtk contains the frontend name.
+    required = ("xdg-desktop-portal", "xdg-desktop-portal-gtk")
+    missing = list(required)
+    for _ in range(50):
+        running = running_programs()
+        missing = [name for name in required if name not in running]
+        if not missing:
+            return
+        time.sleep(0.1)
+    raise AssertionError(
+        f"file-chooser portal daemons not running: {', '.join(missing)}; see /tmp/rakazo/portal.log and /tmp/rakazo/portal-gtk.log"
+    )
+
+
 def assert_browser_cookies(commands, bot):
     pages = []
     for _ in range(100):
@@ -73,9 +102,13 @@ def main():
         server = ThreadingHTTPServer(("127.0.0.1", port), Page)
         Thread(target=server.serve_forever, daemon=True).start()
     run(commands, "reset")
+    run(commands, "gh")
     run(commands, "ensurea")
+    assert_file_chooser_portals()
     run(commands, "seed")
     run(commands, "ensureb")
+    menu = Path(f"/tmp/fluxbox-home-{commands['displayb']}/.fluxbox/menu").read_text()
+    assert "(Terminal)" in menu, f"generated screen menu is missing its Terminal entry: {menu}"
     with ThreadPoolExecutor(2) as pool:
         list(pool.map(lambda step: run(commands, step), ["opena", "openb"]))
     for bot in "ab":
@@ -166,7 +199,7 @@ def main():
     run(commands, "opena")
     assert_browser_cookies(commands, "a")
     run(commands, "stopa")
-    print("PASS: parallel desktops, independent cookies, persistent profiles, desktop cleanup, and stale view/control token rejection")
+    print("PASS: parallel desktops, independent cookies, persistent profiles, desktop cleanup, stale view/control token rejection, and file-chooser portals")
 
 
 if __name__ == "__main__":

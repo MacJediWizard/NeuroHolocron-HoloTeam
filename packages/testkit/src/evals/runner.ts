@@ -4,6 +4,7 @@ import { MessagingTeamChatEmulator } from "@rakazo/adapters";
 import type { ModelConnectInput, RunStatus } from "@rakazo/contracts";
 import { ACTIVE_RUN_STATUSES, isTerminal } from "@rakazo/core";
 import type { createDb } from "@rakazo/db";
+import { discardBotIntroRun } from "../discard-bot-intro.js";
 import { sessionCookieHeader } from "../index.js";
 import type { EvalCase, Evidence } from "./cases.js";
 import { emptyTrial, type FailureCategory, redact, type TrialResult } from "./report.js";
@@ -103,7 +104,8 @@ export async function runTrial(
   };
   try {
     handles = await options.createApp(services, messaging);
-    const { app, prisma } = handles;
+    const trial = handles;
+    const { app, prisma } = trial;
     const setupActor = async () => {
       const signup = await app.request("/api/auth/sign-up/email", {
         method: "POST",
@@ -135,7 +137,9 @@ export async function runTrial(
         where: { id: botId },
         select: { userId: true, spaceId: true },
       });
+      // Register before discard so a timeout still reaches cleanupActors.
       actors.push({ botId, cookie, ...persistedBot });
+      await discardBotIntroRun(trial, cookie, botId);
       await rpc(app, cookie, "bots/update", {
         botId,
         modelProvider: options.connection.provider,

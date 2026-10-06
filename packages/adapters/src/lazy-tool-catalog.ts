@@ -15,7 +15,7 @@ const MAX_QUERY_LENGTH = 200;
 const MAX_GROUP_LENGTH = 200;
 const MAX_TOOL_NAME_LENGTH = 200;
 const MAX_TOOL_ID_LENGTH = 500;
-const MAX_DESCRIPTION_LENGTH = 500;
+export const MAX_DESCRIPTION_LENGTH = 500;
 export const CATALOG_SEARCH = "__catalog_search";
 export const CATALOG_LOAD = "__catalog_load";
 export const CATALOG_EXECUTE = "__catalog_execute";
@@ -36,6 +36,12 @@ export type CatalogSearchResult =
   | { group: string; names: string[]; error?: string }
   | { group: string; count: number; hint: string };
 
+/**
+ * Build the three catalog wrapper tools (`<prefix>_search_tools`, `<prefix>_load_tool`,
+ * `<prefix>_execute_tool`). Callers must not pass a prefix that yields names starting with
+ * `mcp_`: Anthropic's Claude Code OAuth endpoint rejects such requests on every model with a
+ * misleading "out of extra usage" error. `mcp__server__tool` (double underscore) is fine.
+ */
 export function lazyCatalogTools(
   prefix: string,
   connectorId: string,

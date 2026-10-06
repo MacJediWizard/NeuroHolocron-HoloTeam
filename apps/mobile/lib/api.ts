@@ -1,4 +1,5 @@
 import type {
+  AvatarStyle,
   Bot,
   BotSection,
   ComputerMode,
@@ -30,13 +31,16 @@ import {
 } from "@rakazo/core";
 import * as SecureStore from "expo-secure-store";
 import { promptAiConsent } from "./ai-consent";
+import { getCachedAvatarStyle, saveAvatarStyle } from "./avatar-style";
 import type { EndpointResult } from "./endpoint";
 import { defaultApiBase, normalizeApiBase } from "./endpoint";
 import { t } from "./i18n";
 import { resumeLiveNotifications } from "./live-notifications";
 import {
   clearSessionToken,
+  currentSessionGeneration,
   loadSessionToken,
+  replaceSessionTokenIfCurrent,
   restoreSessionToken,
   saveSessionToken,
   snapshotSessionToken,
@@ -57,6 +61,9 @@ let cachedSpaceId = "";
 /** Bumped on every in-memory Space selection change so a delayed response
  * cannot treat a later reselection of the same Space id as its own. */
 let spaceSelectionGeneration = 0;
+/** Counts selectSpace attempts so one still cleaning up a rollback record
+ * cannot claim the selection after a newer attempt has started. */
+let spaceSelectionRequestGeneration = 0;
 
 function bumpSpaceSelectionGeneration(): void {
   spaceSelectionGeneration += 1;
@@ -102,7 +109,11 @@ export async function loadApiBase() {
 }
 
 export async function selectSpace(id: string) {
+  const requestGeneration = ++spaceSelectionRequestGeneration;
   if (!(await clearStoredValue(SPACE_ROLLBACK_KEY))) return false;
+  // Rollback cleanup is the first await. A newer selection may have claimed
+  // the live space while this call was still deleting the rollback record.
+  if (requestGeneration !== spaceSelectionRequestGeneration) return false;
   // Claim memory before persisting: recovery paths reconcile against the
   // in-memory selection, so a durable write must never precede its owner.
   const previousSpaceId = cachedSpaceId;
@@ -220,10 +231,17 @@ async function snapshotSpace(): Promise<{ ok: true; value: string } | { ok: fals
 
 /** Clears session + space for an endpoint change. Restores both if either wipe fails. */
 async function clearCredentialsForEndpointChange(): Promise<
-  { ok: true; previousToken: string; previousSpace: string } | { ok: false; result: EndpointResult }
+  | {
+      ok: true;
+      previousToken: string;
+      previousSpace: string;
+      previousAvatarStyle: AvatarStyle;
+    }
+  | { ok: false; result: EndpointResult }
 > {
   const previousToken = await snapshotSessionToken();
   const previousSpace = await snapshotSpace();
+  const previousAvatarStyle = getCachedAvatarStyle();
   if (!previousToken.ok || !previousSpace.ok) {
     return {
       ok: false,
@@ -244,18 +262,28 @@ async function clearCredentialsForEndpointChange(): Promise<
   bumpSpaceSelectionGeneration();
   const spaceCleared = await clearStoredValue(SPACE_KEY);
   if (sessionCleared && spaceCleared) {
-    return { ok: true, previousToken: previousToken.value, previousSpace: previousSpace.value };
+    return {
+      ok: true,
+      previousToken: previousToken.value,
+      previousSpace: previousSpace.value,
+      previousAvatarStyle,
+    };
   }
 
-  await restoreCredentials(previousToken.value, previousSpace.value);
+  await restoreCredentials(previousToken.value, previousSpace.value, previousAvatarStyle);
   return {
     ok: false,
     result: { ok: false, error: t("Could not clear the previous server session") },
   };
 }
 
-async function restoreCredentials(previousToken: string, previousSpace: string) {
+async function restoreCredentials(
+  previousToken: string,
+  previousSpace: string,
+  previousAvatarStyle: AvatarStyle,
+) {
   if (previousToken) await restoreSessionToken(previousToken);
+  await saveAvatarStyle(previousAvatarStyle);
   if (previousSpace) {
     cachedSpaceId = previousSpace;
     bumpSpaceSelectionGeneration();
@@ -315,7 +343,13 @@ export async function saveApiBase(input: string): Promise<EndpointResult> {
   if (!parsed.ok) return parsed;
   if (parsed.url === defaultApiBase()) return resetApiBase();
   const previous = currentApiBase();
-  let cleared: { previousToken: string; previousSpace: string } | undefined;
+  let cleared:
+    | {
+        previousToken: string;
+        previousSpace: string;
+        previousAvatarStyle: AvatarStyle;
+      }
+    | undefined;
   if (parsed.url !== previous) {
     const result = await clearCredentialsForEndpointChange();
     if (!result.ok) return result.result;
@@ -324,7 +358,13 @@ export async function saveApiBase(input: string): Promise<EndpointResult> {
   try {
     await SecureStore.setItemAsync(ENDPOINT_KEY, parsed.url);
   } catch {
-    if (cleared) await restoreCredentials(cleared.previousToken, cleared.previousSpace);
+    if (cleared) {
+      await restoreCredentials(
+        cleared.previousToken,
+        cleared.previousSpace,
+        cleared.previousAvatarStyle,
+      );
+    }
     return { ok: false, error: t("Could not save the server URL") };
   }
   cachedApiBase = parsed.url;
@@ -335,7 +375,13 @@ export async function saveApiBase(input: string): Promise<EndpointResult> {
 export async function resetApiBase(): Promise<EndpointResult> {
   const previous = currentApiBase();
   const url = defaultApiBase();
-  let cleared: { previousToken: string; previousSpace: string } | undefined;
+  let cleared:
+    | {
+        previousToken: string;
+        previousSpace: string;
+        previousAvatarStyle: AvatarStyle;
+      }
+    | undefined;
   if (url !== previous) {
     const result = await clearCredentialsForEndpointChange();
     if (!result.ok) return result.result;
@@ -345,7 +391,11 @@ export async function resetApiBase(): Promise<EndpointResult> {
     await SecureStore.deleteItemAsync(ENDPOINT_KEY);
   } catch {
     if (cleared) {
-      await restoreCredentials(cleared.previousToken, cleared.previousSpace);
+      await restoreCredentials(
+        cleared.previousToken,
+        cleared.previousSpace,
+        cleared.previousAvatarStyle,
+      );
       return { ok: false, error: t("Could not clear the custom server URL") };
     }
   }
@@ -368,6 +418,11 @@ export type ApiRequestContext = {
   apiBase: string;
   headers: Record<string, string>;
 };
+
+/** Keeps consent prompts separate across servers and the selected Space. */
+export function aiConsentCoalesceKey(requestContext: ApiRequestContext): string {
+  return [requestContext.apiBase, requestContext.headers["x-rakazo-space-id"] ?? ""].join("\u0000");
+}
 
 export async function captureApiRequestContext(): Promise<ApiRequestContext> {
   const apiBase = currentApiBase();
@@ -444,20 +499,43 @@ export async function requestPasswordReset(email: string, redirectTo: string): P
 }
 
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  const apiBase = currentApiBase();
+  const generation = currentSessionGeneration();
+  const headers = await authHeaders();
   const { response, body } = await fetchMobileJson<unknown>(
-    `${currentApiBase()}/api/auth/change-password`,
+    `${apiBase}/api/auth/change-password`,
     {
       method: "POST",
       headers: {
         "content-type": "application/json",
         origin: "rakazo://",
-        ...(await authHeaders()),
+        ...headers,
       },
       body: JSON.stringify({ currentPassword, newPassword, revokeOtherSessions: true }),
     },
     {},
   );
   if (!response.ok) throw new Error(responseErrorMessage(body, t("Could not change password")));
+  // Revoking other sessions also revokes this one; keep the replacement the server issued.
+  const token = tokenFromAuthResponse(response, body);
+  if (!token) return;
+  // A sign-out or server switch changes the session while the request is in flight.
+  if (currentApiBase() !== apiBase) return;
+  const maybeResume = async () => {
+    // Our save is the only change allowed; a sign-out during it must not restart notifications.
+    const spaceId = selectedSpaceId();
+    if (spaceId && currentSessionGeneration() === generation + 1) {
+      await resumeLiveNotifications(apiBase, token, spaceId).catch(() => undefined);
+    }
+  };
+  try {
+    if (!(await replaceSessionTokenIfCurrent(generation, token))) return;
+  } catch (error) {
+    // The replacement is already in memory; resume before the keychain error reaches the UI.
+    await maybeResume();
+    throw error;
+  }
+  await maybeResume();
 }
 
 async function fetchMobileJson<T>(
@@ -576,29 +654,46 @@ export async function rpc<T>(
       ),
     prompt: promptAiConsent,
     allow: (input) => rpc("aiConsent/allow", input, { requestContext: consentContext }),
+    coalesceKey: consentContext ? aiConsentCoalesceKey(consentContext) : undefined,
   });
+  // Abort with an explicit reason so every consumer of the signal (the fetch, the bounded body
+  // read, and nested recovery calls that share this signal) reports the same cause.
   const controller = new AbortController();
-  const abort = () => controller.abort();
-  if (options.signal?.aborted) abort();
-  else options.signal?.addEventListener("abort", abort, { once: true });
+  const cancel = () => controller.abort(options.signal?.reason ?? new Error("Request canceled"));
+  if (options.signal?.aborted) cancel();
+  else options.signal?.addEventListener("abort", cancel, { once: true });
   const timer =
-    options.timeoutMs === null ? undefined : setTimeout(abort, options.timeoutMs ?? RPC_TIMEOUT_MS);
+    options.timeoutMs === null
+      ? undefined
+      : setTimeout(
+          () => controller.abort(new Error("Request timed out")),
+          options.timeoutMs ?? RPC_TIMEOUT_MS,
+        );
+  const abortReason = (error: unknown) =>
+    controller.signal.aborted ? (controller.signal.reason ?? error) : error;
   // Bind recovery to the Space + selection epoch this request was sent with:
   // a 401 arriving after the user switched Spaces — including A → B → A —
   // belongs to a stale request and must not touch the current selection.
   const requestHeaders = consentContext?.headers ?? (await authHeaders());
   const requestSpaceId = requestHeaders["x-rakazo-space-id"];
   try {
-    const res = await fetch(`${consentContext?.apiBase ?? currentApiBase()}/rpc/${proc}`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: "rakazo://",
-        ...requestHeaders,
-      },
-      body: JSON.stringify({ json: body }),
-      signal: controller.signal,
-    });
+    let res: Response;
+    try {
+      res = await fetch(`${consentContext?.apiBase ?? currentApiBase()}/rpc/${proc}`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "rakazo://",
+          ...requestHeaders,
+        },
+        body: JSON.stringify({ json: body }),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      // The native fetch reports an aborted request with an implementation detail
+      // ("FetchRequestCanceledException"); say what happened instead.
+      throw abortReason(error);
+    }
     if (proc === "aiConsent/status" && res.status === 404) {
       cancelResponseBody(res);
       throw new Error(t("Update your server to use AI data sharing in this mobile version."));
@@ -607,7 +702,9 @@ export async function rpc<T>(
       res,
       MAX_MOBILE_RPC_RESPONSE_BYTES,
       controller.signal,
-    );
+    ).catch((error: unknown) => {
+      throw abortReason(error);
+    });
     if (!res.ok || parsed.error) {
       const message = parsed.error?.message ?? `rpc ${proc} failed`;
       const unauthorized = res.status === 401 || /unauthorized/i.test(message);
@@ -686,7 +783,7 @@ export async function rpc<T>(
     return parsed.json as T;
   } finally {
     if (timer) clearTimeout(timer);
-    options.signal?.removeEventListener("abort", abort);
+    options.signal?.removeEventListener("abort", cancel);
   }
 }
 
@@ -709,6 +806,7 @@ export type MobileBot = Pick<
   | "modelProvider"
   | "modelId"
   | "thinkingLevel"
+  | "autoSpeak"
 > &
   Partial<Pick<Bot, "parentBotId" | "spaceId">>;
 
@@ -736,8 +834,11 @@ export type MobileMessage = {
   seq?: number;
   runId?: string;
   role: "user" | "bot" | "system";
+  /** Set when the message was sent from a live voice call; groups one call's transcript. */
+  callId?: string;
   botId?: string;
   replyToMessageId?: string;
+  replyQuote?: string;
   createdAt?: string;
   blocks: MessageBlock[];
 };
@@ -792,6 +893,27 @@ export function shouldApplyMobileThreadRefresh(input: {
     input.targetBotId === input.activeBotId &&
     input.targetGroupId === input.activeGroupId
   );
+}
+
+/**
+ * What a refresh may hand the live subscription. The server replays events
+ * after this snapshot's cursor, so an uncommitted fetch must not supply it.
+ */
+export function mobileThreadRefreshResult(input: {
+  fetched: MobileSnapshot;
+  onScreen: MobileSnapshot | null;
+  requestGeneration: number;
+  currentGeneration: number;
+  requestEpoch: number;
+  currentEpoch: number;
+  targetBotId: string | undefined;
+  targetGroupId: string | undefined;
+  activeBotId: string | undefined;
+  activeGroupId: string | undefined;
+}): { commit: boolean; snapshot: MobileSnapshot | null } {
+  const commit =
+    input.requestGeneration === input.currentGeneration && shouldApplyMobileThreadRefresh(input);
+  return { commit, snapshot: commit ? input.fetched : input.onScreen };
 }
 
 export type MobileMessagePage = ThreadHistory<MobileMessage>;
@@ -880,6 +1002,9 @@ type ThreadEvent = {
   payload?: Record<string, unknown>;
 };
 
+/** No frame at all for this long means the stream is half-open; the server beats far faster. */
+export const IDLE_TIMEOUT_MS = 45_000;
+
 export async function subscribeThread(
   target: { botId: string } | { groupId: string },
   cursor: number,
@@ -902,7 +1027,19 @@ export async function subscribeThread(
   const decoder = new TextDecoder();
   let buffer = "";
   while (!signal.aborted) {
-    const { done, value } = await reader.read();
+    // A half-open socket never reports done, so give up on silence and let the caller reconnect.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const read = await Promise.race([
+      reader.read(),
+      new Promise<"idle">((resolve) => {
+        timer = setTimeout(() => resolve("idle"), IDLE_TIMEOUT_MS);
+      }),
+    ]).finally(() => clearTimeout(timer));
+    if (read === "idle") {
+      void reader.cancel().catch(() => undefined);
+      return;
+    }
+    const { done, value } = read;
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
     const chunks = buffer.split("\n\n");
@@ -916,7 +1053,8 @@ export async function subscribeThread(
       if (!data || data === "[DONE]") continue;
       try {
         const parsed = JSON.parse(data) as { json?: ThreadEvent; error?: { message?: string } };
-        if (parsed.json?.type) onEvent(parsed.json);
+        // Heartbeats prove liveness only; forwarding one would advance the caller's cursor.
+        if (parsed.json?.type && parsed.json.type !== "heartbeat") onEvent(parsed.json);
       } catch {
         // ignore keepalives and partial frames
       }
@@ -928,7 +1066,7 @@ export function applyMobileThreadEvent(
   prev: MobileSnapshot | null,
   event: ThreadEvent,
 ): MobileSnapshot | null {
-  if (!prev) return prev;
+  if (!prev || event.type === "heartbeat") return prev;
   if (event.type === "thread.cleared") {
     return {
       ...prev,
@@ -1093,15 +1231,23 @@ export function applyMobileThreadEvent(
   }
   if (event.type === "thread.message.created" || event.type === "thread.message.updated") {
     const { remaining } = takeLiveMessage(prev.messages, progressMessageId(event));
+    const id = String(event.payload?.messageId ?? event.id ?? `msg:${event.seq ?? 0}`);
     const next: MobileMessage = {
-      id: String(event.payload?.messageId ?? event.id ?? `msg:${event.seq ?? 0}`),
+      id,
       runId: event.runId ? String(event.runId) : undefined,
       role: (event.payload?.role as MobileMessage["role"]) ?? "bot",
+      // An update can leave the call id out — the `end_call` marker does — so keep the one
+      // the message already carries instead of dropping it out of its call.
+      callId:
+        typeof event.payload?.callId === "string"
+          ? event.payload.callId
+          : prev.messages.find((message) => message.id === id)?.callId,
       blocks: (event.payload?.blocks as MobileMessage["blocks"]) ?? [],
       botId: event.botId ?? (event.payload?.botId ? String(event.payload.botId) : undefined),
       replyToMessageId: event.payload?.replyToMessageId
         ? String(event.payload.replyToMessageId)
         : undefined,
+      replyQuote: event.payload?.replyQuote ? String(event.payload.replyQuote) : undefined,
     };
     return {
       ...prev,

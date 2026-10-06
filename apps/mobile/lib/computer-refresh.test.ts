@@ -1,6 +1,6 @@
 import type { ComputerStatus } from "@rakazo/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createComputerRefresh } from "./computer-refresh";
+import { createComputerRefresh, SCREEN_URL_RENEW_MS } from "./computer-refresh";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -11,8 +11,9 @@ function deferred<T>() {
   });
   return { promise, resolve, reject };
 }
-const running = { state: "running" } as ComputerStatus;
-const stopped = { state: "stopped" } as ComputerStatus;
+const running = { state: "running", controlHolder: "none" } as ComputerStatus;
+const stopped = { state: "stopped", controlHolder: "none" } as ComputerStatus;
+const controlled = { state: "running", controlHolder: "user" } as ComputerStatus;
 function setup() {
   const options = {
     readStatus: vi.fn<() => Promise<ComputerStatus>>().mockResolvedValue(running),
@@ -264,6 +265,106 @@ describe("computer action lifecycle", () => {
     current.finish();
     await vi.advanceTimersByTimeAsync(2000);
     expect(fixture.readStatus).toHaveBeenCalledTimes(4);
+    fixture.controller.dispose();
+  });
+});
+
+describe("screen URL reuse", () => {
+  it("reads the screen once and keeps it across polls while the status is unchanged", async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(fixture.readStatus).toHaveBeenCalledTimes(6);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(1);
+    expect(fixture.onScreen).toHaveBeenCalledExactlyOnceWith("https://screen.example.test");
+    fixture.controller.dispose();
+  });
+
+  it("caches a null screen result until the status changes", async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.readStatus.mockResolvedValue(stopped);
+    fixture.readScreen.mockResolvedValue(null);
+    fixture.controller.start();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(1);
+    expect(fixture.onScreen).toHaveBeenCalledExactlyOnceWith(null);
+    fixture.readStatus.mockResolvedValue(running);
+    fixture.readScreen.mockResolvedValue("https://screen.example.test");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(2);
+    expect(fixture.onScreen).toHaveBeenLastCalledWith("https://screen.example.test");
+    fixture.controller.dispose();
+  });
+
+  it("re-reads the screen when the status that shapes it changes", async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    fixture.readStatus.mockResolvedValue(controlled);
+    fixture.readScreen.mockResolvedValue("https://control.example.test");
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(2);
+    expect(fixture.onScreen).toHaveBeenLastCalledWith("https://control.example.test");
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(2);
+    fixture.controller.dispose();
+  });
+
+  it("re-reads on the next poll after the viewer invalidates the screen", async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.controller.start();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(1);
+    fixture.controller.invalidateScreen();
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(2);
+    fixture.controller.dispose();
+  });
+
+  it("renews the screen URL before the capability expires", async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.controller.start();
+    await vi.advanceTimersByTimeAsync(SCREEN_URL_RENEW_MS - 2000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(2);
+    fixture.controller.dispose();
+  });
+
+  it("renews a reused seal before the original expiry", async () => {
+    vi.useFakeTimers();
+    const readAt = Date.now();
+    const expiresAt = readAt + 40 * 60_000;
+    const reused = `https://app.example/novnc/session/view/${expiresAt}.tok/embed.html`;
+    const renewed = `https://app.example/novnc/session/view/${readAt + 90 * 60_000}.next/embed.html`;
+    const fixture = setup();
+    fixture.readScreen.mockResolvedValueOnce(reused).mockResolvedValue(renewed);
+    fixture.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(30 * 60_000 - 2_000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(4_000);
+    expect(fixture.readScreen).toHaveBeenCalledTimes(2);
+    fixture.controller.dispose();
+  });
+
+  it("always reads the screen on an explicit refresh", async () => {
+    vi.useFakeTimers();
+    const fixture = setup();
+    fixture.controller.start();
+    await vi.advanceTimersByTimeAsync(0);
+    const action = fixture.controller.beginAction();
+    await action.refresh();
+    action.finish();
+    expect(fixture.readScreen).toHaveBeenCalledTimes(2);
     fixture.controller.dispose();
   });
 });
