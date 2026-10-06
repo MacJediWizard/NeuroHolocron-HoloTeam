@@ -269,6 +269,8 @@ const COMPUTER_COMMAND_HISTORY_EVENTS = 200;
 const THREAD_MESSAGE_PAGE_SIZE = 100;
 /** Silence longer than this on a thread stream is indistinguishable from a dead socket. */
 export const HEARTBEAT_MS = 20_000;
+/** A thread stream re-checks its session at least this often while it delivers. */
+export const SESSION_RECHECK_MS = 10_000;
 const EXPORT_MESSAGE_PAGE_SIZE = 500;
 
 async function reconcilePendingConnections(
@@ -694,7 +696,12 @@ export async function enqueueBotIntroRun(deps: RouterDeps, actor: Actor, bot: Bo
 }
 
 export function createRouter(deps: RouterDeps) {
-  const os = implement(appContract).$context<{ actor: Actor | null; signal?: AbortSignal }>();
+  const os = implement(appContract).$context<{
+    actor: Actor | null;
+    signal?: AbortSignal;
+    /** Re-runs the request's auth so a long-lived stream notices sign-out and revocation. */
+    stillAuthorized?: () => Promise<boolean>;
+  }>();
   const repos = createRepos(deps.prisma);
   const onboardingDeps = { prisma: deps.prisma, events: deps.events, connectors: deps.connectors };
   const mcpOAuth = deps.mcpOAuth ?? new McpOAuthBroker(deps.prisma, deps.secrets);
@@ -1883,6 +1890,14 @@ export function createRouter(deps: RouterDeps) {
         // A half-open stream looks identical to an idle one, so punctuate silence:
         // the client treats any frame as liveness and reconnects once they stop.
         let pending: Promise<IteratorResult<ProductEvent>> | undefined;
+        // Auth ran once when the stream opened. Re-check before delivering more, so a signed-out
+        // or revoked session stops within SESSION_RECHECK_MS, or at the next heartbeat when idle.
+        let authorizedAt = Date.now();
+        const assertStillAuthorized = async () => {
+          if (!context.stillAuthorized || Date.now() - authorizedAt < SESSION_RECHECK_MS) return;
+          if (!(await context.stillAuthorized())) throw new ORPCError("UNAUTHORIZED");
+          authorizedAt = Date.now();
+        };
         try {
           while (!context.signal?.aborted) {
             pending ??= follow.next();
@@ -1894,6 +1909,7 @@ export function createRouter(deps: RouterDeps) {
               }),
             ]).finally(() => clearTimeout(timer));
             if (next === "silent") {
+              await assertStillAuthorized();
               // Keep `pending` so the in-flight read stays the next event in order.
               yield {
                 id: "heartbeat",
@@ -1911,6 +1927,8 @@ export function createRouter(deps: RouterDeps) {
             pending = undefined;
             if (next.done) return;
             const event = next.value;
+            // Filtered peer events also restart the heartbeat, so check before skipping them.
+            await assertStillAuthorized();
             if (await isPeerRun(deps.prisma, event.runId, peerRunCache)) {
               if (!shouldForwardPeerThreadEvent(event)) continue;
             }
