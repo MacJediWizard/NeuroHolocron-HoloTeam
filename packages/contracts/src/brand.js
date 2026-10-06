@@ -7,6 +7,6 @@ export const DESKTOP_APP_ID = "com.legiara.desktop";
 /** Public website and email domain. */
 export const BRAND_DOMAIN = "legiara.com";
 /** GitHub owner/repo that publishes this product's source. */
-export const SOURCE_REPO = "MacJediWizard/NeuroHolocron-HoloTeam";
+export const SOURCE_REPO = "MacJediWizard/NeuroHolocron-Legiara";
 /** Who operates the product: named in the privacy policy, footer, and site metadata. */
 export const OPERATOR_NAME = "MacJediWizard";

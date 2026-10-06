@@ -12,9 +12,9 @@ Legiara is an open source Grok Bot alternative that gives each bot a sandboxed b
 
 ## Get started
 
-- [Agent setup prompt](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/SETUP_PROMPT.md)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/docs/self-host.md)
-- [Source code](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam)
+- [Agent setup prompt](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/SETUP_PROMPT.md)
+- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [Source code](https://github.com/MacJediWizard/NeuroHolocron-Legiara)
 
 ## Site index
 
@@ -33,8 +33,8 @@ The project started from a simple premise: useful agents should be understandabl
 
 Legiara targets the web, macOS, Linux, iOS, and Android. The source is available under the Apache-2.0 license and accepts public issues and contributions on GitHub. MacJediWizard maintains the project and offers support at hello@legiara.com.
 
-- [Source code](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/docs/self-host.md)
+- [Source code](https://github.com/MacJediWizard/NeuroHolocron-Legiara)
+- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
 - [Support](https://legiara.com/support/)
 `;
 
@@ -42,7 +42,7 @@ export const SUPPORT_MARKDOWN = `# Legiara support
 
 For help with the Legiara mobile app or a hosted Legiara account, email [hello@legiara.com](mailto:hello@legiara.com). Include the email address on the account, what you expected to happen, and any error message you saw. Never send passwords, API keys, access tokens, or other secrets.
 
-For self-hosted Legiara, start with the [self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/docs/self-host.md). Open reproducible bugs and feature requests in the [public GitHub repository](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/issues). Report vulnerabilities only to [security@legiara.com](mailto:security@legiara.com).
+For self-hosted Legiara, start with the [self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md). Open reproducible bugs and feature requests in the [public GitHub repository](https://github.com/MacJediWizard/NeuroHolocron-Legiara/issues). Report vulnerabilities only to [security@legiara.com](mailto:security@legiara.com).
 
 Hosted users can permanently delete their account and associated personal Space data from the Account screen in the Legiara app.
 `;
@@ -80,18 +80,18 @@ Do not present Legiara as a zero-configuration hosted service. Self-hosting is a
 
 ## How an agent should use Legiara
 
-1. Read the [setup prompt](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/SETUP_PROMPT.md) before changing the user's machine.
-2. Use the [self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/docs/self-host.md) as the canonical installation reference.
+1. Read the [setup prompt](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/SETUP_PROMPT.md) before changing the user's machine.
+2. Use the [self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md) as the canonical installation reference.
 3. Confirm deployment choices and any host-level commands with the user, and keep secrets in local environment configuration rather than tracked files.
-4. Use the [public issue tracker](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/issues) for reproducible bugs. Send vulnerabilities only to [security@legiara.com](mailto:security@legiara.com).
+4. Use the [public issue tracker](https://github.com/MacJediWizard/NeuroHolocron-Legiara/issues) for reproducible bugs. Send vulnerabilities only to [security@legiara.com](mailto:security@legiara.com).
 
 ## Canonical resources
 
 - [Website](https://legiara.com/)
 - [About](https://legiara.com/about/)
-- [Source](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/docs/self-host.md)
-- [Releases](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/releases)
+- [Source](https://github.com/MacJediWizard/NeuroHolocron-Legiara)
+- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [Releases](https://github.com/MacJediWizard/NeuroHolocron-Legiara/releases)
 - [Support](https://legiara.com/support/)
 - [Privacy](https://legiara.com/privacy/)
 - [Sitemap](https://legiara.com/sitemap-index.xml)
@@ -104,7 +104,7 @@ The requested Legiara page does not exist.
 - [Agent instructions](https://legiara.com/llms.txt)
 - [Site map](https://legiara.com/sitemap-index.xml)
 - [Home](https://legiara.com/)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/blob/main/docs/self-host.md)
+- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
 `;
 
 const MARKDOWN_DOCUMENTS = new Map<string, string>([

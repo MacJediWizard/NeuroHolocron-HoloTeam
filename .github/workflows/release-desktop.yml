@@ -172,7 +172,7 @@ jobs:
           spctl --assess --type execute --verbose=2 "$app"
           grep -Fqx "provider: github" "$app/Contents/Resources/app-update.yml"
           grep -Fqx "owner: MacJediWizard" "$app/Contents/Resources/app-update.yml"
-          grep -Fqx "repo: NeuroHolocron-HoloTeam" "$app/Contents/Resources/app-update.yml"
+          grep -Fqx "repo: NeuroHolocron-Legiara" "$app/Contents/Resources/app-update.yml"
 
       - name: Require Windows signing credentials
         if: runner.os == 'Windows'
@@ -213,7 +213,7 @@ jobs:
             throw "Windows update config is not bound to the signing publisher."
           }
           $feed = Get-Content -Raw $config
-          foreach ($expected in @("provider: github", "owner: MacJediWizard", "repo: NeuroHolocron-HoloTeam")) {
+          foreach ($expected in @("provider: github", "owner: MacJediWizard", "repo: NeuroHolocron-Legiara")) {
             if ($feed -notmatch "(?m)^$([regex]::Escape($expected))\r?$") {
               throw "Windows update config missing '$expected'."
             }
@@ -239,7 +239,7 @@ jobs:
           test -f "$config"
           grep -Fqx "provider: github" "$config"
           grep -Fqx "owner: MacJediWizard" "$config"
-          grep -Fqx "repo: NeuroHolocron-HoloTeam" "$config"
+          grep -Fqx "repo: NeuroHolocron-Legiara" "$config"
           test -f apps/desktop/out/latest-linux.yml
           grep -Fqx "version: $RELEASE_VERSION" apps/desktop/out/latest-linux.yml
 
