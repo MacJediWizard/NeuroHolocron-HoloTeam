@@ -1,14 +1,25 @@
 import type { Credential, OAuthCredential } from "@earendil-works/pi-ai";
-import { describe, expect, it } from "vitest";
+import type { ModelCredentialFailedState, ModelCredentialRetireReason } from "@rakazo/adapter-kit";
+import type { PrismaClient } from "@rakazo/db";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CHATGPT_OAUTH_PROVIDER,
   COPILOT_OAUTH_PROVIDER,
+  isRetiredModelCredentialError,
+  kickModelCredentialRefresh,
+  matchesFailedOAuthSecret,
+  OAUTH_ACCOUNT_CHANGED_ERROR,
+  oauthCredentialAccountId,
   type PiOAuthBegin,
   PiOAuthLogins,
   parseModelSecret,
+  RetiredModelCredentialError,
+  refreshExpiredModelCredential,
   resolveModelApiKey,
+  resolveModelAuth,
   secretValuesToRedact,
   serializeModelSecret,
+  terminalOAuthRefreshErrorMarker,
   XAI_OAUTH_PROVIDER,
 } from "./pi-oauth.js";
 
@@ -19,6 +30,14 @@ const oauthCred = (overrides: Partial<OAuthCredential> = {}): OAuthCredential =>
   expires: Date.now() + 60_000,
   accountId: "acct",
   ...overrides,
+});
+
+// Unsigned fake JWT: base64url JSON payload, no real token material.
+const fakeJwt = (payload: unknown) =>
+  `fake.${Buffer.from(JSON.stringify(payload)).toString("base64url")}.fake`;
+
+const chatGptAccountClaim = (accountId: string) => ({
+  "https://api.openai.com/auth": { chatgpt_account_id: accountId },
 });
 
 async function flushMicrotasks() {
@@ -80,6 +99,14 @@ describe("model secrets", () => {
     expect(parseModelSecret("sk-or-v1-abc")).toEqual({ kind: "api_key", key: "sk-or-v1-abc" });
   });
 
+  it("round-trips an API key output limit", () => {
+    const parsed = parseModelSecret(
+      serializeModelSecret({ kind: "api_key", key: "sk-test-key", maxTokens: 8192 }),
+    );
+    expect(parsed).toEqual({ kind: "api_key", key: "sk-test-key", maxTokens: 8192 });
+    expect(secretValuesToRedact(parsed)).toEqual(["sk-test-key"]);
+  });
+
   it("round-trips OAuth credentials", () => {
     const credential = oauthCred({ expires: 42 });
     const parsed = parseModelSecret(serializeModelSecret({ kind: "oauth", credential }));
@@ -100,6 +127,37 @@ describe("model secrets", () => {
     });
   });
 
+  it("rejects credential JSON that declares a kind but misses its fields", () => {
+    expect(() => parseModelSecret(JSON.stringify({ kind: "oauth" }))).toThrow(/corrupt/);
+    expect(() =>
+      parseModelSecret(JSON.stringify({ kind: "oauth", credential: { type: "oauth" } })),
+    ).toThrow(/corrupt/);
+    expect(() => parseModelSecret(JSON.stringify({ kind: "api_key" }))).toThrow(/corrupt/);
+    expect(() => parseModelSecret(JSON.stringify({ kind: "api_key", key: "" }))).toThrow(/corrupt/);
+    expect(() => parseModelSecret(JSON.stringify({ kind: "openai_compatible" }))).toThrow(
+      /corrupt/,
+    );
+  });
+
+  it("rejects a broken legacy OAuth credential object", () => {
+    expect(() =>
+      parseModelSecret(JSON.stringify({ type: "oauth", access: "access-token" })),
+    ).toThrow(/corrupt/);
+  });
+
+  it("keeps JSON without a recognized credential kind as a literal API key", () => {
+    const unknownKind = JSON.stringify({ kind: "bearer", token: "abc" });
+    expect(parseModelSecret(unknownKind)).toEqual({ kind: "api_key", key: unknownKind });
+    const objectKey = JSON.stringify({ hello: "world" });
+    expect(parseModelSecret(objectKey)).toEqual({ kind: "api_key", key: objectKey });
+    expect(parseModelSecret("{broken-json")).toEqual({ kind: "api_key", key: "{broken-json" });
+  });
+
+  it("fails a corrupt stored credential instead of using it as an API key", async () => {
+    const corrupt = JSON.stringify({ kind: "oauth", credential: { type: "oauth" } });
+    await expect(resolveModelApiKey(corrupt, CHATGPT_OAUTH_PROVIDER)).rejects.toThrow(/corrupt/);
+  });
+
   it("refreshes expired OAuth tokens and persists them", async () => {
     const credential = oauthCred({ access: "old", expires: 1 });
     let saved = "";
@@ -115,6 +173,963 @@ describe("model secrets", () => {
     });
     expect(apiKey).toBe("new");
     expect(JSON.parse(saved).access).toBe("new");
+  });
+
+  it("keeps a configured output limit when refreshing OAuth tokens", async () => {
+    const stored = serializeModelSecret({
+      kind: "oauth",
+      credential: oauthCred({ access: "old", expires: 1 }),
+      maxTokens: 16384,
+    });
+    let saved = "";
+    const resolved = await resolveModelAuth(stored, CHATGPT_OAUTH_PROVIDER, {
+      now: 10_000,
+      persist: async (next) => {
+        saved = next;
+      },
+      oauth: {
+        refresh: async () => oauthCred({ access: "new", expires: 99_999 }),
+        toAuth: async (current) => ({ apiKey: current.access }),
+      },
+    });
+    expect(resolved.apiKey).toBe("new");
+    expect(resolved.secret.maxTokens).toBe(16384);
+    expect(parseModelSecret(saved)).toMatchObject({
+      kind: "oauth",
+      maxTokens: 16384,
+      credential: expect.objectContaining({ access: "new" }),
+    });
+  });
+});
+
+describe("terminalOAuthRefreshErrorMarker", () => {
+  it.each([
+    "invalid_grant",
+    "refresh_token_expired",
+    "refresh_token_reused",
+    "refresh_token_invalidated",
+  ])("matches the terminal marker %s in a pi-wrapped refresh error", (marker) => {
+    const providerError = new Error(
+      `OpenAI Codex token refresh failed (400): {"error":"${marker}","error_description":"gone"}`,
+    );
+    const wrapped = new Error("OAuth refresh failed for openai-codex", { cause: providerError });
+    expect(terminalOAuthRefreshErrorMarker(wrapped)).toBe(marker);
+  });
+
+  it.each([400, 401, 403])("matches a marker alongside a %i status", (status) => {
+    const providerError = new Error(
+      `OpenAI Codex token refresh failed (${status}): {"error":"invalid_grant"}`,
+    );
+    expect(terminalOAuthRefreshErrorMarker(providerError)).toBe("invalid_grant");
+  });
+
+  it("matches pi's Kimi Coding unauthorized marker", () => {
+    expect(
+      terminalOAuthRefreshErrorMarker(
+        new Error("Kimi Code token refresh unauthorized (status 401)"),
+      ),
+    ).toBe("Kimi Code token refresh unauthorized");
+    expect(
+      terminalOAuthRefreshErrorMarker(
+        new Error("Kimi Code token refresh unauthorized (status 403): token revoked"),
+      ),
+    ).toBe("Kimi Code token refresh unauthorized");
+  });
+
+  it("matches a marker embedded in the outer message", () => {
+    expect(
+      terminalOAuthRefreshErrorMarker(new Error('token refresh failed (400): "invalid_grant"')),
+    ).toBe("invalid_grant");
+  });
+
+  it("accepts a marker and a terminal status split across the cause chain", () => {
+    const wrapped = new Error("OAuth refresh failed for xai", {
+      cause: new Error('{"error":"invalid_grant"}', {
+        cause: new Error("xAI OAuth token refresh failed (HTTP 403)"),
+      }),
+    });
+    expect(terminalOAuthRefreshErrorMarker(wrapped)).toBe("invalid_grant");
+  });
+
+  it.each(['"upstream 503"', '"status 502"', '"(502)"', '"upstream status=502"'])(
+    "still retires a real 400 whose body text mentions %s",
+    (quoted) => {
+      // The quoted status lives inside the embedded response body, so it is not
+      // the layer's own status and must not veto the genuine terminal 400.
+      const body = JSON.stringify({ error: "invalid_grant", error_description: quoted });
+      expect(
+        terminalOAuthRefreshErrorMarker(
+          new Error(`OpenAI Codex token refresh failed (400): ${body}`),
+        ),
+      ).toBe("invalid_grant");
+    },
+  );
+
+  it("retires an Anthropic terminal error whose body field mentions a 5xx", () => {
+    // Anthropic flattens nested errors into `details=...; status=400; ...
+    // body={...}`; the 503 sits inside the quoted body field, not the layer's
+    // own status.
+    const anthropic = new Error(
+      "Anthropic token refresh request failed. url=https://api.anthropic.com; " +
+        "details=Error: HTTP request failed. status=400; url=https://api.anthropic.com; " +
+        'body={"error":"invalid_grant","error_description":"upstream status=503"}',
+    );
+    expect(terminalOAuthRefreshErrorMarker(anthropic)).toBe("invalid_grant");
+  });
+
+  it("retires a Copilot-style terminal error whose body text mentions a 5xx", () => {
+    expect(
+      terminalOAuthRefreshErrorMarker(
+        new Error(
+          '400 Bad Request: {"error":"invalid_grant","error_description":"upstream (502)"}',
+        ),
+      ),
+    ).toBe("invalid_grant");
+  });
+
+  it.each([
+    [
+      "4xx marker outer, 5xx inner",
+      new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}', {
+        cause: new Error("gateway upstream failed (502)"),
+      }),
+    ],
+    [
+      "5xx outer, 4xx marker inner",
+      new Error("OAuth refresh failed for openai-codex (503)", {
+        cause: new Error('{"error":"invalid_grant"}', {
+          cause: new Error("token endpoint rejected (400)"),
+        }),
+      }),
+    ],
+    [
+      "kimi unauthorized marker with a 5xx layer",
+      new Error("Kimi Code token refresh unauthorized (status 403)", {
+        cause: new Error("proxy hop failed with status 504"),
+      }),
+    ],
+  ])("does not classify a %s chain as terminal", (_label, error) => {
+    // A 5xx anywhere in the chain vetoes a terminal 4xx + marker elsewhere —
+    // the deeper gateway failure means the token endpoint never judged the
+    // credential.
+    expect(terminalOAuthRefreshErrorMarker(error)).toBeUndefined();
+  });
+
+  it.each([
+    [
+      "5xx body quoting a marker",
+      new Error('OpenAI Codex token refresh failed (500): {"error":"invalid_grant"}'),
+    ],
+    [
+      "502 body quoting a marker",
+      new Error(
+        'OpenAI Codex token refresh failed (502): {"error":"invalid_grant","error_description":"gateway"}',
+      ),
+    ],
+    ["marker without a status", new Error('{"error":"invalid_grant"}')],
+    [
+      "marker on a 200 body missing fields",
+      new Error('OpenAI Codex token refresh response missing fields: {"error":"invalid_grant"}'),
+    ],
+    [
+      "marker with a non-terminal 4xx",
+      new Error('OpenAI Codex token refresh failed (404): {"error":"invalid_grant"}'),
+    ],
+    [
+      "marker with an unrelated number",
+      new Error("token refresh failed: invalid_grant (retry after 400 ms)"),
+    ],
+    ["thrown marker string", "refresh_token_reused"],
+    ["network failure", new Error("OpenAI Codex token refresh error: fetch failed")],
+    ["server error", new Error("OpenAI Codex token refresh failed (503): service unavailable")],
+    [
+      "kimi retryable status",
+      new Error('Kimi Code token refresh failed with status 500: {"error":"invalid_grant"}'),
+    ],
+    ["timeout", new Error("The operation timed out")],
+    ["malformed body", new Error("OpenAI Codex token refresh response missing fields: {}")],
+    ["lookalike identifier", new Error('{"error":"not_invalid_grant"} (400)')],
+    ["marker prefix only", new Error('{"error":"invalid_granted"} (400)')],
+    ["non-error object", { message: "invalid_grant (400)" }],
+    ["null", null],
+    ["undefined", undefined],
+  ])("does not classify a %s as terminal", (_label, error) => {
+    expect(terminalOAuthRefreshErrorMarker(error)).toBeUndefined();
+  });
+
+  it("stops walking after the chain depth limit", () => {
+    let error: Error = new Error('(400) {"error":"invalid_grant"}');
+    for (let i = 0; i < 12; i += 1) error = new Error(`layer ${i}`, { cause: error });
+    expect(terminalOAuthRefreshErrorMarker(error)).toBeUndefined();
+
+    let shallow: Error = new Error('(400) {"error":"invalid_grant"}');
+    for (let i = 0; i < 3; i += 1) shallow = new Error(`layer ${i}`, { cause: shallow });
+    expect(terminalOAuthRefreshErrorMarker(shallow)).toBe("invalid_grant");
+  });
+});
+
+describe("resolveModelAuth retirement", () => {
+  const expired = JSON.stringify(oauthCred({ access: "old", expires: 1 }));
+
+  const failingRefresh = (error: unknown) => ({
+    refresh: async (): Promise<OAuthCredential> => {
+      throw error;
+    },
+    toAuth: async (current: OAuthCredential) => ({ apiKey: current.access }),
+  });
+
+  it("retires once with the classified marker, then rethrows the refresh error", async () => {
+    const failure = new Error("OAuth refresh failed for openai-codex", {
+      cause: new Error('OpenAI Codex token refresh failed (400): {"error":"invalid_grant"}'),
+    });
+    const retire = vi.fn(async () => true);
+    const persist = vi.fn(async () => {});
+
+    await expect(
+      resolveModelAuth(expired, CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        persist,
+        retire,
+        oauth: failingRefresh(failure),
+      }),
+    ).rejects.toBe(failure);
+
+    expect(retire).toHaveBeenCalledTimes(1);
+    expect(retire).toHaveBeenCalledWith(
+      "terminal-refresh-failure",
+      "invalid_grant",
+      // The stored credential state the failed refresh was attempted on.
+      expect.objectContaining({ access: "old", refresh: "refresh-token", expires: 1 }),
+    );
+    expect(persist).not.toHaveBeenCalled();
+    expect(isRetiredModelCredentialError(failure)).toBe(true);
+  });
+
+  it("does not retire on transient refresh failures", async () => {
+    for (const failure of [
+      new Error("OpenAI Codex token refresh error: fetch failed"),
+      new Error("OpenAI Codex token refresh failed (500): {"),
+      new Error('OpenAI Codex token refresh failed (500): {"error":"invalid_grant"}'),
+      new Error("request timed out"),
+    ]) {
+      const retire = vi.fn(async () => undefined);
+      await expect(
+        resolveModelAuth(expired, CHATGPT_OAUTH_PROVIDER, {
+          now: 10_000,
+          retire,
+          oauth: failingRefresh(failure),
+        }),
+      ).rejects.toBe(failure);
+      expect(retire).not.toHaveBeenCalled();
+      expect(isRetiredModelCredentialError(failure)).toBe(false);
+    }
+  });
+
+  it("rethrows the refresh error when retirement itself fails", async () => {
+    const failure = new Error('refresh failed (400): {"error":"refresh_token_expired"}');
+    const retireFailure = new Error("database gone");
+    const retire = vi.fn(async () => {
+      throw retireFailure;
+    });
+
+    await expect(
+      resolveModelAuth(expired, CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        retire,
+        oauth: failingRefresh(failure),
+      }),
+    ).rejects.toBe(failure);
+    expect(retire).toHaveBeenCalledWith(
+      "terminal-refresh-failure",
+      "refresh_token_expired",
+      expect.objectContaining({ access: "old", refresh: "refresh-token", expires: 1 }),
+    );
+    expect(isRetiredModelCredentialError(failure)).toBe(false);
+  });
+
+  it("does not mark a refresh error retired when the delete was skipped", async () => {
+    const failure = new Error('refresh failed (400): {"error":"invalid_grant"}');
+    const retire = vi.fn(async () => false);
+    await expect(
+      resolveModelAuth(expired, CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        retire,
+        oauth: failingRefresh(failure),
+      }),
+    ).rejects.toBe(failure);
+    expect(isRetiredModelCredentialError(failure)).toBe(false);
+  });
+
+  it("rethrows the refresh error when no retire hook is configured", async () => {
+    const failure = new Error('refresh failed (400): {"error":"invalid_grant"}');
+    await expect(
+      resolveModelAuth(expired, CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        oauth: failingRefresh(failure),
+      }),
+    ).rejects.toBe(failure);
+  });
+
+  it("does not refresh or retire while the stored token is still valid", async () => {
+    const refresh = vi.fn();
+    const retire = vi.fn(async () => undefined);
+    const resolved = await resolveModelAuth(
+      JSON.stringify(oauthCred({ access: "live", expires: 1_000_000 })),
+      CHATGPT_OAUTH_PROVIDER,
+      {
+        now: 10_000,
+        retire,
+        oauth: {
+          refresh,
+          toAuth: async (current: OAuthCredential) => ({ apiKey: current.access }),
+        },
+      },
+    );
+    expect(resolved.apiKey).toBe("live");
+    expect(refresh).not.toHaveBeenCalled();
+    expect(retire).not.toHaveBeenCalled();
+  });
+});
+
+describe("resolveModelAuth account-change guard", () => {
+  const expiredAccount = (accountId: string | undefined, access = "old") =>
+    JSON.stringify(oauthCred({ access, expires: 1, accountId }));
+
+  const succeedingRefresh = (next: OAuthCredential) => ({
+    refresh: async (): Promise<OAuthCredential> => next,
+    toAuth: async (current: OAuthCredential) => ({ apiKey: current.access }),
+  });
+
+  // Wire the retire hook the way the executor does around
+  // retireModelCredential: the failed credential state becomes a
+  // matchesFailedOAuthSecret predicate over the secret row's current
+  // ciphertext, and the delete only runs while the row still matches. Without
+  // the failed state there is no fence and the delete proceeds.
+  const fencingRetire =
+    (row: () => string, deleteCredential: () => void) =>
+    async (
+      _reason: ModelCredentialRetireReason,
+      _detail?: string,
+      failed?: ModelCredentialFailedState,
+    ) => {
+      const matches = failed ? matchesFailedOAuthSecret(() => row(), failed) : undefined;
+      if (matches && !matches({ id: "secret-codex", ciphertext: "cipher-codex" })) return false;
+      deleteCredential();
+      return true;
+    };
+
+  it("persists a refresh that returns the same account", async () => {
+    const retire = vi.fn(async () => undefined);
+    const persist = vi.fn(async () => {});
+    const resolved = await resolveModelAuth(expiredAccount("acct-a"), CHATGPT_OAUTH_PROVIDER, {
+      now: 10_000,
+      persist,
+      retire,
+      oauth: succeedingRefresh(oauthCred({ access: "new", expires: 99_999, accountId: "acct-a" })),
+    });
+    expect(resolved.apiKey).toBe("new");
+    expect(persist).toHaveBeenCalledTimes(1);
+    expect(retire).not.toHaveBeenCalled();
+  });
+
+  it("retires the credential and fails when the refresh returns a different account", async () => {
+    const retire = vi.fn(async () => true);
+    const persist = vi.fn(async () => {});
+    const toAuth = vi.fn(
+      async (current: OAuthCredential): Promise<{ apiKey: string }> => ({
+        apiKey: current.access,
+      }),
+    );
+
+    await expect(
+      resolveModelAuth(expiredAccount("acct-a"), CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        persist,
+        retire,
+        oauth: {
+          refresh: async () => oauthCred({ access: "new", expires: 99_999, accountId: "acct-b" }),
+          toAuth,
+        },
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof RetiredModelCredentialError &&
+        error.message === OAUTH_ACCOUNT_CHANGED_ERROR,
+    );
+
+    expect(retire).toHaveBeenCalledTimes(1);
+    expect(retire).toHaveBeenCalledWith(
+      "account-changed",
+      "stored account acct-a, refreshed account acct-b",
+      // The stored credential state whose refresh produced the foreign account.
+      expect.objectContaining({ access: "old", refresh: "refresh-token", expires: 1 }),
+    );
+    // The account-B token is never persisted or used.
+    expect(persist).not.toHaveBeenCalled();
+    expect(toAuth).not.toHaveBeenCalled();
+  });
+
+  it("detects the account change from the refreshed token's JWT claim", async () => {
+    const retire = vi.fn(async () => true);
+    // A refresh that does not copy `accountId` onto the credential is still
+    // caught when the new access token carries the ChatGPT account claim.
+    const refresh = async (): Promise<OAuthCredential> =>
+      oauthCred({
+        access: fakeJwt(chatGptAccountClaim("acct-b")),
+        expires: 99_999,
+        accountId: undefined,
+      });
+
+    await expect(
+      resolveModelAuth(expiredAccount("acct-a"), CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        retire,
+        oauth: {
+          refresh,
+          toAuth: async (current: OAuthCredential) => ({ apiKey: current.access }),
+        },
+      }),
+    ).rejects.toThrow(OAUTH_ACCOUNT_CHANGED_ERROR);
+    expect(retire).toHaveBeenCalledWith(
+      "account-changed",
+      "stored account acct-a, refreshed account acct-b",
+      // The stored credential state whose refresh produced the foreign account.
+      expect.objectContaining({ refresh: "refresh-token", expires: 1 }),
+    );
+  });
+
+  it("compares against a stored account id carried only by the stored access JWT", async () => {
+    const retire = vi.fn(async () => true);
+    await expect(
+      resolveModelAuth(
+        expiredAccount(undefined, fakeJwt(chatGptAccountClaim("acct-a"))),
+        CHATGPT_OAUTH_PROVIDER,
+        {
+          now: 10_000,
+          retire,
+          oauth: succeedingRefresh(
+            oauthCred({ access: "new", expires: 99_999, accountId: "acct-b" }),
+          ),
+        },
+      ),
+    ).rejects.toThrow(OAUTH_ACCOUNT_CHANGED_ERROR);
+    expect(retire).toHaveBeenCalledWith(
+      "account-changed",
+      "stored account acct-a, refreshed account acct-b",
+      // The stored credential state whose refresh produced the foreign account.
+      expect.objectContaining({ refresh: "refresh-token", expires: 1 }),
+    );
+  });
+
+  it("still fails with the readable error when account-change retirement fails", async () => {
+    const retire = vi.fn(async () => {
+      throw new Error("database gone");
+    });
+
+    await expect(
+      resolveModelAuth(expiredAccount("acct-a"), CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        retire,
+        oauth: succeedingRefresh(
+          oauthCred({ access: "new", expires: 99_999, accountId: "acct-b" }),
+        ),
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof RetiredModelCredentialError) &&
+        error.message === OAUTH_ACCOUNT_CHANGED_ERROR,
+    );
+    expect(retire).toHaveBeenCalledWith(
+      "account-changed",
+      "stored account acct-a, refreshed account acct-b",
+      // The stored credential state whose refresh produced the foreign account.
+      expect.objectContaining({ refresh: "refresh-token", expires: 1 }),
+    );
+  });
+
+  it("skips the account-change delete when a concurrent refresh rotated the secret row", async () => {
+    // A sibling run refreshed the ORIGINAL account and rewrote the same secret
+    // row while this refresh was in flight; the stale account-change failure
+    // must not delete the newer credential.
+    const stored = oauthCred({ access: "old", expires: 1, accountId: "acct-a" });
+    let row = serializeModelSecret({ kind: "oauth", credential: stored });
+    const deleteCredential = vi.fn();
+
+    await expect(
+      resolveModelAuth(JSON.stringify(stored), CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        retire: fencingRetire(() => row, deleteCredential),
+        oauth: {
+          refresh: async () => {
+            row = serializeModelSecret({
+              kind: "oauth",
+              credential: oauthCred({
+                access: "rotated",
+                refresh: "rotated-refresh",
+                expires: 50_000,
+                accountId: "acct-a",
+              }),
+            });
+            return oauthCred({ access: "new", expires: 99_999, accountId: "acct-b" });
+          },
+          toAuth: async (current: OAuthCredential) => ({ apiKey: current.access }),
+        },
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof RetiredModelCredentialError) &&
+        error.message === OAUTH_ACCOUNT_CHANGED_ERROR,
+    );
+
+    expect(deleteCredential).not.toHaveBeenCalled();
+  });
+
+  it("still deletes while the secret row matches the failed account-change state", async () => {
+    // The fence must not block the intended delete: the row still holds the
+    // credential that produced the foreign account, so it goes away.
+    const stored = oauthCred({ access: "old", expires: 1, accountId: "acct-a" });
+    const row = serializeModelSecret({ kind: "oauth", credential: stored });
+    const deleteCredential = vi.fn();
+
+    await expect(
+      resolveModelAuth(JSON.stringify(stored), CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        retire: fencingRetire(() => row, deleteCredential),
+        oauth: succeedingRefresh(
+          oauthCred({ access: "new", expires: 99_999, accountId: "acct-b" }),
+        ),
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof RetiredModelCredentialError &&
+        error.message === OAUTH_ACCOUNT_CHANGED_ERROR,
+    );
+
+    expect(deleteCredential).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ["stored side", undefined, "acct-b"],
+    ["refreshed side", "acct-a", undefined],
+    ["both sides", undefined, undefined],
+  ])(
+    "tolerates a missing account id on the %s",
+    async (_case, storedAccountId, refreshedAccountId) => {
+      const retire = vi.fn(async () => undefined);
+      const persist = vi.fn(async () => {});
+      const resolved = await resolveModelAuth(
+        expiredAccount(storedAccountId),
+        CHATGPT_OAUTH_PROVIDER,
+        {
+          now: 10_000,
+          persist,
+          retire,
+          oauth: succeedingRefresh(
+            oauthCred({ access: "new", expires: 99_999, accountId: refreshedAccountId }),
+          ),
+        },
+      );
+      expect(resolved.apiKey).toBe("new");
+      expect(persist).toHaveBeenCalledTimes(1);
+      expect(retire).not.toHaveBeenCalled();
+    },
+  );
+
+  it("skips the account-change delete when another worker rotated only the access token", async () => {
+    // A successful refresh can keep the same refresh token and expiry and
+    // rewrite only the access token. The fence has to notice that too.
+    const stored = oauthCred({
+      access: "old",
+      refresh: "same-refresh",
+      expires: 1,
+      accountId: "acct-a",
+    });
+    const row = serializeModelSecret({
+      kind: "oauth",
+      credential: oauthCred({
+        access: "rotated-access",
+        refresh: "same-refresh",
+        expires: 1,
+        accountId: "acct-a",
+      }),
+    });
+    const deleteCredential = vi.fn();
+
+    await expect(
+      resolveModelAuth(JSON.stringify(stored), CHATGPT_OAUTH_PROVIDER, {
+        now: 10_000,
+        retire: fencingRetire(() => row, deleteCredential),
+        oauth: succeedingRefresh(
+          oauthCred({ access: "foreign", expires: 99_999, accountId: "acct-b" }),
+        ),
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        error instanceof Error &&
+        !(error instanceof RetiredModelCredentialError) &&
+        error.message === OAUTH_ACCOUNT_CHANGED_ERROR,
+    );
+
+    expect(deleteCredential).not.toHaveBeenCalled();
+  });
+});
+
+describe("oauthCredentialAccountId", () => {
+  it("reads the namespaced chatgpt_account_id claim", () => {
+    expect(
+      oauthCredentialAccountId(
+        oauthCred({
+          accountId: undefined,
+          access: fakeJwt({
+            ...chatGptAccountClaim("acct-ns"),
+            chatgpt_account_id: "acct-top",
+          }),
+        }),
+      ),
+    ).toBe("acct-ns");
+  });
+
+  it("falls back to a top-level chatgpt_account_id claim", () => {
+    expect(
+      oauthCredentialAccountId(
+        oauthCred({
+          accountId: "",
+          access: fakeJwt({ chatgpt_account_id: "acct-top" }),
+        }),
+      ),
+    ).toBe("acct-top");
+  });
+
+  it("falls back to the top-level claim when the namespaced one is blank", () => {
+    for (const blank of ["", "   ", "\t"]) {
+      expect(
+        oauthCredentialAccountId(
+          oauthCred({
+            accountId: undefined,
+            access: fakeJwt({
+              "https://api.openai.com/auth": { chatgpt_account_id: blank },
+              chatgpt_account_id: "acct-top",
+            }),
+          }),
+        ),
+      ).toBe("acct-top");
+    }
+    expect(
+      oauthCredentialAccountId(
+        oauthCred({
+          accountId: undefined,
+          access: fakeJwt({
+            "https://api.openai.com/auth": { chatgpt_account_id: "" },
+            chatgpt_account_id: "   ",
+          }),
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("falls back to the top-level claim when the namespaced one is not a string", () => {
+    for (const namespaced of [42, false, { id: "acct-obj" }, null]) {
+      expect(
+        oauthCredentialAccountId(
+          oauthCred({
+            accountId: undefined,
+            access: fakeJwt({
+              "https://api.openai.com/auth": { chatgpt_account_id: namespaced },
+              chatgpt_account_id: "acct-top",
+            }),
+          }),
+        ),
+      ).toBe("acct-top");
+    }
+    expect(
+      oauthCredentialAccountId(
+        oauthCred({
+          accountId: undefined,
+          access: fakeJwt({
+            "https://api.openai.com/auth": { chatgpt_account_id: 42 },
+            chatgpt_account_id: 7,
+          }),
+        }),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("keeps a padded accountId and skips one that is only whitespace", () => {
+    const access = fakeJwt(chatGptAccountClaim("acct-jwt"));
+    expect(oauthCredentialAccountId(oauthCred({ accountId: "  acct-direct  ", access }))).toBe(
+      "  acct-direct  ",
+    );
+    expect(oauthCredentialAccountId(oauthCred({ accountId: "   ", access }))).toBe("acct-jwt");
+  });
+
+  it("returns undefined for an undecodable token", () => {
+    expect(
+      oauthCredentialAccountId(oauthCred({ accountId: undefined, access: "not-a-jwt" })),
+    ).toBeUndefined();
+    expect(() =>
+      oauthCredentialAccountId(oauthCred({ accountId: " \t ", access: "a.!!!.c" })),
+    ).not.toThrow();
+    expect(
+      oauthCredentialAccountId(oauthCred({ accountId: " \t ", access: "a.!!!.c" })),
+    ).toBeUndefined();
+  });
+});
+
+describe("matchesFailedOAuthSecret", () => {
+  const failed = { access: "old-access", refresh: "old-refresh", expires: 1 };
+  const load = (ciphertext: string) => ciphertext;
+  const predicate = () => matchesFailedOAuthSecret(load, failed);
+  const row = (credential: OAuthCredential) => ({
+    id: "secret-1",
+    ciphertext: serializeModelSecret({ kind: "oauth", credential }),
+  });
+
+  it("matches only when the stored credential is still the one that failed", () => {
+    expect(predicate()(row(oauthCred(failed)))).toBe(true);
+  });
+
+  it("skips a secret another worker refreshed in place", () => {
+    // A successful refresh can rotate only the access token and keep the same
+    // refresh token and expiry. Any of the three fields changing means the
+    // stored row is no longer the failed attempt.
+    expect(
+      predicate()(row(oauthCred({ access: "new-access", refresh: "old-refresh", expires: 1 }))),
+    ).toBe(false);
+    expect(
+      predicate()(row(oauthCred({ access: "old-access", refresh: "new-refresh", expires: 1 }))),
+    ).toBe(false);
+    expect(
+      predicate()(row(oauthCred({ access: "old-access", refresh: "old-refresh", expires: 2 }))),
+    ).toBe(false);
+  });
+
+  it("skips material it cannot prove is the failed credential", () => {
+    expect(predicate()({ id: "secret-1", ciphertext: "not-json" })).toBe(false);
+    expect(
+      predicate()({
+        id: "secret-1",
+        ciphertext: serializeModelSecret({ kind: "api_key", key: "sk-test" }),
+      }),
+    ).toBe(false);
+    const broken = matchesFailedOAuthSecret(() => {
+      throw new Error("decrypt failed");
+    }, failed);
+    expect(broken({ id: "secret-1", ciphertext: "cipher" })).toBe(false);
+  });
+});
+
+describe("refreshExpiredModelCredential", () => {
+  const scope = { userId: "user-1", spaceId: "ws-1" };
+
+  function secretRow(initial: string) {
+    let current = initial;
+    const prisma = {
+      secret: {
+        findFirst: vi.fn(async () => ({ id: "secret-1", ciphertext: "cipher" })),
+        update: vi.fn(async () => ({})),
+      },
+    } as unknown as PrismaClient;
+    const secretStore = {
+      load: vi.fn(() => current),
+      put: vi.fn(async (next: string) => {
+        current = next;
+        return { id: "secret-1", ciphertext: `cipher:${next.length}` };
+      }),
+    };
+    return {
+      prisma,
+      secretStore,
+      update: prisma.secret.update as unknown as ReturnType<typeof vi.fn>,
+    };
+  }
+
+  const stubOAuth = (refresh: (credential: OAuthCredential) => Promise<OAuthCredential>) => ({
+    refresh: vi.fn(refresh),
+    toAuth: vi.fn(async (credential: OAuthCredential) => ({ apiKey: credential.access })),
+  });
+
+  it("refreshes and persists an expired OAuth credential", async () => {
+    const { prisma, secretStore, update } = secretRow(
+      serializeModelSecret({
+        kind: "oauth",
+        credential: oauthCred({ access: "old", expires: 1 }),
+      }),
+    );
+    const oauth = stubOAuth(async () =>
+      oauthCred({ access: "new", expires: Date.now() + 3_600_000 }),
+    );
+
+    await refreshExpiredModelCredential(
+      prisma,
+      secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      { oauth },
+    );
+
+    expect(oauth.refresh).toHaveBeenCalledTimes(1);
+    expect(secretStore.put).toHaveBeenCalledTimes(1);
+    expect(update).toHaveBeenCalledWith({
+      where: { id: "secret-1" },
+      data: { ciphertext: expect.any(String) },
+    });
+
+    // The stored credential is now fresh, so a queued second run is a no-op.
+    await refreshExpiredModelCredential(
+      prisma,
+      secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      { oauth },
+    );
+    expect(oauth.refresh).toHaveBeenCalledTimes(1);
+    expect(secretStore.put).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves a still-valid bearer and non-OAuth secrets untouched", async () => {
+    const fresh = secretRow(
+      serializeModelSecret({
+        kind: "oauth",
+        credential: oauthCred({ access: "kept", expires: Date.now() + 3_600_000 }),
+      }),
+    );
+    const oauth = stubOAuth(async () => oauthCred({ access: "new" }));
+    await refreshExpiredModelCredential(
+      fresh.prisma,
+      fresh.secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      { oauth },
+    );
+    expect(oauth.refresh).not.toHaveBeenCalled();
+    expect(fresh.secretStore.put).not.toHaveBeenCalled();
+
+    const apiKey = secretRow("sk-test-plain-key");
+    await refreshExpiredModelCredential(
+      apiKey.prisma,
+      apiKey.secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      { oauth },
+    );
+    expect(oauth.refresh).not.toHaveBeenCalled();
+    expect(apiKey.secretStore.put).not.toHaveBeenCalled();
+  });
+
+  it("serializes on the credential lock so concurrent kicks refresh once", async () => {
+    const { prisma, secretStore } = secretRow(
+      serializeModelSecret({
+        kind: "oauth",
+        credential: oauthCred({ access: "old", expires: 1 }),
+      }),
+    );
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const oauth = stubOAuth(async () => {
+      await gate;
+      return oauthCred({ access: "new", expires: Date.now() + 3_600_000 });
+    });
+
+    const first = refreshExpiredModelCredential(
+      prisma,
+      secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      { oauth },
+    );
+    const second = refreshExpiredModelCredential(
+      prisma,
+      secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      { oauth },
+    );
+    await vi.waitFor(() => expect(oauth.refresh).toHaveBeenCalledTimes(1));
+    release();
+    await Promise.all([first, second]);
+
+    // The second call waited on the lock, then saw the already-fresh token.
+    expect(oauth.refresh).toHaveBeenCalledTimes(1);
+    expect(secretStore.put).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("kickModelCredentialRefresh", () => {
+  const scope = { userId: "user-1", spaceId: "ws-1" };
+
+  it("collapses concurrent kicks into one refresh and frees the slot after", async () => {
+    let current = serializeModelSecret({
+      kind: "oauth",
+      credential: oauthCred({ access: "old", expires: 1 }),
+    });
+    const prisma = {
+      secret: {
+        findFirst: vi.fn(async () => ({ id: "secret-1", ciphertext: "cipher" })),
+        update: vi.fn(async () => ({})),
+      },
+    } as unknown as PrismaClient;
+    const secretStore = {
+      load: vi.fn(() => current),
+      put: vi.fn(async (next: string) => {
+        current = next;
+        return { id: "secret-1", ciphertext: "next" };
+      }),
+    };
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const oauth = {
+      refresh: vi.fn(async () => {
+        await gate;
+        return oauthCred({ access: "new", expires: Date.now() + 3_600_000 });
+      }),
+      toAuth: vi.fn(async (credential: OAuthCredential) => ({ apiKey: credential.access })),
+    };
+    const opts = { oauth };
+
+    kickModelCredentialRefresh(
+      prisma,
+      secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      opts,
+    );
+    kickModelCredentialRefresh(
+      prisma,
+      secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      opts,
+    );
+    await vi.waitFor(() => expect(oauth.refresh).toHaveBeenCalledTimes(1));
+    release();
+    await vi.waitFor(() => expect(secretStore.put).toHaveBeenCalledTimes(1));
+    expect(oauth.refresh).toHaveBeenCalledTimes(1);
+
+    // Let the kick's finally settle so the in-flight slot frees before re-kicking.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Once the kick settles a later expired read may kick again — this one
+    // finds the fresh token and refreshes nothing.
+    kickModelCredentialRefresh(
+      prisma,
+      secretStore,
+      scope,
+      "secret-1",
+      CHATGPT_OAUTH_PROVIDER,
+      opts,
+    );
+    await vi.waitFor(() => expect(oauth.toAuth).toHaveBeenCalledTimes(2));
+    expect(oauth.refresh).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -457,7 +1472,9 @@ describe("PiOAuthLogins", () => {
     await expect(finishing).resolves.toEqual({ status: "connected", value: "saved" });
     await cancelling;
     expect(cancellationFinished).toBe(true);
-    expect(persistenceSignal.aborted).toBe(false);
+    // The persist signal is the session's own — cancel never aborted the
+    // in-flight write; teardown aborts it only after the write settled.
+    expect(persistenceSignal.aborted).toBe(true);
   });
 
   it("does not persist after cancellation wins before finalization", async () => {
@@ -806,5 +1823,133 @@ describe("PiOAuthLogins", () => {
     });
     expect(deviceCodeResult(started).userCode).toBe("XAI-CODE");
     logins.abortAll();
+  });
+
+  describe("session timers", () => {
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("still expires a session that is not finalizing", async () => {
+      vi.useFakeTimers();
+      const logins = new PiOAuthLogins(async (_provider, _type, interaction) => {
+        interaction.notify({
+          type: "device_code",
+          userCode: "EXPIRE",
+          verificationUri: "https://auth.openai.com/codex/device",
+          expiresInSeconds: 60,
+        });
+        return oauthCred();
+      });
+      const actor = { userId: "u", spaceId: "w" };
+      const started = await logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER });
+      await flushMicrotasks();
+
+      vi.advanceTimersByTime(61_000);
+      expect((await logins.complete(started.loginId, actor)).status).toBe("error");
+    });
+
+    it("keeps a finalizing session when expiry elapses so a replacement cannot overwrite it", async () => {
+      vi.useFakeTimers();
+      const actor = { userId: "u", spaceId: "w" };
+      let startedCount = 0;
+      const logins = new PiOAuthLogins(async (_provider, _type, interaction) => {
+        startedCount += 1;
+        interaction.notify({
+          type: "device_code",
+          userCode: `CODE-${startedCount}`,
+          verificationUri: "https://auth.openai.com/codex/device",
+          expiresInSeconds: 60,
+        });
+        return oauthCred({ access: `access-${startedCount}` });
+      });
+      const started = await logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER });
+      await flushMicrotasks();
+
+      let releasePersist!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releasePersist = resolve;
+      });
+      let persistedAccess: string | undefined;
+      const finishing = logins.finish(started.loginId, actor, async (result) => {
+        await gate;
+        // The expiry timer must not abort this write. A replacement that
+        // started underneath it would be overwritten by this persist.
+        if (result.signal.aborted) throw result.signal.reason;
+        persistedAccess = result.credential.access;
+        return "saved-original";
+      });
+      await Promise.resolve();
+
+      vi.advanceTimersByTime(61_000);
+      expect((await logins.complete(started.loginId, actor)).status).toBe("pending");
+
+      const replacement = logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER });
+      await flushMicrotasks();
+      expect(startedCount).toBe(1);
+
+      releasePersist();
+      await expect(finishing).resolves.toEqual({ status: "connected", value: "saved-original" });
+      expect(persistedAccess).toBe("access-1");
+      await expect(replacement).resolves.toMatchObject({ userCode: "CODE-2" });
+      expect(startedCount).toBe(2);
+      logins.abortAll();
+    });
+
+    it("drops a session whose save fails after expiry instead of restoring it", async () => {
+      vi.useFakeTimers();
+      const actor = { userId: "u", spaceId: "w" };
+      let startedCount = 0;
+      const logins = new PiOAuthLogins(async (_provider, _type, interaction) => {
+        startedCount += 1;
+        interaction.notify({
+          type: "device_code",
+          userCode: `CODE-${startedCount}`,
+          verificationUri: "https://auth.openai.com/codex/device",
+          expiresInSeconds: 60,
+        });
+        return oauthCred();
+      });
+      const started = await logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER });
+      await flushMicrotasks();
+
+      let releasePersist!: (error?: unknown) => void;
+      const gate = new Promise<void>((resolve, reject) => {
+        releasePersist = (error) => (error ? reject(error) : resolve());
+      });
+      const failure = new Error("persistence failed");
+      const finishing = logins.finish(started.loginId, actor, async () => {
+        await gate;
+        return "saved";
+      });
+      await Promise.resolve();
+
+      vi.advanceTimersByTime(61_000);
+      expect((await logins.complete(started.loginId, actor)).status).toBe("pending");
+
+      releasePersist(failure);
+      await expect(finishing).rejects.toBe(failure);
+      expect((await logins.complete(started.loginId, actor)).status).toBe("error");
+
+      const replacement = await logins.begin({ ...actor, provider: CHATGPT_OAUTH_PROVIDER });
+      expect(deviceCodeResult(replacement).userCode).toBe("CODE-2");
+      expect(startedCount).toBe(2);
+      logins.abortAll();
+    });
+
+    it("clears armed expiry timers when abortAll runs", async () => {
+      vi.useFakeTimers();
+      const control = createControlledOAuthLogins();
+      await control.logins.begin({
+        userId: "u",
+        spaceId: "w",
+        provider: CHATGPT_OAUTH_PROVIDER,
+      });
+      const armed = vi.getTimerCount();
+      expect(armed).toBeGreaterThan(0);
+
+      control.logins.abortAll();
+      expect(vi.getTimerCount()).toBe(armed - 1);
+    });
   });
 });

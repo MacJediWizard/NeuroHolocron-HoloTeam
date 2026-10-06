@@ -115,6 +115,14 @@ export function historyCompactJobKey(threadId: string): string {
   return `history.compact:${threadId}`;
 }
 
+/**
+ * Each attempt runs a summarizer completion that can take up to the summarizer
+ * timeout, so the job queue's default attempt count turns one permanently
+ * failing thread into hours of paid retries. A few tries ride out transient
+ * provider errors without storming.
+ */
+export const HISTORY_COMPACT_MAX_ATTEMPTS = 4;
+
 export function messagingDeliverJob(runId?: string, availableAt?: Date): BackgroundJob {
   return {
     name: "messaging.deliver",
@@ -129,6 +137,7 @@ export function historyCompactJob(threadId: string): BackgroundJob {
     name: "history.compact",
     payload: { threadId },
     replaceKey: historyCompactJobKey(threadId),
+    maxAttempts: HISTORY_COMPACT_MAX_ATTEMPTS,
   };
 }
 

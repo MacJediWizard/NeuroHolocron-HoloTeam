@@ -1,6 +1,7 @@
 import type { JobPublisher, MessagingInboundMessage } from "@rakazo/adapter-kit";
 import { messagingDeliverJob, runContinueJob } from "@rakazo/adapter-kit";
 import type { MessageBlock } from "@rakazo/contracts";
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { parseMessagingCommand, sanitizeMessagingLabel } from "@rakazo/core";
 import type {
   MessagingIdentityRequest,
@@ -555,7 +556,7 @@ async function handleChannelEvent(
           idempotencyKey: `intro:${channel.id}`,
           kind: "intro",
           threadId: channel.threadId,
-          body: "Hi. This line hosts Rakazo personal agents. Some people in this group haven't messaged it yet; send any message to this line first if you want your own agent here.",
+          body: `Hi. This line hosts ${PRODUCT_NAME} personal agents. Some people in this group haven't messaged it yet; send any message to this line first if you want your own agent here.`,
         },
       ],
       skipDuplicates: true,
@@ -646,7 +647,7 @@ async function inviteMember(
         idempotencyKey: `invite:${channel.id}:${identity.id}`,
         kind: "dm",
         identityId: identity.id,
-        body: `"${name}" was linked to your Rakazo agent. Reply YES to let your agent join the conversation there, or NO to stay out.`,
+        body: `"${name}" was linked to your ${PRODUCT_NAME} agent. Reply YES to let your agent join the conversation there, or NO to stay out.`,
       },
     ],
     skipDuplicates: true,

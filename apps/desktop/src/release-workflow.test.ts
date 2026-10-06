@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { SOURCE_REPO } from "@rakazo/contracts/brand";
 import { describe, expect, it } from "vitest";
 
 const workflow = readFileSync(
@@ -76,8 +77,9 @@ describe("desktop release workflow", () => {
 
   it("pins every platform update feed to the official GitHub owner and repo", () => {
     expect(workflow).toContain('grep -Fqx "provider: github"');
-    expect(workflow).toContain('grep -Fqx "owner: elie222"');
-    expect(workflow).toContain('grep -Fqx "repo: rakazo"');
+    const [owner, repo] = SOURCE_REPO.split("/");
+    expect(workflow).toContain(`grep -Fqx "owner: ${owner}"`);
+    expect(workflow).toContain(`grep -Fqx "repo: ${repo}"`);
     expect(workflow).toContain("Verify Linux update feed is pinned to the official GitHub channel");
     expect(workflow).toContain("Windows update config missing");
     expect(workflow).toContain("RELEASE_VERSION:");

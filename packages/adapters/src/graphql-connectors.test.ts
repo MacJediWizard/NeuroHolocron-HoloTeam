@@ -129,6 +129,22 @@ describe("GraphQL connector import", () => {
     expect(JSON.stringify(fetch.mock.calls)).toContain("__schema");
   });
 
+  it("introspects a loopback endpoint only with the private-endpoint escape", async () => {
+    const fetch = vi.fn(async () => Response.json(STAR_WARS_INTROSPECTION));
+    const install = (allowPrivateEndpoint: boolean) =>
+      prepareGraphqlInstall({
+        source: "http://127.0.0.1:4000/graphql",
+        config: { auth: { type: "none" } },
+        remote: { fetch: fetch as unknown as typeof globalThis.fetch },
+        allowPrivateEndpoint,
+      });
+
+    await expect(install(false)).rejects.toThrow("Connector URL must use HTTPS");
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(install(true)).resolves.toMatchObject({ operationCount: 3 });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
   it.each(["host", "content-length", "connection"])(
     "refuses transport auth header %s",
     async (name) => {

@@ -1,4 +1,5 @@
 import { Trans, useLingui } from "@lingui/react/macro";
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { readBoundedJsonResponse, signupRequiresEmailVerification } from "@rakazo/core";
 import { Button, Input, Label } from "@rakazo/ui-web";
 import { Eye, EyeOff } from "lucide-react";
@@ -33,9 +34,9 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const title = sent ? (
     <Trans>Check your email</Trans>
   ) : mode === "in" ? (
-    <Trans>Sign in to Rakazo</Trans>
+    <Trans>Sign in to {PRODUCT_NAME}</Trans>
   ) : mode === "up" ? (
-    <Trans>Create your Rakazo</Trans>
+    <Trans>Create your {PRODUCT_NAME}</Trans>
   ) : (
     <Trans>Reset your password</Trans>
   );
@@ -60,9 +61,11 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       .catch(() => undefined)
       .finally(() => clearTimeout(timer));
     return () => {
+      // Do not abort on unmount: a guard redirect that bounces through this
+      // page only mounts it for a render or two, and the cancelled fetch then
+      // surfaces as a failed request. `active` drops the result and the timer
+      // keeps its bound — abort() on an already settled fetch is a no-op.
       active = false;
-      clearTimeout(timer);
-      controller.abort();
     };
   }, [mode]);
 

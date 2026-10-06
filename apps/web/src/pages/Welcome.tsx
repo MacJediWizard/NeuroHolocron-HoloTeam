@@ -1,4 +1,5 @@
 import { Trans } from "@lingui/react/macro";
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { useNavigate } from "react-router-dom";
 import { WindowChrome } from "./WindowChrome";
 
@@ -15,7 +16,9 @@ export function WelcomePage() {
             <span className="h-6 w-[11px] rounded-full bg-card" />
             <span className="h-6 w-[11px] rounded-full bg-card" />
           </div>
-          <div className="text-[76px] leading-none tracking-[-0.03em] text-foreground">Rakazo</div>
+          <div className="text-[76px] leading-none tracking-[-0.03em] text-foreground">
+            {PRODUCT_NAME}
+          </div>
         </div>
         <p className="max-w-[600px] text-center text-[27px] leading-[1.4] text-foreground/75">
           <Trans>

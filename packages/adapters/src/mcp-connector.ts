@@ -6,9 +6,11 @@ import type {
   ConnectorTool,
 } from "@rakazo/adapter-kit";
 import { isLocalMcpHost } from "@rakazo/contracts";
-import type { McpServer, PrismaClient } from "@rakazo/db";
+import type { McpServer, PrismaClient, ThreadEvents } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
-import { sanitizeConnectorError } from "./connector-safety.js";
+import { catalogToolPrefix } from "./approval-effect.js";
+import { redactConnectorPayload, sanitizeConnectorError } from "./connector-safety.js";
+import { appendToolCompletionAudit } from "./executor.js";
 import {
   CATALOG_EXECUTE,
   catalogEntries,
@@ -19,11 +21,13 @@ import {
   resolveCatalogCall,
 } from "./lazy-tool-catalog.js";
 import type { McpOAuthBroker, OAuthMaterial } from "./mcp-oauth.js";
+import { oauthMaterialSecrets } from "./mcp-oauth.js";
 import { McpSession } from "./mcp-transport.js";
+import { actorMayUsePrivateEndpoint } from "./private-endpoint.js";
 import type { RemoteTransportDependencies } from "./remote-mcp.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
-type SessionEntry = { session: McpSession; revision: number };
+type SessionEntry = { session: McpSession; revision: number; material: OAuthMaterial };
 type PendingSession = { revision: number; promise: Promise<McpSession> };
 
 /** Runtime MCP connector. Authorization is re-checked against the bot assignment on every call. */
@@ -68,6 +72,9 @@ function reportAllowlistDrift(
 export class McpConnector implements ConnectorProvider {
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly connecting = new Map<string, PendingSession>();
+  // Discovery runs more than once per run: once up front, then again on every lazy
+  // catalog access. Each attempt needs its own executionId.
+  private discoverySeq = 0;
   constructor(
     private readonly prisma: PrismaClient,
     private readonly secrets: EncryptedSecretStore,
@@ -75,6 +82,9 @@ export class McpConnector implements ConnectorProvider {
       stdioEnabled?: boolean;
       allowedCommands?: string[];
       network?: RemoteTransportDependencies;
+      /** Audit sink for failed discovery. Without it the log line stays the only trace. */
+      events?: Pick<ThreadEvents, "append">;
+      allowPrivateEndpoint?: boolean;
     } = {},
     private readonly oauth?: McpOAuthBroker,
   ) {}
@@ -91,7 +101,11 @@ export class McpConnector implements ConnectorProvider {
   async discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
     const tools = await this.authorizedTools(context);
     if (tools.length <= DIRECT_TOOL_LIMIT) return tools;
-    return lazyCatalogTools("mcp", "mcp", "MCP", catalogEntries(tools));
+    // The catalog wrappers must not be named `mcp_*`: Anthropic rejects Claude Code OAuth
+    // requests that carry a tool whose name starts with "mcp_" (single underscore) with a
+    // misleading "You're out of extra usage" 400, on every model. Direct MCP tools are
+    // `mcp__server__tool` (double underscore) and are accepted; keep the wrappers off "mcp_".
+    return lazyCatalogTools(catalogToolPrefix("mcp"), "mcp", "MCP", catalogEntries(tools));
   }
 
   async resolveCall(
@@ -116,6 +130,7 @@ export class McpConnector implements ConnectorProvider {
     });
     const groups = await Promise.all(
       assignments.map(async (assignment): Promise<ConnectorTool[]> => {
+        const startedAt = Date.now();
         try {
           const session = await this.sessionFor(assignment.server, context);
           const listed = await session.listTools({ signal: context.signal });
@@ -144,12 +159,61 @@ export class McpConnector implements ConnectorProvider {
             `mcp discovery failed for server ${assignment.server.slug}:`,
             sanitizeConnectorError(error),
           );
-          await this.evict(this.sessionKey(assignment.server, context));
+          // Capture material before eviction so the audited reason stays redacted, the
+          // same reason execute() captures it before callTool.
+          const key = this.sessionKey(assignment.server, context);
+          const material = this.sessions.get(key)?.material;
+          await this.evict(key);
+          await this.recordDiscoveryFailure(
+            assignment.server.slug,
+            error,
+            context,
+            startedAt,
+            material ? oauthMaterialSecrets(material) : [],
+          );
           return [];
         }
       }),
     );
     return groups.flat();
+  }
+
+  /**
+   * Leave a failed discovery where every other tool outcome is already visible, as an
+   * `agent.tool.completed` event with `outcome: "error"`. Losing a server's tools is
+   * otherwise invisible: the run still ends `completed` and the model simply never sees
+   * them. Discovery outside a run (settings, tool pickers) has no thread to attach to, so
+   * there the log line stays the only trace.
+   */
+  private async recordDiscoveryFailure(
+    slug: string,
+    error: unknown,
+    context: AdapterContext,
+    startedAt: number,
+    secrets: string[],
+  ): Promise<void> {
+    const events = this.options.events;
+    if (!events || !context.runId || !context.botId) return;
+    const run = await this.prisma.run
+      .findUnique({ where: { id: context.runId }, select: { threadId: true } })
+      .catch(() => null);
+    if (!run) return;
+    await appendToolCompletionAudit(
+      { events },
+      {
+        spaceId: context.spaceId,
+        threadId: run.threadId,
+        botId: context.botId,
+        runId: context.runId,
+      },
+      {
+        name: `mcp__${slug}__discovery`,
+        executionId: `mcp-discovery-${slug}-${context.runId}-${this.discoverySeq++}`,
+        durationMs: Date.now() - startedAt,
+        error,
+      },
+      secrets,
+    );
   }
 
   async *execute(call: ConnectorCall, context: AdapterContext): AsyncIterable<ConnectorEvent> {
@@ -195,17 +259,24 @@ export class McpConnector implements ConnectorProvider {
       yield { type: "error", message: "MCP tool is not assigned to this bot" };
       return;
     }
+    // Capture material before callTool so a concurrent eviction/replace cannot
+    // drop this call's OAuth secrets from model-visible redaction. Recompute via
+    // oauthMaterialSecrets(material) so in-place token refresh stays covered.
+    let material: OAuthMaterial | undefined;
+    const sessionKey = this.sessionKey(assignment.server, context);
     try {
-      const result = await (await this.sessionFor(assignment.server, context)).callTool(
-        call.route.toolName,
-        call.args,
-        { signal: context.signal },
-      );
-      yield { type: "result", data: result };
+      const session = await this.sessionFor(assignment.server, context);
+      material = this.sessions.get(sessionKey)?.material;
+      const result = await session.callTool(call.route.toolName, call.args, {
+        signal: context.signal,
+      });
+      const secrets = material ? oauthMaterialSecrets(material) : [];
+      yield { type: "result", data: redactConnectorPayload(result, secrets) };
     } catch (error) {
       // A thrown call means the transport or auth broke; drop the session so the next call reconnects.
-      await this.evict(this.sessionKey(assignment.server, context));
-      yield { type: "error", message: error instanceof Error ? error.message : String(error) };
+      const secrets = material ? oauthMaterialSecrets(material) : [];
+      await this.evict(sessionKey);
+      yield { type: "error", message: sanitizeConnectorError(error, secrets) };
     }
   }
 
@@ -242,8 +313,8 @@ export class McpConnector implements ConnectorProvider {
     }
     if (existing) await this.evict(sessionKey);
 
-    const promise = this.connectSession(server, context).then((session) => {
-      this.sessions.set(sessionKey, { session, revision: server.revision });
+    const promise = this.connectSession(server, context).then(({ session, material }) => {
+      this.sessions.set(sessionKey, { session, revision: server.revision, material });
       return session;
     });
     this.connecting.set(sessionKey, { revision: server.revision, promise });
@@ -254,8 +325,13 @@ export class McpConnector implements ConnectorProvider {
     }
   }
 
-  private async connectSession(server: McpServer, context: AdapterContext): Promise<McpSession> {
+  private async connectSession(
+    server: McpServer,
+    context: AdapterContext,
+  ): Promise<{ session: McpSession; material: OAuthMaterial }> {
     const session = new McpSession({ name: `rakazo-${server.slug}` });
+    // Hoisted so a throw after the secret is decoded can still hand the material out.
+    let material: OAuthMaterial | undefined;
     try {
       const secret = server.secretId
         ? await this.prisma.secret.findFirst({
@@ -266,7 +342,7 @@ export class McpConnector implements ConnectorProvider {
             },
           })
         : null;
-      const material = secret
+      material = secret
         ? (JSON.parse(this.secrets.load(secret.ciphertext, secret.id)) as OAuthMaterial)
         : {};
       const loaded = { material, ...(secret ? { secretId: secret.id } : {}) };
@@ -285,6 +361,11 @@ export class McpConnector implements ConnectorProvider {
         if (!server.endpoint) throw new Error("MCP endpoint is required");
         const endpoint = new URL(server.endpoint);
         const localHttp = endpoint.protocol === "http:" && isLocalMcpHost(endpoint.hostname);
+        const allowPrivateEndpoint = await actorMayUsePrivateEndpoint(
+          this.prisma,
+          context.userId,
+          this.options.allowPrivateEndpoint === true,
+        );
         const authProvider =
           !localHttp && this.oauth
             ? await this.oauth.providerFor(server, context, loaded)
@@ -300,7 +381,11 @@ export class McpConnector implements ConnectorProvider {
         };
         await session.connectRemote({
           url: server.endpoint,
-          urlPolicy: { allowHttpLocalhost: localHttp, allowLocalHttpCredentials: localHttp },
+          urlPolicy: {
+            allowHttpLocalhost: localHttp,
+            allowLocalHttpCredentials: localHttp,
+            allowPrivateEndpoint,
+          },
           transport: server.transport === "sse" ? "sse" : "streamable-http",
           allowLegacySse: server.transport === "sse",
           headerPolicy: { headers },
@@ -310,10 +395,15 @@ export class McpConnector implements ConnectorProvider {
           signal: context.signal,
         });
       }
-      return session;
+      return { session, material };
     } catch (error) {
       await session.close().catch(() => undefined);
-      throw error;
+      // Redact here, while the material is still in hand. This one rejection is handed
+      // to every caller waiting on the same pending connect, and none of them can see
+      // the secrets: the session never reached `sessions`. Sanitizing per caller would
+      // cover only whoever looked first.
+      if (!material) throw error;
+      throw new Error(sanitizeConnectorError(error, oauthMaterialSecrets(material)));
     }
   }
 }

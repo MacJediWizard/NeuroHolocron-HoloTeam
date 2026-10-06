@@ -7,9 +7,15 @@ import {
   normalizeCreateBotProfile,
   type ThinkingLevel,
 } from "@rakazo/contracts";
+import {
+  connectedModelChoices,
+  modelOptionKey,
+  parseModelOptionKey,
+  resolveSelectableModelId,
+} from "@rakazo/core";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
 import { BotAvatar } from "../components/bot-avatar";
 import { ComputerModePicker } from "../components/computer-mode-picker";
 import {
@@ -19,19 +25,13 @@ import {
   type MobileModelCredential,
   rpc,
 } from "../lib/api";
+import { COMPUTER_LIFECYCLE_TIMEOUT_MS } from "../lib/computer";
 import { useI18n } from "../lib/i18n";
 import { presentMessageActionSheet } from "../lib/message-action-sheet";
 import { useMobileTokens, useResolvedAppearance } from "../lib/native";
 
 type BotSettingsRecord = MobileBot & {
   description?: string;
-};
-
-type ModelOption = {
-  key: string;
-  provider: string;
-  modelId: string;
-  label: string;
 };
 
 type PickerChoice = {
@@ -54,6 +54,7 @@ export default function BotSettingsScreen() {
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [modelKey, setModelKey] = useState("");
   const [thinkingLevel, setThinkingLevel] = useState("");
+  const [autoSpeak, setAutoSpeak] = useState(false);
   const [credentials, setCredentials] = useState<MobileModelCredential[]>([]);
   const [catalog, setCatalog] = useState<MobileModel[]>([]);
   const [me, setMe] = useState<MobileMe | null>(null);
@@ -78,6 +79,7 @@ export default function BotSettingsScreen() {
             : "",
         );
         setThinkingLevel(next.thinkingLevel ?? "");
+        setAutoSpeak(next.autoSpeak);
       })
       .catch((err) => setError(err instanceof Error ? err.message : t("Could not load bot")));
   }, [botId]);
@@ -101,51 +103,29 @@ export default function BotSettingsScreen() {
       });
   }, [t]);
 
-  const connectedOptions = useMemo(() => {
-    const options: ModelOption[] = [];
-    const seen = new Set<string>();
-    for (const credential of credentials) {
-      const providerModels = catalog.filter(
-        (entry) => entry.provider === credential.provider && !entry.placeholder,
-      );
-      const credentialInCatalog = Boolean(
-        credential.modelId && providerModels.some((entry) => entry.id === credential.modelId),
-      );
-      const nextOptions =
-        credential.modelId && !credentialInCatalog
-          ? [
-              {
-                key: modelOptionKey(credential.provider, credential.modelId),
-                provider: credential.provider,
-                modelId: credential.modelId,
-                label: `${credential.label} · ${credential.modelId}`,
-              },
-            ]
-          : providerModels.map((entry) => ({
-              key: modelOptionKey(entry.provider, entry.id),
-              provider: entry.provider,
-              modelId: entry.id,
-              label: `${entry.providerName ?? entry.provider} · ${entry.label}`,
-            }));
-      for (const option of nextOptions) {
-        if (seen.has(option.key)) continue;
-        seen.add(option.key);
-        options.push(option);
+  const connectedOptions = useMemo(
+    () => connectedModelChoices(credentials, catalog),
+    [catalog, credentials],
+  );
+  const storedModel = modelKey ? parseModelOptionKey(modelKey) : null;
+  const selectedModel = storedModel
+    ? {
+        provider: storedModel.provider,
+        modelId: resolveSelectableModelId(catalog, storedModel.provider, storedModel.modelId),
       }
-    }
-    return options;
-  }, [catalog, credentials]);
+    : null;
+  const selectedModelKey = selectedModel
+    ? modelOptionKey(selectedModel.provider, selectedModel.modelId)
+    : "";
 
-  const effectiveProvider = modelKey
-    ? parseModelOptionKey(modelKey)?.provider
-    : (me?.defaultProvider ?? null);
-  const effectiveModelId = modelKey
-    ? parseModelOptionKey(modelKey)?.modelId
-    : (me?.defaultModel ?? null);
+  const effectiveProvider = selectedModel?.provider ?? me?.defaultProvider ?? null;
+  const effectiveModelId = selectedModel?.modelId ?? me?.defaultModel ?? null;
   const effectiveEntry =
     effectiveProvider && effectiveModelId
       ? catalog.find(
-          (entry) => entry.provider === effectiveProvider && entry.id === effectiveModelId,
+          (entry) =>
+            entry.provider === effectiveProvider &&
+            resolveSelectableModelId(catalog, entry.provider, entry.id) === effectiveModelId,
         )
       : undefined;
   const effectiveCredential = credentials.find(
@@ -163,17 +143,17 @@ export default function BotSettingsScreen() {
 
   const modelChoices: PickerChoice[] = useMemo(() => {
     const choices: PickerChoice[] = [{ key: "", label: spaceDefaultLabel }];
-    if (modelKey && !connectedOptions.some((option) => option.key === modelKey)) {
+    if (selectedModelKey && !connectedOptions.some((option) => option.key === selectedModelKey)) {
       choices.push({
-        key: modelKey,
-        label: parseModelOptionKey(modelKey)?.modelId ?? modelKey,
+        key: selectedModelKey,
+        label: selectedModel?.modelId ?? selectedModelKey,
       });
     }
     for (const option of connectedOptions) {
       choices.push({ key: option.key, label: option.label });
     }
     return choices;
-  }, [connectedOptions, modelKey, spaceDefaultLabel]);
+  }, [connectedOptions, selectedModel?.modelId, selectedModelKey, spaceDefaultLabel]);
 
   const thinkingChoices: PickerChoice[] = useMemo(
     () => [
@@ -187,12 +167,12 @@ export default function BotSettingsScreen() {
   );
 
   const selectedModelLabel =
-    modelChoices.find((choice) => choice.key === modelKey)?.label ?? spaceDefaultLabel;
+    modelChoices.find((choice) => choice.key === selectedModelKey)?.label ?? spaceDefaultLabel;
   const selectedThinkingLabel =
     thinkingChoices.find((choice) => choice.key === thinkingLevel)?.label ?? t("Default (medium)");
 
   function selectModel(key: string) {
-    if (key === modelKey) return;
+    if (key === selectedModelKey) return;
     setModelKey(key);
     setThinkingLevel("");
   }
@@ -229,7 +209,7 @@ export default function BotSettingsScreen() {
     setError(null);
     try {
       const profile = normalizeCreateBotProfile({ name, title, description });
-      const selected = modelKey ? parseModelOptionKey(modelKey) : null;
+      const selected = selectedModel;
       const input: {
         botId: string;
         name?: string;
@@ -240,6 +220,7 @@ export default function BotSettingsScreen() {
         modelProvider?: string | null;
         modelId?: string | null;
         thinkingLevel?: ThinkingLevel | null;
+        autoSpeak?: boolean;
       } = { botId };
       if (profile.name !== bot.name) input.name = profile.name;
       if (profile.title !== bot.title) input.title = profile.title;
@@ -262,8 +243,13 @@ export default function BotSettingsScreen() {
           ? ((thinkingLevel || null) as ThinkingLevel | null)
           : null;
       }
+      if (autoSpeak !== bot.autoSpeak) input.autoSpeak = autoSpeak;
       if (computerMode !== bot.computerMode) {
-        await rpc("bots/setComputer", { botId, mode: computerMode });
+        await rpc(
+          "bots/setComputer",
+          { botId, mode: computerMode },
+          { timeoutMs: COMPUTER_LIFECYCLE_TIMEOUT_MS },
+        );
       }
       // Use key presence so clearing title/description to "" still persists.
       if (Object.keys(input).length > 1) {
@@ -371,6 +357,25 @@ export default function BotSettingsScreen() {
           ))}
         </ScrollView>
         <ComputerModePicker value={computerMode} onChange={setComputerMode} />
+        <View
+          style={{
+            marginTop: 20,
+            minHeight: 44,
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+          }}
+        >
+          <Text style={{ color: tokens.mutedForeground, fontSize: 14, flex: 1 }}>
+            {t("Read replies aloud")}
+          </Text>
+          <Switch
+            accessibilityLabel={t("Read replies aloud")}
+            value={autoSpeak}
+            onValueChange={setAutoSpeak}
+          />
+        </View>
         <Pressable
           accessibilityRole="button"
           accessibilityLabel={t("Advanced")}
@@ -472,16 +477,6 @@ export default function BotSettingsScreen() {
       </ScrollView>
     </>
   );
-}
-
-function modelOptionKey(provider: string, modelId: string) {
-  return `${provider}::${modelId}`;
-}
-
-function parseModelOptionKey(key: string) {
-  const separator = key.indexOf("::");
-  if (separator <= 0) return null;
-  return { provider: key.slice(0, separator), modelId: key.slice(separator + 2) };
 }
 
 function catalogLabel(

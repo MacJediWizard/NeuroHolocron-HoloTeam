@@ -1,8 +1,10 @@
-import { ensureAiDataConsent, readBoundedResponseBytes } from "@rakazo/core";
+import { ensureAiDataConsent, readBoundedResponseBytes, toUtterances } from "@rakazo/core";
 import { File, Paths } from "expo-file-system";
+import type * as ExpoSpeech from "expo-speech";
 import { promptAiConsent } from "./ai-consent";
 import type { ApiRequestContext } from "./api";
-import { captureApiRequestContext, rpc } from "./api";
+import { aiConsentCoalesceKey, captureApiRequestContext, rpc } from "./api";
+import { loadDeviceVoiceEnabled } from "./device-voice";
 import { t } from "./i18n";
 
 type SpeechOptions = { voiceId?: string; botId?: string };
@@ -10,7 +12,27 @@ export const VOICE_RESPONSE_TIMEOUT_MS = 70_000;
 export const MAX_VOICE_AUDIO_BYTES = 16 * 1024 * 1024;
 const MAX_VOICE_ERROR_BYTES = 64 * 1024;
 
+/** Bumped by every new reply and by stopSpeaking, so an old one drops its queued clips. */
+let speechGeneration = 0;
+/** Ends the clip playing right now, if any. */
+let stopPlayback: (() => void) | null = null;
+
+/** Cuts the reply off mid-sentence, for a caller who talked over it. */
+export function stopSpeaking(): void {
+  speechGeneration += 1;
+  stopPlayback?.();
+}
+
 export async function speakText(text: string, opts: SpeechOptions = {}): Promise<boolean> {
+  let useDeviceVoice = false;
+  try {
+    useDeviceVoice = await loadDeviceVoiceEnabled();
+  } catch {
+    // A read failure must not be treated as "off": that would send reply text
+    // through hosted voice after the user opted for on-device only.
+    useDeviceVoice = true;
+  }
+  if (useDeviceVoice) return speakWithDeviceVoice(text);
   const requestContext = await captureApiRequestContext();
   const prepared = await rpc<{ ready: boolean; utterances: string[] }>(
     "voice/prepare",
@@ -18,10 +40,64 @@ export async function speakText(text: string, opts: SpeechOptions = {}): Promise
     { requestContext },
   );
   if (!prepared.ready) return false;
+  speechGeneration += 1;
+  const mine = speechGeneration;
   for (const utterance of prepared.utterances) {
+    if (speechGeneration !== mine) break;
     await playMpeg(await renderUtterance(utterance, opts, requestContext));
   }
   return true;
+}
+
+let deviceSpeechSession = 0;
+
+function startDeviceSpeechSession(): number {
+  return ++deviceSpeechSession;
+}
+
+function isCurrentDeviceSpeechSession(session: number): boolean {
+  return session === deviceSpeechSession;
+}
+
+export async function speakWithDeviceVoice(text: string): Promise<boolean> {
+  const utterances = toUtterances(text);
+  if (utterances.length === 0) return false;
+  // Claim the session before importing so a newer call cannot start during
+  // that await and then overlap this call's remaining chunks.
+  const session = startDeviceSpeechSession();
+  const Speech = await loadExpoSpeech();
+  if (!isCurrentDeviceSpeechSession(session)) return true;
+  await Speech.stop();
+  if (!isCurrentDeviceSpeechSession(session)) return true;
+  for (const utterance of utterances) {
+    if (!isCurrentDeviceSpeechSession(session)) return true;
+    await speakOneUtterance(Speech, utterance);
+  }
+  return true;
+}
+
+async function loadExpoSpeech(): Promise<typeof ExpoSpeech> {
+  let Speech: Partial<typeof ExpoSpeech>;
+  try {
+    Speech = await import("expo-speech");
+  } catch (error) {
+    throw error instanceof Error ? error : new Error(t("Could not play that clip."));
+  }
+  if (typeof Speech.speak !== "function" || typeof Speech.stop !== "function") {
+    throw new Error(t("Could not play that clip."));
+  }
+  return Speech as typeof ExpoSpeech;
+}
+
+function speakOneUtterance(Speech: typeof ExpoSpeech, text: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    Speech.speak(text, {
+      onDone: () => resolve(),
+      // Speech.stop() reports onStopped, not onDone.
+      onStopped: () => resolve(),
+      onError: (error) => reject(error instanceof Error ? error : new Error(String(error))),
+    });
+  });
 }
 
 export async function speakUtterance(
@@ -34,6 +110,7 @@ export async function speakUtterance(
     status: () => rpc("aiConsent/status", { uses: ["voice"] }, { requestContext }),
     prompt: promptAiConsent,
     allow: (input) => rpc("aiConsent/allow", input, { requestContext }),
+    coalesceKey: aiConsentCoalesceKey(requestContext),
   });
   return renderUtterance(text, opts, requestContext);
 }
@@ -94,6 +171,10 @@ async function playWithHtmlAudio(AudioCtor: typeof Audio, bytes: Uint8Array): Pr
       };
       audio.onended = () => finish();
       audio.onerror = () => finish(new Error(t("Could not play that clip.")));
+      stopPlayback = () => {
+        audio.pause();
+        finish();
+      };
       try {
         void audio
           .play()
@@ -105,6 +186,7 @@ async function playWithHtmlAudio(AudioCtor: typeof Audio, bytes: Uint8Array): Pr
       }
     });
   } finally {
+    stopPlayback = null;
     URL.revokeObjectURL(url);
   }
 }
@@ -128,6 +210,7 @@ async function playWithNativeAudio(bytes: Uint8Array): Promise<void> {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        stopPlayback = null;
         sub.remove();
         if (error) reject(error);
         else resolve();
@@ -153,6 +236,14 @@ async function playWithNativeAudio(bytes: Uint8Array): Promise<void> {
           );
         }
       });
+      stopPlayback = () => {
+        try {
+          player.pause();
+        } catch {
+          // already stopped
+        }
+        finish();
+      };
       try {
         player.play();
       } catch (error) {
@@ -160,6 +251,7 @@ async function playWithNativeAudio(bytes: Uint8Array): Promise<void> {
       }
     });
   } finally {
+    stopPlayback = null;
     player.release();
     try {
       file.delete();

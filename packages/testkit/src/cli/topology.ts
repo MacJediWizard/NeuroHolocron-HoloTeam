@@ -198,7 +198,7 @@ async function waitForHealth(baseUrl: string, timeoutMs: number) {
   let last = "";
   while (Date.now() - started < timeoutMs) {
     try {
-      const response = await fetch(`${baseUrl}/health`);
+      const response = await fetch(`${baseUrl}/internal/health`);
       const body = (await response.json()) as Record<string, unknown>;
       if (
         response.ok &&

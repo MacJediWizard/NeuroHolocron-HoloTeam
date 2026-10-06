@@ -12,8 +12,10 @@ export {
   ensureScreenCommand,
   interactiveScreenCommand,
   prepareBrowserProfileCommand,
+  quiesceBrowserProfilesCommand,
   stopBrowserCommand,
   stopExtraScreenCommand,
+  terminalCommand,
 } from "@rakazo/core/node/desktop-runtime";
 
 import { timingSafeEqual } from "node:crypto";
@@ -40,6 +42,7 @@ export const computerActionSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("wait"), ms: z.number() }),
   z.object({ kind: z.literal("open"), path: z.string() }),
   z.object({ kind: z.literal("launch"), application: z.string(), uri: z.string().optional() }),
+  z.object({ kind: z.literal("focus"), application: z.string(), uri: z.string().optional() }),
 ]);
 
 export { BROWSER_APPLICATIONS as DOCKER_BROWSER_ALIASES } from "@rakazo/core/node/desktop-runtime";
@@ -144,20 +147,32 @@ export function shouldReplayComputerActions(attempt: ComputerControlAttempt<unkn
 }
 
 const CONTROL_BASE_TIMEOUT_MS = 15_000;
-const CONTROL_MAX_TIMEOUT_MS = 60_000;
+const MAX_CONTROL_ACTIONS = 24;
+const MAX_MAPPED_WAIT_MS = 5_000;
+// control.py waits this long for one focus wrapper (FOCUS_COMPLETION_SEC).
+const FOCUS_ACTION_BUDGET_MS = 13_400;
+// One control request already accepts 24 actions. Focus is the slow step, so the
+// HTTP ceiling covers a full batch of them plus settle. Each focus step stays 13.4s.
+const CONTROL_MAX_TIMEOUT_MS =
+  CONTROL_BASE_TIMEOUT_MS + MAX_CONTROL_ACTIONS * FOCUS_ACTION_BUDGET_MS + MAX_MAPPED_WAIT_MS;
 
-/** Bound the HTTP control deadline by mapped waits and settle time. */
+/** Bound the HTTP control deadline by focus steps, mapped waits, and settle time. */
 export function computerControlTimeoutMs(
   actions: Array<z.infer<typeof computerActionSchema>>,
   settleMs = 0,
 ) {
   let waits = 0;
+  let focusSteps = 0;
   for (const action of actions) {
-    if (action.kind === "wait") waits += Math.min(Math.max(action.ms, 0), 5_000);
+    if (action.kind === "wait") waits += Math.min(Math.max(action.ms, 0), MAX_MAPPED_WAIT_MS);
+    else if (action.kind === "focus") focusSteps += 1;
   }
   return Math.min(
     CONTROL_MAX_TIMEOUT_MS,
-    CONTROL_BASE_TIMEOUT_MS + waits + Math.min(Math.max(settleMs, 0), 5_000),
+    CONTROL_BASE_TIMEOUT_MS +
+      waits +
+      focusSteps * FOCUS_ACTION_BUDGET_MS +
+      Math.min(Math.max(settleMs, 0), MAX_MAPPED_WAIT_MS),
   );
 }
 
@@ -361,6 +376,9 @@ export function containerActionStep(
       "env",
       `DISPLAY=${display}`,
       ...(browser && browserProfile ? [`RAKAZO_BROWSER_PROFILE=${browserProfile}`] : []),
+      // focus routes through the image wrapper, which raises a matching window
+      // by WM_CLASS or execs the allowlisted launcher to spawn one.
+      ...(action.kind === "focus" ? ["rakazo-focus-or-launch"] : []),
       browser ? "rakazo-browser" : action.application,
       ...(action.uri ? [action.uri] : []),
     ];
@@ -449,6 +467,81 @@ function isCompleteDockerMultiplexedStream(buffer: Buffer): boolean {
   return offset === buffer.length;
 }
 
+export interface DockerStreamChunk {
+  stream: "stdout" | "stderr";
+  data: string;
+}
+
+/**
+ * Split docker exec frames as they arrive. A complete multiplexed stream matches
+ * demuxDockerStream; an unfinished frame is held until its payload arrives.
+ */
+export function createDockerStreamDemuxer() {
+  let mode: "pending" | "raw" | "multiplex" = "pending";
+  let buffer = Buffer.alloc(0);
+
+  const consume = (final: boolean): DockerStreamChunk[] => {
+    const events: DockerStreamChunk[] = [];
+    if (mode === "raw") {
+      if (buffer.length === 0) return events;
+      events.push({ stream: "stdout", data: buffer.toString("utf8") });
+      buffer = Buffer.alloc(0);
+      return events;
+    }
+    if (mode === "pending") {
+      if (buffer.length === 0) return events;
+      if (!final && buffer.length < 8) return events;
+      const headerReady = buffer.length >= 8 && isDockerFrameHeader(buffer, 0);
+      const frameReady = headerReady && firstDockerFrameComplete(buffer);
+      if (!frameReady) {
+        if (!final && headerReady) return events;
+        mode = "raw";
+        events.push({ stream: "stdout", data: buffer.toString("utf8") });
+        buffer = Buffer.alloc(0);
+        return events;
+      }
+      mode = "multiplex";
+    }
+    let offset = 0;
+    while (offset + 8 <= buffer.length && isDockerFrameHeader(buffer, offset)) {
+      const size = buffer.readUInt32BE(offset + 4);
+      if (offset + 8 + size > buffer.length) break;
+      const payload = Buffer.from(buffer.subarray(offset + 8, offset + 8 + size));
+      events.push({
+        stream: buffer[offset] === 2 ? "stderr" : "stdout",
+        data: payload.toString("utf8"),
+      });
+      offset += 8 + size;
+    }
+    buffer = Buffer.from(buffer.subarray(offset));
+    if (final && buffer.length > 0 && mode === "multiplex") buffer = Buffer.alloc(0);
+    return events;
+  };
+
+  return {
+    push(chunk: Buffer) {
+      if (chunk.length > 0) buffer = Buffer.concat([buffer, chunk]);
+      return consume(false);
+    },
+    finish() {
+      return consume(true);
+    },
+  };
+}
+
+function isDockerFrameHeader(buffer: Buffer, offset: number): boolean {
+  if (offset + 8 > buffer.length) return false;
+  const type = buffer[offset];
+  if (type !== 0 && type !== 1 && type !== 2) return false;
+  return buffer[offset + 1] === 0 && buffer[offset + 2] === 0 && buffer[offset + 3] === 0;
+}
+
+function firstDockerFrameComplete(buffer: Buffer): boolean {
+  if (!isDockerFrameHeader(buffer, 0)) return false;
+  const size = buffer.readUInt32BE(4);
+  return buffer.length >= 8 + size;
+}
+
 /**
  * Split a Docker exec stream into stdout and stderr. Without a TTY the stream is
  * multiplexed: each frame is an 8-byte header (type byte, 3 reserved bytes, big-endian
@@ -473,4 +566,18 @@ export function demuxDockerStream(buffer: Buffer): { stdout: string; stderr: str
     stdout: Buffer.concat(stdout).toString("utf8"),
     stderr: Buffer.concat(stderr).toString("utf8"),
   };
+}
+
+/**
+ * Environment for commands in a computer: the bot's shell tool and the user's terminal share
+ * it. Neither exec sets a Docker `User`, so both run as the container's workspace user.
+ */
+export function computerCommandEnv(layout: { display: string }) {
+  return [
+    `DISPLAY=${layout.display}`,
+    "HOME=/home/rakazo",
+    "PATH=/home/rakazo/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    "NPM_CONFIG_PREFIX=/home/rakazo/.local",
+    "PIP_USER=1",
+  ];
 }

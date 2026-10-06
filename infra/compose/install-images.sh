@@ -2,14 +2,14 @@
 
 set -Eeuo pipefail
 
-DOWNLOAD_BASE="${RAKAZO_DOWNLOAD_BASE:-https://raw.githubusercontent.com/elie222/rakazo/main/infra/compose}"
+DOWNLOAD_BASE="${RAKAZO_DOWNLOAD_BASE:-https://raw.githubusercontent.com/MacJediWizard/NeuroHolocron-HoloTeam/main/infra/compose}"
 while [[ "$DOWNLOAD_BASE" == */ ]]; do
   DOWNLOAD_BASE="${DOWNLOAD_BASE%/}"
 done
 case "$DOWNLOAD_BASE" in
   https://*) ;;
   *)
-    echo "Rakazo setup failed: RAKAZO_DOWNLOAD_BASE must use https." >&2
+    echo "Legiara setup failed: RAKAZO_DOWNLOAD_BASE must use https." >&2
     exit 1
     ;;
 esac
@@ -61,7 +61,7 @@ cleanup() {
 trap cleanup EXIT
 
 fail() {
-  echo "Rakazo setup failed: $*" >&2
+  echo "Legiara setup failed: $*" >&2
   exit 1
 }
 
@@ -295,7 +295,7 @@ fi
 validate_required_secrets
 
 if [[ "$prepare_only" == true ]]; then
-  echo "Rakazo files are ready. Edit .env, then run: bash install-images.sh"
+  echo "Legiara files are ready. Edit .env, then run: bash install-images.sh"
   exit 0
 fi
 
@@ -326,4 +326,4 @@ else
   docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" up -d ${up_pull_args[@]+"${up_pull_args[@]}"}
 fi
 
-echo "Rakazo is starting at http://127.0.0.1:5173"
+echo "Legiara is starting at http://127.0.0.1:5173"

@@ -1,8 +1,145 @@
 import { describe, expect, it } from "vitest";
+import { builtinAgentTools } from "./builtin-tools.js";
 import { parseConnectorToolArgs } from "./lazy-tool-catalog.js";
 import { jsonSchemaParameters, parametersFor } from "./pi-runtime.js";
 
 describe("jsonSchemaParameters", () => {
+  it("exposes fields from a locally referenced allOf branch", () => {
+    const tool = {
+      name: "catalog_search",
+      description: "Search a named catalog",
+      inputSchema: {
+        $defs: {
+          "Base/filter": {
+            type: "object",
+            properties: { catalog: { type: "string", minLength: 1 } },
+            required: ["catalog"],
+          },
+        },
+        allOf: [
+          { $ref: "#/$defs/Base~1filter" },
+          { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+        ],
+      },
+    };
+    const original = JSON.stringify(tool.inputSchema);
+    const wire = JSON.parse(JSON.stringify(parametersFor(tool)));
+    expect(wire.properties).toEqual({
+      catalog: { type: "string", minLength: 1 },
+      query: { type: "string" },
+    });
+    expect(wire.required).toEqual(["catalog", "query"]);
+    expect(wire).not.toHaveProperty("allOf");
+    for (const schema of [tool.inputSchema, wire]) {
+      expect(parseConnectorToolArgs(schema, { catalog: "books", query: "typescript" })).toEqual({
+        catalog: "books",
+        query: "typescript",
+      });
+      expect(() => parseConnectorToolArgs(schema, { query: "typescript" })).toThrow();
+    }
+    expect(JSON.stringify(tool.inputSchema)).toBe(original);
+  });
+
+  it("keeps root allOf fields and intersecting constraints through the Pi wire path", () => {
+    const tool = {
+      name: "catalog_page",
+      description: "Read a bounded catalog page",
+      inputSchema: {
+        allOf: [
+          {
+            type: "object",
+            properties: { limit: { type: "integer", minimum: 1 } },
+            required: ["limit"],
+          },
+          {
+            type: "object",
+            properties: { limit: { type: "integer", maximum: 10 } },
+          },
+        ],
+      },
+    };
+    const original = JSON.stringify(tool.inputSchema);
+    const wire = JSON.parse(JSON.stringify(parametersFor(tool)));
+    expect(wire).toEqual({
+      type: "object",
+      properties: {
+        limit: {
+          allOf: [
+            { type: "integer", minimum: 1 },
+            { type: "integer", maximum: 10 },
+          ],
+        },
+      },
+      required: ["limit"],
+    });
+    expect(parseConnectorToolArgs(wire, { limit: 5 })).toEqual(
+      parseConnectorToolArgs(tool.inputSchema, { limit: 5 }),
+    );
+    for (const args of [{}, { limit: 0 }, { limit: 11 }, { limit: 1.5 }]) {
+      expect(() => parseConnectorToolArgs(tool.inputSchema, args)).toThrow();
+      expect(() => parseConnectorToolArgs(wire, args)).toThrow();
+    }
+    expect(JSON.stringify(tool.inputSchema)).toBe(original);
+  });
+
+  it("keeps allOf branch fields alongside root properties and required fields", () => {
+    const wire = JSON.parse(
+      JSON.stringify(
+        parametersFor({
+          name: "catalog_search",
+          description: "Search a named catalog",
+          inputSchema: {
+            type: "object",
+            properties: { catalog: { type: "string" } },
+            required: ["catalog"],
+            allOf: [
+              {
+                type: "object",
+                properties: { query: { type: "string", minLength: 1 } },
+                required: ["query"],
+              },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(wire).toEqual({
+      type: "object",
+      properties: { catalog: { type: "string" }, query: { type: "string", minLength: 1 } },
+      required: ["catalog", "query"],
+    });
+  });
+
+  it("preserves an allOf alternative before flattening an enclosing root union", () => {
+    const wire = JSON.parse(
+      JSON.stringify(
+        parametersFor({
+          name: "catalog_lookup",
+          description: "Look up a catalog entry",
+          inputSchema: {
+            anyOf: [
+              {
+                allOf: [
+                  { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+                  {
+                    type: "object",
+                    properties: { region: { type: "string" } },
+                    required: ["region"],
+                  },
+                ],
+              },
+              { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+            ],
+          },
+        }),
+      ),
+    );
+    expect(wire).toEqual({
+      type: "object",
+      properties: { id: { type: "string" }, region: { type: "string" }, query: { type: "string" } },
+    });
+  });
+
   it("keeps model-facing nullable parameters compatible with connector validation", () => {
     const tool = {
       name: "catalog_lookup",
@@ -79,13 +216,16 @@ describe("jsonSchemaParameters", () => {
     });
   });
 
-  it("keeps primitive enums as literal unions", () => {
+  it("keeps a string enum's allowed values, in order, as a plain enum", () => {
+    // A literal union serialises as anyOf/const, which some gateways flatten to {} so the
+    // model never sees the allowed values; {type: "string", enum} survives them.
     const schema = jsonSchemaParameters({
       type: "object",
       properties: { mode: { type: "string", enum: ["fast", "slow"] } },
       required: ["mode"],
-    }) as unknown as { properties: { mode: { anyOf: { const: unknown }[] } } };
-    expect(schema.properties.mode.anyOf.map((member) => member.const)).toEqual(["fast", "slow"]);
+    }) as unknown as { properties: { mode: Record<string, unknown> } };
+    const mode = JSON.parse(JSON.stringify(schema.properties.mode));
+    expect(mode).toEqual({ type: "string", enum: ["fast", "slow"] });
   });
 
   it("accepts a nullable enum without throwing", () => {
@@ -104,5 +244,38 @@ describe("jsonSchemaParameters", () => {
         properties: { filter: { type: "object", enum: [{ kind: "all" }, ["x"]] } },
       }),
     ).not.toThrow();
+  });
+});
+
+describe("update_bot parameters", () => {
+  it("accepts notifyOnFinish as a boolean", () => {
+    const tool = builtinAgentTools.find((entry) => entry.name === "update_bot");
+    expect(tool).toBeTruthy();
+    const schema = JSON.parse(JSON.stringify(parametersFor(tool!))) as Record<string, unknown>;
+    expect(parseConnectorToolArgs(schema, { notifyOnFinish: false })).toEqual({
+      notifyOnFinish: false,
+    });
+    expect(parseConnectorToolArgs(schema, { notifyOnFinish: true, name: "Scout" })).toEqual({
+      notifyOnFinish: true,
+      name: "Scout",
+    });
+    expect(() => parseConnectorToolArgs(schema, { notifyOnFinish: "false" })).toThrow();
+  });
+
+  it("still accepts avatar fields from the calling bot", () => {
+    const tool = builtinAgentTools.find((entry) => entry.name === "update_bot");
+    expect(tool).toBeTruthy();
+    const schema = JSON.parse(JSON.stringify(parametersFor(tool!))) as Record<string, unknown>;
+    expect(
+      parseConnectorToolArgs(schema, {
+        color: "#8B5CF6",
+        artifact_id: "art-1",
+        use_attached_image: true,
+      }),
+    ).toEqual({
+      color: "#8B5CF6",
+      artifact_id: "art-1",
+      use_attached_image: true,
+    });
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   dispatchBackgroundJob,
+  HISTORY_COMPACT_MAX_ATTEMPTS,
   historyCompactJob,
   historyCompactJobKey,
   messagingDeliverJob,
@@ -87,7 +88,12 @@ describe("historyCompactJob", () => {
       name: "history.compact",
       payload: { threadId: "thread-1" },
       replaceKey: historyCompactJobKey("thread-1"),
+      maxAttempts: HISTORY_COMPACT_MAX_ATTEMPTS,
     });
+  });
+
+  it("caps attempts below the queue default so a stuck thread cannot storm", () => {
+    expect(HISTORY_COMPACT_MAX_ATTEMPTS).toBeLessThan(25);
   });
 
   it("keys different threads differently", () => {

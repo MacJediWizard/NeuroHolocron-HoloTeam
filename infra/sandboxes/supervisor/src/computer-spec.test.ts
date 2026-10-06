@@ -1,21 +1,30 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import {
+  DEFAULT_DESKTOP_ENV,
+  ensureScreenCommand,
+  TERMINAL_MENU_COMMAND,
+} from "@rakazo/core/node/desktop-runtime";
 import type Docker from "dockerode";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   assertVolumeSubpathSupport,
   COMPUTER_IMAGE,
+  computerBridgeNameFor,
   computerHomeStorage,
+  computerNetworkCreateOptions,
   computerNetworkNameFor,
   computerNetworkNamesForCleanup,
   containerCreateOptions,
@@ -27,6 +36,7 @@ import {
   parseMemoryBytes,
   publishedLoopbackControlHostPort,
   resolveComputerControlEndpoint,
+  resolveComputerEgressMode,
   resolveScreenNetworkMode,
   resolveScreenPublishTarget,
   resolveSpaceComputerLimit,
@@ -130,6 +140,44 @@ describe("graphical computer spec", () => {
     expect(computerNetworkNameFor("a/b")).toBe(computerNetworkNameFor("a/b"));
   });
 
+  it("parses the computer egress mode with an open default", () => {
+    expect(resolveComputerEgressMode(undefined)).toBe("open");
+    expect(resolveComputerEgressMode("")).toBe("open");
+    expect(resolveComputerEgressMode("open")).toBe("open");
+    expect(resolveComputerEgressMode("restricted")).toBe("restricted");
+    for (const value of ["blocked", "RESTRICTED", "0"])
+      expect(() => resolveComputerEgressMode(value)).toThrow(/SANDBOX_COMPUTER_EGRESS/);
+  });
+
+  it("derives deterministic host bridge names within the 15-byte interface limit", () => {
+    for (const botId of ["bot", "a/b", "bot with spaces", "x".repeat(80)]) {
+      const name = computerBridgeNameFor(botId);
+      expect(name).toMatch(/^rakazo-c[0-9a-f]{7}$/);
+      expect(Buffer.byteLength(name)).toBeLessThanOrEqual(15);
+      expect(computerBridgeNameFor(botId)).toBe(name);
+    }
+    expect(computerBridgeNameFor("a/b")).not.toBe(computerBridgeNameFor("ab"));
+  });
+
+  it("names the bridge only when egress is restricted", () => {
+    const open = computerNetworkCreateOptions("bot_1", "open");
+    expect(open).toEqual({
+      Name: computerNetworkNameFor("bot_1"),
+      Driver: "bridge",
+      CheckDuplicate: true,
+    });
+    expect(open).not.toHaveProperty("Options");
+
+    const restricted = computerNetworkCreateOptions("bot_1", "restricted");
+    expect(restricted.Options).toEqual({
+      "com.docker.network.bridge.name": computerBridgeNameFor("bot_1"),
+    });
+    expect(computerNetworkCreateOptions("bot_1")).toEqual(open);
+    // The bridge name differs from the network name so `docker network` output
+    // still shows the readable rakazo-computer-* name while iptables matches the interface.
+    expect(restricted.Options?.["com.docker.network.bridge.name"]).not.toBe(restricted.Name);
+  });
+
   it("lists prior network name variants for cleanup", () => {
     const names = computerNetworkNamesForCleanup("bot_1");
     expect(names[0]).toBe(computerNetworkNameFor("bot_1"));
@@ -178,7 +226,147 @@ describe("graphical computer spec", () => {
     expect(desktop).toMatch(/x-scheme-handler\/http/);
     expect(desktop).toMatch(/x-scheme-handler\/https/);
     expect(start).not.toMatch(/windowsize 1280 800/);
+    expect(dockerfile).toMatch(/wmctrl/);
+    expect(dockerfile).toMatch(/rakazo-focus-or-launch/);
   });
+
+  it("ships a sha256-pinned gh CLI", () => {
+    const root = path.resolve(import.meta.dirname, "../../computer");
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/ARG GH_VERSION=\d+\.\d+\.\d+/);
+    expect(dockerfile).toMatch(
+      /cli\/cli\/releases\/download\/v\$\{GH_VERSION\}\/gh_\$\{GH_VERSION\}_linux_\$\{gh_arch\}\.tar\.gz/,
+    );
+    expect(dockerfile).toMatch(/amd64\) gh_arch=amd64; gh_sha256=[0-9a-f]{64}/);
+    expect(dockerfile).toMatch(/arm64\) gh_arch=arm64; gh_sha256=[0-9a-f]{64}/);
+    expect(dockerfile).toMatch(/sha256sum -c/);
+    expect(dockerfile).toMatch(/\/usr\/local\/bin --strip-components=2 "gh_/);
+    expect(dockerfile).toMatch(/gh --version/);
+  });
+
+  it("ships document text extractors", () => {
+    const root = path.resolve(import.meta.dirname, "../../computer");
+    const dockerfile = readFileSync(path.join(root, "Dockerfile"), "utf8");
+    expect(dockerfile).toMatch(/--no-install-recommends/);
+    expect(dockerfile).toMatch(/\bpoppler-utils\b/);
+    expect(dockerfile).toMatch(/\bpandoc\b/);
+    expect(dockerfile).toMatch(/\bpython3-openpyxl\b/);
+    expect(dockerfile).not.toMatch(/libreoffice/i);
+    expect(dockerfile).toMatch(/pdftotext -v/);
+    expect(dockerfile).toMatch(/pdfinfo -v/);
+    expect(dockerfile).toMatch(/pandoc --version/);
+    expect(dockerfile).toMatch(/import openpyxl/);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "delivers desktop menu exec arguments intact through /bin/sh",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const menu = readFileSync(path.join(root, "fluxbox.menu"), "utf8");
+      const temp = mkdtempSync(path.join(tmpdir(), "fluxbox-menu-"));
+      const bin = path.join(temp, "bin");
+      mkdirSync(bin);
+      try {
+        for (const name of ["xterm", "rakazo-browser"]) {
+          const stub = path.join(bin, name);
+          writeFileSync(stub, '#!/bin/sh\nprintf "%s\\n" "$@" > "$RAKAZO_TEST_ARGS"\n');
+          chmodSync(stub, 0o755);
+        }
+        const argvFor = (label: string) => {
+          const command = menu
+            .split("\n")
+            .map((entry) => entry.match(/\[exec\] \(([^)]*)\) \{([^}]*)\}/))
+            .find((match) => match?.[1] === label)?.[2];
+          expect(command, label).toBeTruthy();
+          const capture = path.join(temp, `${label}-args`);
+          const result = spawnSync("sh", ["-c", command!], {
+            env: {
+              ...process.env,
+              PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+              RAKAZO_TEST_ARGS: capture,
+            },
+            encoding: "utf8",
+          });
+          expect(result.status, result.stderr).toBe(0);
+          return readFileSync(capture, "utf8").trim().split("\n").filter(Boolean);
+        };
+        expect(argvFor("Terminal")).toEqual([
+          "-bg",
+          "rgb:11/11/13",
+          "-fg",
+          "rgb:e8/e8/ea",
+          "-cr",
+          "rgb:e8/e8/ea",
+          "-title",
+          "Terminal",
+          "-xrm",
+          "XTerm*selectToClipboard: true",
+        ]);
+        expect(argvFor("Browser")).toEqual([]);
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps the baked and generated desktop menus in sync",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const baked = readFileSync(path.join(root, "fluxbox.menu"), "utf8");
+      const terminalLine = `[exec] (Terminal) {${TERMINAL_MENU_COMMAND}}`;
+      expect(baked.split("\n").map((line) => line.trim())).toContain(terminalLine);
+
+      const generated = ensureScreenCommand(0, "bot", "view-token", {
+        ...DEFAULT_DESKTOP_ENV,
+        preservePrimaryDisplay: false,
+      });
+      const temp = mkdtempSync(path.join(tmpdir(), "fluxbox-menu-"));
+      const fluxHome = path.join(temp, "fluxbox-home-1");
+      const menuPath = path.join(fluxHome, ".fluxbox", "menu");
+      const initPath = path.join(fluxHome, ".fluxbox", "init");
+      const init = "session.menuFile: kept\n";
+      try {
+        mkdirSync(path.dirname(menuPath), { recursive: true });
+        writeFileSync(
+          menuPath,
+          "[begin] (Desktop)\n[exec] (Browser) {/tmp/rakazo/browser-launch-1}\n[end]\n",
+        );
+        writeFileSync(initPath, init);
+        const lines = generated.replaceAll("/tmp/fluxbox-home-1", fluxHome).split("\n");
+        const start = lines.indexOf(`mkdir -p ${fluxHome}/.fluxbox`);
+        const end = lines.findIndex((line, index) => index > start && line === "fi");
+        expect(start).toBeGreaterThanOrEqual(0);
+        expect(end).toBeGreaterThan(start);
+        const fragment = [
+          "xdpyinfo() { return 0; }",
+          "Xvfb() { echo Xvfb; }",
+          "fluxbox() { echo fluxbox; }",
+          "nohup() { echo nohup; }",
+          lines.slice(start, end + 1).join("\n"),
+        ].join("\n");
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = spawnSync("bash", ["-eu", "-c", fragment], { encoding: "utf8" });
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toBe("");
+        }
+        const written = readFileSync(menuPath, "utf8");
+        expect(written.split("\n").find((line) => line.includes("(Terminal)"))).toBe(terminalLine);
+        expect(written).toBe(
+          [
+            "[begin] (Desktop)",
+            "[exec] (Browser) {/tmp/rakazo/browser-launch-1}",
+            terminalLine,
+            "[end]",
+            "",
+          ].join("\n"),
+        );
+        expect(readFileSync(initPath, "utf8")).toBe(init);
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(process.platform === "win32")(
     "selects a display-specific browser profile and preserves explicit profiles",
@@ -210,6 +398,10 @@ describe("graphical computer spec", () => {
 
       try {
         expect(run(":1")).toContain(`--user-data-dir=${home}/.browser-profiles/chromium`);
+        expect(run(":1")).toContain("--restore-last-session");
+        expect(run(":1")).toContain("--disable-gpu");
+        expect(run(":1")).toContain("--enable-unsafe-swiftshader");
+        expect(run(":1")).not.toContain("--disable-software-rasterizer");
         expect(run(":1").some((arg) => arg.startsWith("--remote-debugging-port="))).toBe(true);
         expect(run(":2")).toContain(`--user-data-dir=${home}/.browser-profiles/chromium-screen-2`);
         expect(run(":2")).toContain("--remote-debugging-port=9223");
@@ -222,10 +414,240 @@ describe("graphical computer spec", () => {
         }
         const explicit = run(":3", [`--user-data-dir=${home}/custom-profile`]);
         expect(explicit).toContain(`--user-data-dir=${home}/custom-profile`);
+        expect(explicit).toContain("--restore-last-session");
         expect(explicit).not.toContain(
           `--user-data-dir=${home}/.browser-profiles/chromium-screen-3`,
         );
       } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "spawns Chromium when the caller passes the profile and debug flags itself",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const temp = mkdtempSync(path.join(tmpdir(), "rakazo-browser-self-"));
+      const bin = path.join(temp, "bin");
+      const capture = path.join(temp, "args");
+      const home = path.join(temp, "home");
+      const chromium = path.join(bin, "chromium");
+      mkdirSync(bin);
+      writeFileSync(chromium, '#!/bin/sh\nprintf "%s\\n" "$@" > "$RAKAZO_TEST_ARGS"\n');
+      chmodSync(chromium, 0o755);
+
+      // browser-launch-N execs this wrapper with --user-data-dir and
+      // --remote-debugging-port already set, so the live-browser scan must not
+      // match the wrapper's own argv and take the reuse path instead of
+      // spawning.
+      const profile = path.join(home, ".browser-profiles", "chromium-bot-screen");
+      mkdirSync(profile, { recursive: true });
+
+      try {
+        const result = spawnSync(
+          "sh",
+          [
+            path.join(root, "rakazo-browser"),
+            `--user-data-dir=${profile}`,
+            "--remote-debugging-port=9222",
+          ],
+          {
+            env: {
+              ...process.env,
+              DISPLAY: ":1",
+              HOME: home,
+              PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+              RAKAZO_TEST_ARGS: capture,
+            },
+            encoding: "utf8",
+          },
+        );
+        expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+        const args = readFileSync(capture, "utf8");
+        expect(args).toContain(`--user-data-dir=${profile}`);
+        expect(args).toContain("--remote-debugging-port=9222");
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "spawns Chromium when the wrapper is invoked as ./rakazo-browser",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const temp = mkdtempSync(path.join(tmpdir(), "rakazo-browser-rel-"));
+      const bin = path.join(temp, "bin");
+      const capture = path.join(temp, "args");
+      const home = path.join(temp, "home");
+      const chromium = path.join(bin, "chromium");
+      mkdirSync(bin);
+      writeFileSync(chromium, '#!/bin/sh\nprintf "%s\\n" "$@" > "$RAKAZO_TEST_ARGS"\n');
+      chmodSync(chromium, 0o755);
+      const profile = path.join(home, ".browser-profiles", "chromium-bot-screen");
+      mkdirSync(profile, { recursive: true });
+      // The kernel records the path passed to exec, so a relative invocation
+      // shows up as ./rakazo-browser rather than an absolute script path.
+      symlinkSync(path.join(root, "rakazo-browser"), path.join(temp, "rakazo-browser"));
+
+      try {
+        const result = spawnSync(
+          "./rakazo-browser",
+          [`--user-data-dir=${profile}`, "--remote-debugging-port=9222"],
+          {
+            cwd: temp,
+            env: {
+              ...process.env,
+              DISPLAY: ":1",
+              HOME: home,
+              PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+              RAKAZO_TEST_ARGS: capture,
+            },
+            encoding: "utf8",
+          },
+        );
+        expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+        const args = readFileSync(capture, "utf8");
+        expect(args).toContain(`--user-data-dir=${profile}`);
+        expect(args).toContain("--remote-debugging-port=9222");
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "keeps a live browser when its profile directory is named rakazo-browser",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const temp = mkdtempSync(path.join(tmpdir(), "rakazo-browser-named-"));
+      const bin = path.join(temp, "bin");
+      const capture = path.join(temp, "args");
+      const home = path.join(temp, "home");
+      const profile = path.join(temp, "rakazo-browser");
+      const prefsPath = path.join(profile, "Default", "Preferences");
+      const liveBin = path.join(temp, "live", "chromium");
+      mkdirSync(bin);
+      mkdirSync(path.dirname(liveBin));
+      mkdirSync(path.dirname(prefsPath), { recursive: true });
+      writeFileSync(
+        path.join(bin, "chromium"),
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$RAKAZO_TEST_ARGS"\n',
+      );
+      chmodSync(path.join(bin, "chromium"), 0o755);
+      // /proc/pid/exe is this binary, so the basename is chromium without compiling.
+      copyFileSync("/bin/sh", liveBin);
+      chmodSync(liveBin, 0o755);
+      writeFileSync(prefsPath, '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n');
+      const browser = spawn(
+        liveBin,
+        [
+          "-c",
+          "while :; do sleep 3600; done",
+          "chromium",
+          `--user-data-dir=${profile}`,
+          "--remote-debugging-port=9",
+          "--user-data-dir",
+          profile,
+        ],
+        { stdio: "ignore", detached: true },
+      );
+      const liveLock = path.join(profile, "SingletonLock");
+      symlinkSync(`testhost-${browser.pid}`, liveLock);
+      try {
+        const result = spawnSync(
+          "sh",
+          [
+            path.join(root, "rakazo-browser"),
+            `--user-data-dir=${profile}`,
+            "--remote-debugging-port=9222",
+          ],
+          {
+            env: {
+              ...process.env,
+              DISPLAY: ":1",
+              HOME: home,
+              PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+              RAKAZO_TEST_ARGS: capture,
+            },
+            encoding: "utf8",
+          },
+        );
+        expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+        expect(readlinkSync(liveLock)).toBe(`testhost-${browser.pid}`);
+        expect(readFileSync(prefsPath, "utf8")).toContain('"exit_type": "Crashed"');
+        expect(readFileSync(capture, "utf8")).toContain(`--user-data-dir=${profile}`);
+      } finally {
+        if (browser.pid) {
+          try {
+            process.kill(-browser.pid, "SIGKILL");
+          } catch {
+            browser.kill("SIGKILL");
+          }
+        }
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "keeps a live shell browser when the profile flag ends in /rakazo-browser",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const temp = mkdtempSync(path.join(tmpdir(), "rakazo-browser-flag-"));
+      const bin = path.join(temp, "bin");
+      const capture = path.join(temp, "args");
+      const home = path.join(temp, "home");
+      const profile = path.join(temp, "rakazo-browser");
+      const prefsPath = path.join(profile, "Default", "Preferences");
+      mkdirSync(bin);
+      mkdirSync(path.dirname(prefsPath), { recursive: true });
+      writeFileSync(
+        path.join(bin, "chromium"),
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$RAKAZO_TEST_ARGS"\n',
+      );
+      chmodSync(path.join(bin, "chromium"), 0o755);
+      const sleeper = path.join(bin, "sleeper");
+      writeFileSync(sleeper, "#!/bin/sh\nsleep 120\n");
+      chmodSync(sleeper, 0o755);
+      writeFileSync(prefsPath, '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n');
+      const browser = spawn(sleeper, [`--user-data-dir=${profile}`, "--remote-debugging-port=9"], {
+        stdio: "ignore",
+        detached: true,
+      });
+      const liveLock = path.join(profile, "SingletonLock");
+      symlinkSync(`testhost-${browser.pid}`, liveLock);
+      try {
+        const result = spawnSync(
+          "sh",
+          [
+            path.join(root, "rakazo-browser"),
+            `--user-data-dir=${profile}`,
+            "--remote-debugging-port=9222",
+          ],
+          {
+            env: {
+              ...process.env,
+              DISPLAY: ":1",
+              HOME: home,
+              PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+              RAKAZO_TEST_ARGS: capture,
+            },
+            encoding: "utf8",
+          },
+        );
+        expect(result.status, result.error?.message ?? result.stderr).toBe(0);
+        expect(readlinkSync(liveLock)).toBe(`testhost-${browser.pid}`);
+        expect(readFileSync(prefsPath, "utf8")).toContain('"exit_type": "Crashed"');
+      } finally {
+        if (browser.pid) {
+          try {
+            process.kill(-browser.pid, "SIGKILL");
+          } catch {
+            browser.kill("SIGKILL");
+          }
+        }
         rmSync(temp, { recursive: true, force: true });
       }
     },
@@ -283,20 +705,508 @@ describe("graphical computer spec", () => {
         expect(updatedLocalState).not.toMatch(/"exited_cleanly"\s*:\s*false/);
 
         writeFileSync(prefsPath, '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n');
-        symlinkSync("testhost-12345", path.join(profile, "SingletonLock"));
-        const skipped = spawnSync("bash", [path.join(root, "rakazo-browser")], {
+        const sleeper = path.join(bin, "sleeper");
+        writeFileSync(sleeper, "#!/bin/sh\nsleep 120\n");
+        chmodSync(sleeper, 0o755);
+        const liveBrowser = spawn(sleeper, [`--user-data-dir=${profile}`], {
+          stdio: "ignore",
+          detached: true,
+        });
+        const liveLock = path.join(profile, "SingletonLock");
+        const launch = () =>
+          spawnSync("bash", [path.join(root, "rakazo-browser")], {
+            env: {
+              ...process.env,
+              DISPLAY: ":1",
+              HOME: home,
+              PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+              RAKAZO_TEST_ARGS: capture,
+            },
+            encoding: "utf8",
+          });
+        try {
+          symlinkSync(`testhost-${liveBrowser.pid}`, liveLock);
+          const skipped = launch();
+          expect(skipped.status, skipped.error?.message ?? skipped.stderr).toBe(0);
+          expect(readFileSync(prefsPath, "utf8")).toContain("Crashed");
+          expect(readlinkSync(liveLock)).toBe(`testhost-${liveBrowser.pid}`);
+
+          if (process.platform === "linux") {
+            const renderer = spawn(sleeper, ["--type=renderer", `--user-data-dir=${profile}`], {
+              stdio: "ignore",
+              detached: true,
+            });
+            try {
+              writeFileSync(prefsPath, '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n');
+              rmSync(liveLock);
+              symlinkSync(`testhost-${process.pid}`, liveLock);
+              const reused = launch();
+              expect(reused.status, reused.error?.message ?? reused.stderr).toBe(0);
+              expect(readFileSync(prefsPath, "utf8")).toContain('"exit_type":"Normal"');
+
+              writeFileSync(prefsPath, '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n');
+              symlinkSync(`testhost-${renderer.pid}`, liveLock);
+              const childLock = launch();
+              expect(childLock.status, childLock.error?.message ?? childLock.stderr).toBe(0);
+              expect(readFileSync(prefsPath, "utf8")).toContain('"exit_type":"Normal"');
+
+              const joiner = path.join(bin, "join-cmdline.py");
+              writeFileSync(
+                joiner,
+                [
+                  "import os, time",
+                  'raw = open("/proc/self/cmdline", "rb").read().rstrip(b"\\0")',
+                  'joined = raw.replace(b"\\0", b" ")',
+                  "start = end = None",
+                  'for line in open("/proc/self/maps"):',
+                  '    if "[stack]" in line:',
+                  '        a, b = line.split()[0].split("-")',
+                  "        start, end = int(a, 16), int(b, 16)",
+                  "        break",
+                  'mem = os.open("/proc/self/mem", os.O_RDWR)',
+                  "pos = end",
+                  "found = None",
+                  "while pos > start:",
+                  "    size = min(1024 * 1024, pos - start)",
+                  "    pos -= size",
+                  "    os.lseek(mem, pos, os.SEEK_SET)",
+                  "    data = os.read(mem, size + len(raw))",
+                  "    idx = data.find(raw)",
+                  "    if idx != -1:",
+                  "        found = pos + idx",
+                  "        break",
+                  "if found is None:",
+                  '    raise SystemExit("cmdline not found")',
+                  "os.lseek(mem, found, os.SEEK_SET)",
+                  "os.write(mem, joined)",
+                  "os.close(mem)",
+                  'open(os.environ["JOINED_READY"], "w").write("ready\\n")',
+                  "time.sleep(120)",
+                  "",
+                ].join("\n"),
+              );
+              const ready = path.join(temp, "joined-ready");
+              const python = spawnSync("python3", ["-c", "import sys; print(sys.executable)"], {
+                encoding: "utf8",
+              }).stdout.trim();
+              const spacedHome = path.join(temp, "home --type=renderer dir");
+              const spacedProfile = path.join(spacedHome, ".browser-profiles/chromium");
+              const spacedPrefs = path.join(spacedProfile, "Default", "Preferences");
+              mkdirSync(path.dirname(spacedPrefs), { recursive: true });
+              writeFileSync(spacedPrefs, '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n');
+              const joined = spawn(python, [joiner, `--user-data-dir=${spacedProfile}`], {
+                stdio: "ignore",
+                detached: true,
+                env: { ...process.env, JOINED_READY: ready },
+              });
+              try {
+                const deadline = Date.now() + 2_000;
+                while (spawnSync("test", ["-s", ready]).status !== 0) {
+                  if (Date.now() > deadline)
+                    throw new Error("space-joined command line was not published");
+                  spawnSync("sleep", ["0.02"]);
+                }
+                const spacedLock = path.join(spacedProfile, "SingletonLock");
+                symlinkSync(`testhost-${joined.pid}`, spacedLock);
+                const kept = spawnSync("bash", [path.join(root, "rakazo-browser")], {
+                  env: {
+                    ...process.env,
+                    DISPLAY: ":1",
+                    HOME: spacedHome,
+                    PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+                    RAKAZO_TEST_ARGS: capture,
+                  },
+                  encoding: "utf8",
+                });
+                expect(kept.status, kept.error?.message ?? kept.stderr).toBe(0);
+                expect(readFileSync(spacedPrefs, "utf8")).toContain("Crashed");
+                expect(readlinkSync(spacedLock)).toBe(`testhost-${joined.pid}`);
+              } finally {
+                if (joined.pid) {
+                  try {
+                    process.kill(-joined.pid, "SIGKILL");
+                  } catch {
+                    joined.kill("SIGKILL");
+                  }
+                }
+              }
+            } finally {
+              if (renderer.pid) {
+                try {
+                  process.kill(-renderer.pid, "SIGKILL");
+                } catch {
+                  renderer.kill("SIGKILL");
+                }
+              }
+            }
+          }
+
+          writeFileSync(prefsPath, '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n');
+          const gone = spawnSync("/bin/sleep", ["0"]);
+          expect(gone.status).toBe(0);
+          expect(spawnSync("kill", ["-0", String(gone.pid)]).status).not.toBe(0);
+          rmSync(liveLock, { force: true });
+          symlinkSync(`testhost-${gone.pid}`, liveLock);
+          const cleared = launch();
+          expect(cleared.status, cleared.error?.message ?? cleared.stderr).toBe(0);
+          expect(readFileSync(prefsPath, "utf8")).toContain('"exit_type":"Normal"');
+        } finally {
+          if (liveBrowser.pid) {
+            try {
+              process.kill(-liveBrowser.pid, "SIGKILL");
+            } catch {
+              liveBrowser.kill("SIGKILL");
+            }
+          }
+        }
+      } finally {
+        rmSync(temp, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "forwards a URL to the live browser when SingletonLock misses that process",
+    () => {
+      const root = path.resolve(import.meta.dirname, "../../computer");
+      const temp = mkdtempSync(path.join(tmpdir(), "rakazo-browser-live-"));
+      const bin = path.join(temp, "bin");
+      const home = path.join(temp, "home");
+      const capture = path.join(temp, "args");
+      const urlsFile = path.join(temp, "urls");
+      const dropFile = path.join(temp, "drop");
+      const portFile = path.join(temp, "port");
+      mkdirSync(bin);
+      writeFileSync(
+        path.join(bin, "chromium"),
+        '#!/bin/sh\nprintf "%s\\n" "$@" > "$RAKAZO_TEST_ARGS"\n',
+      );
+      chmodSync(path.join(bin, "chromium"), 0o755);
+      symlinkSync(path.join(root, "rakazo-browser"), path.join(bin, "rakazo-browser"));
+      const sleeper = path.join(bin, "sleeper");
+      writeFileSync(sleeper, "#!/bin/sh\nsleep 120\n");
+      chmodSync(sleeper, 0o755);
+      const endpoint = path.join(temp, "debug-endpoint.py");
+      writeFileSync(
+        endpoint,
+        [
+          "import json, os, time, urllib.parse",
+          "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer",
+          "pages = []",
+          "state = {'consumed': False, 'listed': False, 'mode': ''}",
+          "def mode():",
+          "    try:",
+          "        with open(os.environ['RAKAZO_TEST_DROP'], encoding='utf-8') as handle:",
+          "            current = handle.read().strip()",
+          "    except OSError:",
+          "        current = ''",
+          "    if current != state['mode']:",
+          "        state['mode'] = current",
+          "        state['consumed'] = False",
+          "        state['listed'] = False",
+          "    return current",
+          "class Handler(BaseHTTPRequestHandler):",
+          "    def do_GET(self):",
+          "        self.route()",
+          "    def do_PUT(self):",
+          "        self.route()",
+          "    def route(self):",
+          "        base = self.path.split('?', 1)[0]",
+          "        if base in ('/json/list', '/json'):",
+          "            current = mode()",
+          "            if current == 'slow-list' and not state['listed']:",
+          "                state['listed'] = True",
+          "                time.sleep(0.6)",
+          "            if current == 'before' and state['consumed']:",
+          "                state['listed'] = True",
+          "            listed = pages",
+          "            if current == 'stranger' and state['consumed']:",
+          "                listed = pages + [{'id': 'stranger', 'type': 'page', 'url': 'https://other.example/unrelated'}]",
+          "            body = json.dumps(listed).encode('utf-8')",
+          "            self.send_response(200)",
+          "            self.send_header('Content-Type', 'application/json')",
+          "            self.send_header('Content-Length', str(len(body)))",
+          "            self.end_headers()",
+          "            self.wfile.write(body)",
+          "            return",
+          "        if base != '/json/new':",
+          "            self.send_error(404)",
+          "            return",
+          "        query = self.path.split('?', 1)[1] if '?' in self.path else ''",
+          "        opened = urllib.parse.unquote(query)",
+          "        with open(os.environ['RAKAZO_TEST_URLS'], 'a', encoding='utf-8') as handle:",
+          "            handle.write(self.path + '\\n')",
+          "        current = mode()",
+          "        if current == 'before' and not state['listed']:",
+          "            state['consumed'] = True",
+          "            self.connection.close()",
+          "            return",
+          "        if current == 'stranger' and not state['consumed']:",
+          "            state['consumed'] = True",
+          "            self.connection.close()",
+          "            return",
+          "        pages.append({'id': 'tab-%d' % (len(pages) + 1), 'type': 'page', 'url': opened})",
+          "        if current == 'after':",
+          "            self.connection.close()",
+          "            return",
+          "        self.send_response(200)",
+          "        self.send_header('Content-Length', '0')",
+          "        self.end_headers()",
+          "    def log_message(self, fmt, *args):",
+          "        return",
+          "server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)",
+          "with open(os.environ['RAKAZO_TEST_PORT'], 'w', encoding='utf-8') as handle:",
+          "    handle.write(str(server.server_address[1]))",
+          "server.serve_forever()",
+          "",
+        ].join("\n"),
+      );
+      const blackhole = path.join(temp, "blackhole.py");
+      const acceptedFile = path.join(temp, "accepted");
+      writeFileSync(
+        blackhole,
+        [
+          "import os, socket, time",
+          "sock = socket.socket()",
+          "sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)",
+          "sock.bind(('127.0.0.1', 0))",
+          "sock.listen(8)",
+          "with open(os.environ['RAKAZO_TEST_PORT'], 'w', encoding='utf-8') as handle:",
+          "    handle.write(str(sock.getsockname()[1]))",
+          "while True:",
+          "    connection, _addr = sock.accept()",
+          "    with open(os.environ['RAKAZO_TEST_ACCEPTED'], 'a', encoding='utf-8') as handle:",
+          "        handle.write('accepted\\n')",
+          "    time.sleep(30)",
+          "    connection.close()",
+          "",
+        ].join("\n"),
+      );
+
+      const profile = path.join(home, ".browser-profiles/chromium-bot-live");
+      const prefsPath = path.join(profile, "Default", "Preferences");
+      const cookiesPath = path.join(profile, "Default", "Network", "Cookies");
+      mkdirSync(path.dirname(cookiesPath), { recursive: true });
+      const prefs = '{\n  "profile": {\n    "exit_type": "Crashed"\n  }\n}\n';
+      writeFileSync(prefsPath, prefs);
+      writeFileSync(cookiesPath, "session=kept");
+      writeFileSync(urlsFile, "");
+      writeFileSync(dropFile, "0\n");
+      const launchEnv = {
+        ...process.env,
+        DISPLAY: ":1",
+        HOME: home,
+        PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        RAKAZO_BROWSER_PROFILE: profile,
+        RAKAZO_TEST_ARGS: capture,
+      };
+      const endpointProcess = spawn("python3", [endpoint], {
+        stdio: "ignore",
+        detached: true,
+        env: {
+          ...process.env,
+          RAKAZO_TEST_PORT: portFile,
+          RAKAZO_TEST_URLS: urlsFile,
+          RAKAZO_TEST_DROP: dropFile,
+        },
+      });
+      const children = [endpointProcess];
+      const publishedPort = (file: string) => {
+        const deadline = Date.now() + 2_000;
+        while (spawnSync("test", ["-s", file]).status !== 0) {
+          if (Date.now() > deadline) throw new Error("debug endpoint did not publish a port");
+          spawnSync("sleep", ["0.02"]);
+        }
+        return readFileSync(file, "utf8").trim();
+      };
+      try {
+        const debugPort = publishedPort(portFile);
+        const browser = spawn(
+          sleeper,
+          [`--user-data-dir=${profile}`, `--remote-debugging-port=${debugPort}`],
+          { stdio: "ignore", detached: true },
+        );
+        const renderer = spawn(sleeper, ["--type=renderer", `--user-data-dir=${profile}`], {
+          stdio: "ignore",
+          detached: true,
+        });
+        const wrapper = spawn(sleeper, [`--user-data-dir=${profile}`], {
+          stdio: "ignore",
+          detached: true,
+        });
+        children.push(browser, renderer, wrapper);
+        const liveLock = path.join(profile, "SingletonLock");
+        const launch = (args: string[] = []) =>
+          spawnSync("bash", [path.join(root, "rakazo-browser"), ...args], {
+            env: launchEnv,
+            encoding: "utf8",
+          });
+        const newTabs = () =>
+          readFileSync(urlsFile, "utf8")
+            .split("\n")
+            .filter((line) => line.startsWith("/json/new"));
+        const forwarded = (url: string) =>
+          newTabs().includes(`/json/new?${encodeURIComponent(url)}`);
+        const pointLock = (pid: number | undefined) => {
+          rmSync(liveLock, { force: true });
+          symlinkSync(`testhost-${pid}`, liveLock);
+        };
+        pointLock(renderer.pid);
+        const kept = launch();
+        expect(kept.status, kept.error?.message ?? kept.stderr).toBe(0);
+        expect(readFileSync(prefsPath, "utf8")).toBe(prefs);
+        expect(readFileSync(cookiesPath, "utf8")).toBe("session=kept");
+        expect(readlinkSync(liveLock)).toBe(`testhost-${renderer.pid}`);
+        expect(() => readFileSync(capture, "utf8")).toThrow();
+
+        const openedAt = newTabs().length;
+        const opened = launch(["https://example.com/opened"]);
+        expect(opened.status, opened.error?.message ?? opened.stderr).toBe(0);
+        expect(newTabs().slice(openedAt)).toEqual([
+          `/json/new?${encodeURIComponent("https://example.com/opened")}`,
+        ]);
+        expect(readFileSync(prefsPath, "utf8")).toBe(prefs);
+        expect(readFileSync(cookiesPath, "utf8")).toBe("session=kept");
+        expect(readlinkSync(liveLock)).toBe(`testhost-${renderer.pid}`);
+        expect(() => readFileSync(capture, "utf8")).toThrow();
+
+        for (const [target, openedUrl] of [
+          ["example.com", "http://example.com"],
+          ["localhost:3000", "http://localhost:3000"],
+          ["/tmp/page.html", "file:///tmp/page.html"],
+        ] as const) {
+          const hostAt = newTabs().length;
+          const host = launch([target]);
+          expect(host.status, host.error?.message ?? host.stderr).toBe(0);
+          expect(newTabs().slice(hostAt)).toEqual([`/json/new?${encodeURIComponent(openedUrl)}`]);
+        }
+
+        pointLock(wrapper.pid);
+        const wrapperAt = newTabs().length;
+        const viaWrapper = launch(["https://example.com/from-wrapper"]);
+        expect(viaWrapper.status, viaWrapper.error?.message ?? viaWrapper.stderr).toBe(0);
+        expect(newTabs().slice(wrapperAt)).toEqual([
+          `/json/new?${encodeURIComponent("https://example.com/from-wrapper")}`,
+        ]);
+        expect(readFileSync(prefsPath, "utf8")).toBe(prefs);
+        expect(readlinkSync(liveLock)).toBe(`testhost-${wrapper.pid}`);
+        expect(() => readFileSync(capture, "utf8")).toThrow();
+
+        writeFileSync(dropFile, "after\n");
+        const droppedAt = newTabs().length;
+        const dropped = launch(["https://example.com/drop-after-create"]);
+        expect(dropped.status, dropped.error?.message ?? dropped.stderr).toBe(0);
+        expect(newTabs().slice(droppedAt)).toEqual([
+          `/json/new?${encodeURIComponent("https://example.com/drop-after-create")}`,
+        ]);
+        expect(readFileSync(prefsPath, "utf8")).toBe(prefs);
+        expect(() => readFileSync(capture, "utf8")).toThrow();
+
+        writeFileSync(dropFile, "before\n");
+        const blindAt = newTabs().length;
+        const blind = launch(["https://example.com/drop-before-create"]);
+        expect(blind.status, blind.error?.message ?? blind.stderr).toBe(0);
+        expect(newTabs().slice(blindAt)).toEqual([
+          `/json/new?${encodeURIComponent("https://example.com/drop-before-create")}`,
+          `/json/new?${encodeURIComponent("https://example.com/drop-before-create")}`,
+        ]);
+
+        writeFileSync(dropFile, "stranger\n");
+        const strangerAt = newTabs().length;
+        const stranger = launch(["https://example.com/not-the-stranger"]);
+        expect(stranger.status).not.toBe(0);
+        expect(newTabs().slice(strangerAt)).toEqual([
+          `/json/new?${encodeURIComponent("https://example.com/not-the-stranger")}`,
+        ]);
+
+        writeFileSync(dropFile, "slow-list\n");
+        const slowAt = newTabs().length;
+        const slow = launch(["https://example.com/after-slow-list"]);
+        expect(slow.status, slow.error?.message ?? slow.stderr).toBe(0);
+        expect(newTabs().slice(slowAt)).toEqual([
+          `/json/new?${encodeURIComponent("https://example.com/after-slow-list")}`,
+        ]);
+        writeFileSync(dropFile, "0\n");
+
+        pointLock(browser.pid);
+        const owned = launch(["https://example.com/owned-lock"]);
+        expect(owned.status, owned.error?.message ?? owned.stderr).toBe(0);
+        expect(readFileSync(capture, "utf8")).toContain("https://example.com/owned-lock");
+        expect(readFileSync(prefsPath, "utf8")).toBe(prefs);
+        expect(forwarded("https://example.com/owned-lock")).toBe(false);
+
+        rmSync(capture, { force: true });
+        pointLock(renderer.pid);
+        endpointProcess.kill("SIGKILL");
+        const closed = launch(["https://example.com/closed"]);
+        expect(closed.status).not.toBe(0);
+        expect(forwarded("https://example.com/closed")).toBe(false);
+        expect(readFileSync(prefsPath, "utf8")).toBe(prefs);
+        expect(readFileSync(cookiesPath, "utf8")).toBe("session=kept");
+        expect(() => readFileSync(capture, "utf8")).toThrow();
+
+        if (browser.pid) {
+          try {
+            process.kill(-browser.pid, "SIGKILL");
+          } catch {
+            browser.kill("SIGKILL");
+          }
+        }
+        const hungPortFile = path.join(temp, "hung-port");
+        const hung = spawn("python3", [blackhole], {
+          stdio: "ignore",
+          detached: true,
           env: {
             ...process.env,
-            DISPLAY: ":1",
-            HOME: home,
-            PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
-            RAKAZO_TEST_ARGS: capture,
+            RAKAZO_TEST_PORT: hungPortFile,
+            RAKAZO_TEST_ACCEPTED: acceptedFile,
           },
-          encoding: "utf8",
         });
-        expect(skipped.status, skipped.error?.message ?? skipped.stderr).toBe(0);
-        expect(readFileSync(prefsPath, "utf8")).toContain("Crashed");
+        children.push(hung);
+        const hungPort = publishedPort(hungPortFile);
+        const hungBrowser = spawn(
+          sleeper,
+          [`--user-data-dir=${profile}`, `--remote-debugging-port=${hungPort}`],
+          { stdio: "ignore", detached: true },
+        );
+        children.push(hungBrowser);
+        pointLock(wrapper.pid);
+        const reported = spawnSync(
+          "python3",
+          [
+            "-c",
+            [
+              "import importlib.util, sys",
+              "spec = importlib.util.spec_from_file_location('control', sys.argv[1])",
+              "module = importlib.util.module_from_spec(spec)",
+              "spec.loader.exec_module(module)",
+              "argv = ['env', 'DISPLAY=:1', 'rakazo-browser', sys.argv[2]]",
+              "try:",
+              "    module.run_control_argv(argv, ':1')",
+              "except RuntimeError as error:",
+              "    if str(error) != 'computer action failed':",
+              "        raise",
+              "    raise SystemExit(0)",
+              "raise SystemExit('open looked successful')",
+            ].join("\n"),
+            path.join(root, "control.py"),
+            "https://example.com/unanswered",
+          ],
+          { env: launchEnv, encoding: "utf8" },
+        );
+        expect(reported.status, reported.stdout + reported.stderr).toBe(0);
+        expect(readFileSync(acceptedFile, "utf8")).toContain("accepted");
+        expect(readFileSync(prefsPath, "utf8")).toBe(prefs);
+        expect(() => readFileSync(capture, "utf8")).toThrow();
       } finally {
+        for (const child of children) {
+          if (!child.pid) continue;
+          try {
+            process.kill(-child.pid, "SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+        }
         rmSync(temp, { recursive: true, force: true });
       }
     },
@@ -542,6 +1452,7 @@ describe("graphical computer spec", () => {
           "import importlib.util",
           "import os",
           "import signal",
+          "import tempfile",
           "import time",
           `spec = importlib.util.spec_from_file_location('control', ${JSON.stringify(controlPath)})`,
           "module = importlib.util.module_from_spec(spec)",
@@ -603,6 +1514,16 @@ describe("graphical computer spec", () => {
           "  assert str(error) == 'computer action timed out'",
           "finally:",
           "  module.CONTROL_TIMEOUT_SEC = timeout",
+          "slow = tempfile.mkdtemp()",
+          "launcher = os.path.join(slow, 'rakazo-browser')",
+          "open(launcher, 'w').write('#!/bin/sh\\nsleep 0.25\\nexit 1\\n')",
+          "os.chmod(launcher, 0o755)",
+          "os.environ['PATH'] = slow + os.pathsep + os.environ.get('PATH', '')",
+          "try:",
+          "  module.run_control_argv(['env', 'DISPLAY=:1', 'rakazo-browser'], ':1')",
+          "  raise SystemExit('slow failure looked successful')",
+          "except RuntimeError as error:",
+          "  assert str(error) == 'computer action failed', str(error)",
           "print('ok')",
         ].join("\n"),
       ],
@@ -666,6 +1587,17 @@ describe("computer resource limits", () => {
     expect(HostConfig.Memory).toBe(2 * 1024 ** 3);
     expect(HostConfig.MemorySwap).toBe(HostConfig.Memory);
     expect(HostConfig.NanoCpus).toBe(2 * 1e9);
+    expect(HostConfig.PidsLimit).toBe(2048);
+  });
+
+  it("falls back to the defaults when a variable is blank", () => {
+    // .env.example ships these keys blank; a blank value must read as "unset".
+    process.env.RAKAZO_COMPUTER_MEMORY = "";
+    process.env.RAKAZO_COMPUTER_CPUS = "  ";
+    process.env.RAKAZO_COMPUTER_PIDS_LIMIT = "";
+    const { HostConfig } = containerCreateOptions(createInput);
+    expect(HostConfig.Memory).toBe(2 * 1024 ** 3);
+    expect(HostConfig.NanoCpus).toBe(2e9);
     expect(HostConfig.PidsLimit).toBe(2048);
   });
 
@@ -804,5 +1736,27 @@ describe("computer home storage", () => {
       expect(() => assertVolumeSubpathSupport(version)).toThrow(/Docker Engine 26/);
     for (const version of ["1.45", "1.46", "2.0"])
       expect(() => assertVolumeSubpathSupport(version)).not.toThrow();
+  });
+
+  it("stops promptly when Docker sends SIGTERM to the start script", () => {
+    const root = path.resolve(import.meta.dirname, "../../computer");
+    const start = readFileSync(path.join(root, "start.sh"), "utf8");
+    expect(start).toMatch(/trap shutdown TERM INT/);
+    expect(start).toMatch(/kill -TERM "\$XVFB_PID"/);
+    expect(start).not.toMatch(/while kill -0 "\$XVFB_PID"/);
+    // The handler must be in place before the first child process starts, so a stop that
+    // arrives during startup is honoured instead of waiting for Docker's grace period.
+    const trapAt = start.indexOf("trap shutdown TERM INT");
+    const firstChildAt = start.search(/^[^#\n]*&\s*$/m);
+    expect(trapAt).toBeGreaterThan(-1);
+    expect(firstChildAt).toBeGreaterThan(-1);
+    expect(trapAt).toBeLessThan(firstChildAt);
+    // A stop before Xvfb exists must not try to signal or wait on an empty PID.
+    expect(start).toMatch(/^XVFB_PID=""$/m);
+    expect(start.match(/if \[\[ -n "\$XVFB_PID" \]\]; then/g)?.length ?? 0).toBeGreaterThanOrEqual(
+      2,
+    );
+    // Steady state waits on Xvfb instead of polling, so the trap runs immediately.
+    expect(start).toMatch(/^wait "\$XVFB_PID"$/m);
   });
 });

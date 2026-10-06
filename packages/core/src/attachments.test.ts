@@ -6,7 +6,7 @@ import {
   decodeAttachmentBase64,
   inferAttachmentMimeType,
   promptTextForAttachments,
-  userTurnBlocksForRun,
+  userTurnMessageForRun,
   validateAttachmentMimeType,
 } from "./attachments.js";
 
@@ -18,6 +18,22 @@ describe("attachment helpers", () => {
       AttachmentValidationError,
     );
     expect(() => decodeAttachmentBase64("aGVsbG8")).toThrow(AttachmentValidationError);
+  });
+
+  it("validates a large base64 payload without blowing the stack", () => {
+    // Regression test: the original validator used a grouped-repetition regex
+    // (`/^(?:[chars]{4})*(...)?$/`) that stack-overflows V8 on inputs in the
+    // megabytes-of-characters range — a 5 MiB string reliably reproduced it,
+    // well within reach of the current 10 MiB attachment limit (~13.3 MiB of
+    // base64 once encoded).
+    const validLarge = "A".repeat(6 * 1024 * 1024);
+    expect(() => decodeAttachmentBase64(validLarge)).not.toThrow();
+
+    // A base64 string decoding to just over the 10 MiB byte limit must still
+    // be rejected for size — and, same regression, without a stack overflow.
+    const oversized = "A".repeat(15 * 1024 * 1024);
+    expect(() => decodeAttachmentBase64(oversized)).not.toThrow(RangeError);
+    expect(() => decodeAttachmentBase64(oversized)).toThrow(AttachmentValidationError);
   });
 
   it("builds prompt text and history summaries", () => {
@@ -77,11 +93,11 @@ describe("attachment helpers", () => {
         blocks: [{ kind: "text" as const, text: "routine time" }],
       },
     ];
-    expect(userTurnBlocksForRun("routine", "run-new", messages)).toBeUndefined();
-    expect(userTurnBlocksForRun("user", "run-old", messages)).toEqual(messages[0]?.blocks);
-    expect(userTurnBlocksForRun("user", "run-new", messages)).toEqual(messages[1]?.blocks);
-    expect(userTurnBlocksForRun("user", "run-fanout", messages, "message-old")).toEqual(
-      messages[0]?.blocks,
+    expect(userTurnMessageForRun("routine", "run-new", messages)).toBeUndefined();
+    expect(userTurnMessageForRun("user", "run-old", messages)).toEqual(messages[0]);
+    expect(userTurnMessageForRun("user", "run-new", messages)).toEqual(messages[1]);
+    expect(userTurnMessageForRun("user", "run-fanout", messages, "message-old")).toEqual(
+      messages[0],
     );
   });
 

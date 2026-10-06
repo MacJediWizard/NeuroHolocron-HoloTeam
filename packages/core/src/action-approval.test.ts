@@ -27,6 +27,7 @@ describe("toolRequiresApproval", () => {
     expect(toolRequiresApproval("cloud_agent_launch", false)).toBe(true);
     expect(toolRequiresApproval("create_space", false)).toBe(true);
     expect(toolRequiresExplicitApproval("create_space")).toBe(true);
+    expect(toolRequiresExplicitApproval("save_shared_memory")).toBe(false);
     expect(toolRequiresExplicitApproval("archive_bot")).toBe(false);
   });
 
@@ -38,6 +39,7 @@ describe("toolRequiresApproval", () => {
       "write_file",
       "shell",
       "remember",
+      "save_shared_memory",
       "spawn_bot",
       "run_subagent",
     ]) {
@@ -65,6 +67,30 @@ describe("connectorToolRequiresApproval", () => {
   it("matches read-only connector tool names", () => {
     expect(connectorToolRequiresApproval("list_items")).toBe(false);
     expect(connectorToolRequiresApproval("send_message")).toBe(true);
+  });
+
+  it("requires approval for a declared write whatever its name says", () => {
+    expect(connectorToolRequiresApproval("read_profile_card", false)).toBe(true);
+    expect(connectorToolRequiresApproval("find_validator_record", false)).toBe(true);
+    expect(connectorToolRequiresApproval("read_profile_card", true)).toBe(false);
+    expect(connectorToolRequiresApproval("read_profile_card")).toBe(false);
+  });
+
+  it("never lets a declared read relax a mutating or ambiguous name", () => {
+    expect(connectorToolRequiresApproval("delete_item", true)).toBe(true);
+    expect(connectorToolRequiresApproval("get_or_create_contact", true)).toBe(true);
+    expect(connectorToolRequiresApproval("profile_card", true)).toBe(true);
+  });
+});
+
+describe("resolveActionApprovalDetail", () => {
+  it("applies category rules to declared writes with read-looking names", () => {
+    const rules = [
+      { effect: "require_approval" as const, matchKind: "category" as const, matchValue: "email" },
+    ];
+    const base = { toolName: "gmail_read_thread", connectorKind: "gmail", rules };
+    expect(resolveActionApprovalDetail(base).decision).toBe("allow");
+    expect(resolveActionApprovalDetail({ ...base, readOnly: false }).decision).toBe("ask");
   });
 });
 
@@ -94,6 +120,22 @@ describe("unattendedTriggerToolRequiresApproval", () => {
       true,
     );
     expect(unattendedTriggerToolRequiresApproval("user", "shell", false)).toBe(false);
+  });
+
+  it("forces approval for webhook-triggered declared writes with read-looking names", () => {
+    for (const name of ["read_profile_card", "find_validator_record", "get_status"]) {
+      expect(unattendedTriggerToolRequiresApproval("webhook", name, true, false)).toBe(true);
+      expect(toolRequiresApproval(name, true, false)).toBe(true);
+    }
+    expect(unattendedTriggerToolRequiresApproval("webhook", "read_profile_card", true, true)).toBe(
+      false,
+    );
+    expect(unattendedTriggerToolRequiresApproval("webhook", "delete_record", true, true)).toBe(
+      true,
+    );
+    expect(unattendedTriggerToolRequiresApproval("user", "read_profile_card", true, false)).toBe(
+      false,
+    );
   });
 });
 

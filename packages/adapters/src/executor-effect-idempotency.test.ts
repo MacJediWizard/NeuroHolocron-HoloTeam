@@ -1,5 +1,8 @@
 import type { AgentRunRequest } from "@rakazo/adapter-kit";
-import { toolEffectIdempotencyKey } from "@rakazo/core/node/approval-effect-key";
+import {
+  legacyScopedToolEffectIdempotencyKey,
+  toolEffectIdempotencyKey,
+} from "@rakazo/core/node/approval-effect-key";
 import { describe, expect, it, vi } from "vitest";
 import type * as AutoReviewModule from "./auto-review.js";
 import type * as ComputerLifecycleModule from "./computer-lifecycle.js";
@@ -62,7 +65,20 @@ function fixture(runId = "run-1") {
   };
   const memoryCommit = vi.fn(async () => ({ revision: "rev-1" }));
   const externalEffect = {
-    findMany: vi.fn(async () => effects.filter((effect) => effect.status === "approved")),
+    findMany: vi.fn(
+      async ({
+        where,
+      }: {
+        where?: { id?: string; runId?: string; status?: string; kind?: string };
+      } = {}) =>
+        effects.filter((effect) => {
+          if (where?.status && effect.status !== where.status) return false;
+          if (where?.kind && effect.kind !== where.kind) return false;
+          if (where?.runId && effect.runId && effect.runId !== where.runId) return false;
+          if (where?.id && effect.id !== where.id) return false;
+          return true;
+        }),
+    ),
     findUnique: vi.fn(
       async ({ where }: { where: { id?: string; idempotencyKey?: string } }) =>
         effects.find((effect) =>
@@ -235,11 +251,11 @@ describe("mutating tool effect idempotency keys", () => {
     expect(f.memoryCommit).toHaveBeenCalledOnce();
     expect(f.scratchpadRows).toHaveLength(1);
     expect(f.effects.map((effect) => effect.idempotencyKey)).toEqual([
-      toolEffectIdempotencyKey("run-a", "remember", "call_0", {
+      toolEffectIdempotencyKey("run-a", "remember", {
         path: "MEMORY.md",
         content: "team preference",
       }),
-      toolEffectIdempotencyKey("run-a", "scratchpad_add", "call_0", {
+      toolEffectIdempotencyKey("run-a", "scratchpad_add", {
         title: "follow up with design",
       }),
     ]);
@@ -277,11 +293,11 @@ describe("mutating tool effect idempotency keys", () => {
 
     expect(second.memoryCommit).toHaveBeenCalledOnce();
     expect(second.effects.map((effect) => effect.idempotencyKey)).toEqual([
-      toolEffectIdempotencyKey("run-1", "remember", "call_0", {
+      toolEffectIdempotencyKey("run-1", "remember", {
         path: "MEMORY.md",
         content: "first bot note",
       }),
-      toolEffectIdempotencyKey("run-2", "remember", "call_0", {
+      toolEffectIdempotencyKey("run-2", "remember", {
         path: "MEMORY.md",
         content: "second bot note",
       }),
@@ -314,7 +330,40 @@ describe("mutating tool effect idempotency keys", () => {
     expect(f.memoryCommit).toHaveBeenCalledOnce();
     expect(f.effects).toHaveLength(1);
     expect(f.effects[0]?.idempotencyKey).toBe(
-      toolEffectIdempotencyKey("run-retry", "remember", "call_0", {
+      toolEffectIdempotencyKey("run-retry", "remember", {
+        path: "MEMORY.md",
+        content: "durable fact",
+      }),
+    );
+    expect(f.results[1]).toEqual({ ok: true });
+  });
+
+  it("replays the same logical effect when restart assigns a new tool-call id", async () => {
+    const f = fixture("run-replay-id");
+    f.setCalls([
+      {
+        name: "remember",
+        args: { path: "MEMORY.md", content: "durable fact" },
+        executionId: "toolu_abc",
+      },
+    ]);
+    await f.run();
+    expect(f.memoryCommit).toHaveBeenCalledOnce();
+    expect(f.effects).toHaveLength(1);
+
+    f.setCalls([
+      {
+        name: "remember",
+        args: { path: "MEMORY.md", content: "durable fact" },
+        executionId: "toolu_xyz",
+      },
+    ]);
+    await f.run();
+
+    expect(f.memoryCommit).toHaveBeenCalledOnce();
+    expect(f.effects).toHaveLength(1);
+    expect(f.effects[0]?.idempotencyKey).toBe(
+      toolEffectIdempotencyKey("run-replay-id", "remember", {
         path: "MEMORY.md",
         content: "durable fact",
       }),
@@ -371,6 +420,38 @@ describe("mutating tool effect idempotency keys", () => {
     expect(f.results[0]).toEqual({ ok: true, legacy: true });
   });
 
+  it("replays a legacy scoped key that included the provider tool-call id", async () => {
+    const args = { path: "MEMORY.md", content: "legacy scoped fact" };
+    const f = fixture("run-legacy-scoped");
+    f.effects.push({
+      id: "legacy-scoped-1",
+      runId: "run-legacy-scoped",
+      kind: "remember",
+      idempotencyKey: legacyScopedToolEffectIdempotencyKey(
+        "run-legacy-scoped",
+        "remember",
+        "call_0",
+        args,
+      ),
+      status: "completed",
+      request: args,
+      result: { ok: true, legacy: true },
+    });
+    f.setCalls([
+      {
+        name: "remember",
+        args,
+        executionId: "call_0",
+      },
+    ]);
+
+    await f.run();
+
+    expect(f.memoryCommit).not.toHaveBeenCalled();
+    expect(f.effects).toHaveLength(1);
+    expect(f.results[0]).toEqual({ ok: true, legacy: true });
+  });
+
   it("does not reuse an incomplete legacy effect when the request differs", async () => {
     const f = fixture("run-legacy-mismatch");
     f.effects.push({
@@ -394,11 +475,64 @@ describe("mutating tool effect idempotency keys", () => {
     expect(f.memoryCommit).toHaveBeenCalledOnce();
     expect(f.effects).toHaveLength(2);
     expect(f.effects[1]?.idempotencyKey).toBe(
-      toolEffectIdempotencyKey("run-legacy-mismatch", "remember", "call_0", {
+      toolEffectIdempotencyKey("run-legacy-mismatch", "remember", {
         path: "MEMORY.md",
         content: "new fact",
       }),
     );
     expect(f.results[0]).toEqual({ ok: true });
+  });
+
+  it("executes two identical-args mutating calls in one live run", async () => {
+    const args = { path: "MEMORY.md", content: "same fact" };
+    const f = fixture("run-live-repeat");
+    f.setCalls([
+      { name: "remember", args, executionId: "call_a" },
+      { name: "remember", args, executionId: "call_b" },
+    ]);
+
+    await f.run();
+
+    expect(f.memoryCommit).toHaveBeenCalledTimes(2);
+    expect(f.effects).toHaveLength(2);
+    expect(f.effects[0]?.idempotencyKey).toBe(
+      toolEffectIdempotencyKey("run-live-repeat", "remember", args),
+    );
+    expect(f.effects[1]?.idempotencyKey).toBe(
+      toolEffectIdempotencyKey("run-live-repeat", "remember", args, 1),
+    );
+    expect(f.results).toEqual([{ ok: true }, { ok: true }]);
+  });
+
+  it("replays a legacy scoped key when restart assigns a new tool-call id", async () => {
+    const args = { path: "MEMORY.md", content: "legacy scoped fact" };
+    const f = fixture("run-legacy-new-id");
+    f.effects.push({
+      id: "legacy-scoped-old-id",
+      runId: "run-legacy-new-id",
+      kind: "remember",
+      idempotencyKey: legacyScopedToolEffectIdempotencyKey(
+        "run-legacy-new-id",
+        "remember",
+        "call_old",
+        args,
+      ),
+      status: "completed",
+      request: args,
+      result: { ok: true, legacy: true },
+    });
+    f.setCalls([
+      {
+        name: "remember",
+        args,
+        executionId: "call_new",
+      },
+    ]);
+
+    await f.run();
+
+    expect(f.memoryCommit).not.toHaveBeenCalled();
+    expect(f.effects).toHaveLength(1);
+    expect(f.results[0]).toEqual({ ok: true, legacy: true });
   });
 });

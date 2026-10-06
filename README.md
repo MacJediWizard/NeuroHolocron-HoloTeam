@@ -1,15 +1,14 @@
-# Rakazo
+# Legiara
 
-[![GitHub stars](https://img.shields.io/github/stars/elie222/rakazo?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/elie222/rakazo/stargazers)
-[![Discord](https://img.shields.io/badge/Discord-Join%20the%20community-5865F2?labelColor=black&style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/RWwKa2Sn7h)
+[![GitHub stars](https://img.shields.io/github/stars/MacJediWizard/NeuroHolocron-HoloTeam?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/stargazers)
 
-![Rakazo — AI teammates you actually own](./docs/readme-hero.png)
+![Legiara — AI teammates you actually own](./docs/readme-hero.png)
 
-Rakazo is an open-source platform for running persistent AI teammates. It is available on the web,
+Legiara is an open-source platform for running persistent AI teammates. It is available on the web,
 as an Electron desktop app, and through an Expo mobile app. Bring your own model and computer
 provider, or run the complete stack locally.
 
-Rakazo is in beta. Learn more at [rakazo.com](https://rakazo.com).
+Legiara is in beta. Learn more at [legiara.com](https://legiara.com).
 
 ## Features
 
@@ -20,7 +19,7 @@ Rakazo is in beta. Learn more at [rakazo.com](https://rakazo.com).
 - Bots that can delegate to peer bots or short-lived subagents
 - Bring-your-own model credentials through Pi
 - App integrations through Composio or Pipedream Connect, plus user-installed Treg, remote MCP, and OpenAPI tool sources
-- Docker, E2B, Daytona, Box, and trusted local-computer support
+- Docker, E2B, Daytona, CreateOS, Box, and trusted local-computer support
 
 ## Demo
 
@@ -36,7 +35,7 @@ https://github.com/user-attachments/assets/dccdeddb-2134-4a56-8eed-b2e591736b1c
 - Better Auth
 - Graphile Worker
 - Pi
-- Docker, E2B, Daytona, and Box
+- Docker, E2B, Daytona, CreateOS, and Box
 - Composio, Pipedream Connect, MCP, and OpenAPI integrations
 
 ## Quick start (published images)
@@ -45,15 +44,15 @@ You need Docker Engine, the Compose plugin, curl, and OpenSSL. No clone or Node 
 
 ```bash
 mkdir -p rakazo && cd rakazo &&
-curl -fsSLO https://raw.githubusercontent.com/elie222/rakazo/main/infra/compose/install-images.sh &&
+curl -fsSLO https://raw.githubusercontent.com/MacJediWizard/NeuroHolocron-HoloTeam/main/infra/compose/install-images.sh &&
 bash install-images.sh
 ```
 
-The installer downloads the Compose files, creates `.env` with random secrets, and starts Rakazo.
+The installer downloads the Compose files, creates `.env` with random secrets, and starts Legiara.
 It preserves an existing `.env` when rerun.
 
 Open [http://127.0.0.1:5173](http://127.0.0.1:5173), create an account, and connect a model.
-Local Docker computers are on by default. Optional remote providers: `e2b`, `daytona`, or `box`
+Local Docker computers are on by default. Optional remote providers: `e2b`, `daytona`, `createos`, or `box`
 with the matching API key.
 
 Default image tag is `edge` (main builds, `linux/amd64` + `linux/arm64`). Details and tags:
@@ -73,7 +72,7 @@ the desktop app, the mobile app, or a browser.
 
 ```bash
 bash install-images.sh --prepare-only
-# edit .env: SANDBOX_PROVIDER=box (or e2b / daytona) with its API key, RAKAZO_HOST=your.domain
+# edit .env: SANDBOX_PROVIDER=box (or e2b / daytona / createos) with its API key, RAKAZO_HOST=your.domain
 bash install-images.sh
 ```
 
@@ -87,8 +86,8 @@ You need Node.js 22.22.2 or newer in the 22.x line, Node.js 24.x, or Node.js 26+
 pnpm 9; and Docker. Node.js 23.x and 25.x are not supported.
 
 ```bash
-git clone https://github.com/elie222/rakazo.git
-cd rakazo
+git clone https://github.com/MacJediWizard/NeuroHolocron-HoloTeam.git
+cd NeuroHolocron-HoloTeam
 cp .env.example .env
 ```
 
@@ -97,6 +96,10 @@ Set `POSTGRES_PASSWORD` (for example `openssl rand -hex 16`), then put the same 
 independent long random values. Docker sandboxes also need a dedicated
 `SANDBOX_SUPERVISOR_TOKEN`. You can also set `OPENROUTER_API_KEY`, or connect a supported
 model provider during onboarding.
+
+For host-side development with Docker Desktop, set `SANDBOX_CONTROL_VIA_LOOPBACK=true`
+in `.env`. The supervisor discovers Docker Desktop's user socket automatically;
+`DOCKER_HOST` or `DOCKER_SOCKET` can override it for another Docker runtime.
 
 Managed app catalogs are optional. Set `COMPOSIO_API_KEY` for Composio, or the
 `PIPEDREAM_CLIENT_ID`, `PIPEDREAM_CLIENT_SECRET`, and `PIPEDREAM_PROJECT_ID` trio for Pipedream
@@ -122,6 +125,7 @@ pnpm dev
 
 Postgres stays network-internal in the default Compose file (same as published images). The
 `postgres-host` overlay publishes loopback `127.0.0.1:5433` for host-side `pnpm` and DB tools.
+If that port is occupied, change `POSTGRES_HOST_PORT` and the port in `DATABASE_URL` in `.env`.
 Without the overlay, open a shell with
 `docker compose --env-file .env -f infra/compose/docker-compose.yml exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'`.
 Use a URI-safe `POSTGRES_PASSWORD` (`openssl rand -hex 16`). An existing `pgdata` volume keeps the
@@ -135,9 +139,14 @@ your first bot.
 For deployment, provider selection, backups, and upgrades, see the
 [self-hosting guide](./docs/self-host.md).
 
+To use CreateOS, set `SANDBOX_PROVIDER=createos` and `CREATEOS_SANDBOX_API_KEY`.
+Optional `CREATEOS_SANDBOX_BASE_URL`, `CREATEOS_SANDBOX_SHAPE`, and
+`CREATEOS_SANDBOX_ROOTFS` default to `https://api.sb.createos.sh`, `s-2vcpu-2gb`,
+and `desktop:1`.
+
 ## Desktop and mobile
 
-The Electron and Expo apps are clients of the same Rakazo API used by the web app.
+The Electron and Expo apps are clients of the same Legiara API used by the web app.
 
 With the development stack running, launch Electron with:
 
@@ -145,18 +154,18 @@ With the development stack running, launch Electron with:
 pnpm --filter @rakazo/desktop dev
 ```
 
-On first run the desktop app asks whether to run Rakazo on this computer or connect to an existing
+On first run the desktop app asks whether to run Legiara on this computer or connect to an existing
 server. **This computer** installs and starts the published images with Docker Compose (the same
 files as `infra/compose/install-images.sh`) under the app's data directory, so Docker Desktop,
 OrbStack, or Docker Engine must be installed; the app links to them when it is not. Installed
 builds pin the image tag to their own version; unpackaged builds pull `edge`. Developers running
 `pnpm dev` should pick **Existing instance** with `http://127.0.0.1:5173` instead. Public servers
 must use HTTPS; HTTP is accepted only for loopback and private LAN addresses (not link-local). The
-app verifies Rakazo's health endpoint before saving, and later launches go straight to that
+app verifies Legiara's health endpoint before saving, and later launches go straight to that
 instance. The stack keeps running after the app quits; **Stop Local Stack** in the application
 menu turns it off.
 
-Use **Change Rakazo Server…** in the application menu to reconnect. Closing that window without
+Use **Change Legiara Server…** in the application menu to reconnect. Closing that window without
 saving returns to the previous instance. For development automation, set `RAKAZO_WEB_URL` to point
 the shell somewhere else without changing the saved instance, or `RAKAZO_FORCE_SETUP=1` to run
 setup again.
@@ -167,7 +176,9 @@ Mobile build and release instructions live in [docs/mobile-release.md](./docs/mo
 
 The web (and Electron-hosted) UI supports English, Deutsch, 한국어, Türkçe, हिन्दी,
 Português (Brasil), 简体中文, Español, and Русский under **Settings → Language**. The Expo
-app supports English, 简体中文, and Русский under **Account → Language**. The marketing
+app ships English, 简体中文, Русский, and Deutsch catalogs; **Account → Language** offers
+English and 简体中文, and the other catalogs follow the device language or
+`EXPO_PUBLIC_DEFAULT_UI_LOCALE`. The marketing
 homepage (`apps/www`) is available in en/de/ko/zh via footer language links (`/`, `/de/`,
 `/ko/`, `/zh/`); other marketing pages stay English. The Russian marketing homepage and
 native Electron setup/menu remain separate follow-up work.
@@ -208,6 +219,8 @@ Contributions are welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) befo
 request. For security vulnerabilities, follow [SECURITY.md](./SECURITY.md) instead of filing a public
 issue.
 
-Rakazo is licensed under the [Apache License 2.0](./LICENSE).
+Legiara is licensed under the [Apache License 2.0](./LICENSE).
 
-Questions and ideas are welcome in the [Rakazo Discord community](https://discord.gg/RWwKa2Sn7h).
+Questions and ideas are welcome in [GitHub issues](https://github.com/MacJediWizard/NeuroHolocron-HoloTeam/issues).
+
+Based on [Rakazo](https://github.com/elie222/rakazo) by Inbox Zero Inc. <!-- brand:keep -->

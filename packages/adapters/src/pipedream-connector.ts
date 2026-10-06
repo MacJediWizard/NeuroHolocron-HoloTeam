@@ -7,12 +7,23 @@ import type {
   ConnectorTool,
   ManagedConnectorProvider,
 } from "@rakazo/adapter-kit";
+import { getLogger } from "@rakazo/logging";
+import { catalogToolPrefix } from "./approval-effect.js";
 import { collectPages, filterCatalog } from "./composio-connector.js";
 import {
   combineSignals,
   redactConnectorPayload,
   sanitizeConnectorError,
 } from "./connector-safety.js";
+import {
+  CATALOG_EXECUTE,
+  catalogEntries,
+  DIRECT_TOOL_LIMIT,
+  executeLazyCatalogControl,
+  isLazyCatalogControlRoute,
+  lazyCatalogTools,
+  resolveCatalogCall,
+} from "./lazy-tool-catalog.js";
 import {
   callRemoteMcpTool,
   listRemoteMcpTools,
@@ -150,7 +161,7 @@ export class PipedreamConnector implements ManagedConnectorProvider {
     ];
   }
 
-  async discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
+  private async allTools(context: AdapterContext): Promise<ConnectorTool[]> {
     const apps =
       context.connectedConnections
         ?.filter((connection) => connection.connectorId === "pipedream")
@@ -158,24 +169,70 @@ export class PipedreamConnector implements ManagedConnectorProvider {
     if (apps.length === 0) return [];
     const token = await this.token();
     const groups = await Promise.all(
-      [...new Set(apps)].slice(0, 20).map(async (app) => {
-        const tools = await listRemoteMcpTools({
-          endpoint: MCP_ENDPOINT,
-          headers: this.mcpHeaders(context, app, token),
-          signal: context.signal,
-          fetch: this.dependencies.fetch,
-          resolveHostname: this.dependencies.resolveHostname,
-        });
-        return tools.map((tool) => ({
-          ...tool,
-          route: { connectorId: "pipedream", resourceId: app, toolName: tool.name },
-        }));
+      [...new Set(apps)].map(async (app) => {
+        try {
+          const tools = await listRemoteMcpTools({
+            endpoint: MCP_ENDPOINT,
+            headers: this.mcpHeaders(context, app, token),
+            signal: context.signal,
+            fetch: this.dependencies.fetch,
+            resolveHostname: this.dependencies.resolveHostname,
+          });
+          return tools.map((tool) => ({
+            ...tool,
+            route: {
+              connectorId: "pipedream",
+              resourceId: app,
+              toolName: tool.name,
+              catalogGroup: app,
+            },
+          }));
+        } catch (error) {
+          // A single unavailable app must not hide tools from other connections.
+          getLogger().error(
+            `pipedream discovery failed for app ${app}:`,
+            sanitizeConnectorError(error),
+          );
+          return [];
+        }
       }),
     );
     return groups.flat();
   }
 
+  async discoverTools(context: AdapterContext): Promise<ConnectorTool[]> {
+    const tools = await this.allTools(context);
+    if (tools.length <= DIRECT_TOOL_LIMIT) return tools;
+    return lazyCatalogTools(
+      catalogToolPrefix("pipedream"),
+      "pipedream",
+      "app",
+      catalogEntries(tools),
+    );
+  }
+
+  async resolveCall(
+    call: ConnectorCall,
+    context: AdapterContext,
+  ): Promise<{ call: ConnectorCall; tool: ConnectorTool } | undefined> {
+    // Wrappers have no resourceId; real tools always do.
+    if (call.route?.resourceId || call.route?.toolName !== CATALOG_EXECUTE) return undefined;
+    return resolveCatalogCall(call, catalogEntries(await this.allTools(context)));
+  }
+
   async *execute(call: ConnectorCall, context: AdapterContext): AsyncIterable<ConnectorEvent> {
+    if (isLazyCatalogControlRoute(call.route)) {
+      try {
+        yield* executeLazyCatalogControl(
+          call,
+          catalogEntries(await this.allTools(context)),
+          (resolved) => this.execute(resolved, context),
+        );
+      } catch (error) {
+        yield { type: "error", message: sanitizeConnectorError(error) };
+      }
+      return;
+    }
     const app = call.route?.resourceId;
     if (!app) {
       yield { type: "error", message: "Pipedream app route is missing" };
@@ -195,11 +252,17 @@ export class PipedreamConnector implements ManagedConnectorProvider {
         call.route?.toolName ?? call.tool,
         call.args,
       );
-      yield { type: "result", data: redactConnectorPayload(result, [token]) };
+      yield {
+        type: "result",
+        data: redactConnectorPayload(result, [token, this.config.clientSecret]),
+      };
     } catch (error) {
       yield {
         type: "error",
-        message: sanitizeConnectorError(error, token ? [token] : []),
+        message: sanitizeConnectorError(
+          error,
+          [token, this.config.clientSecret].filter((value): value is string => Boolean(value)),
+        ),
       };
     }
   }
@@ -452,7 +515,8 @@ export class PipedreamConnector implements ManagedConnectorProvider {
         signal: requestAbort,
       },
     );
-    const body = JSON.parse(await readPipedreamBody(response, requestAbort)) as {
+    const text = await readPipedreamBody(response, requestAbort);
+    const body = (response.ok && text ? JSON.parse(text) : {}) as {
       access_token?: string;
       expires_in?: number;
       error?: string;

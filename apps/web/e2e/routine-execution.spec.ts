@@ -159,5 +159,80 @@ test("routine test-run completes and survives reload", async ({ page }, testInfo
   await expect(page.getByRole("button", { name: /Daily verification/ })).toContainText(
     "Weekdays at 9:00 AM",
   );
+  await page.getByRole("button", { name: /Daily verification/ }).click();
+  const history = page.getByTestId("routine-run-history");
+  await expect(history.getByTestId("routine-run-row")).toHaveCount(1);
+  await expect(history.getByText("Done", { exact: true })).toBeVisible();
+  await expect(history.getByText("No runs yet")).toHaveCount(0);
+  await expect(history.getByRole("link", { name: "View chat" })).toBeVisible();
+  await expect(history.getByRole("button", { name: "Run history" })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await history.getByRole("button", { name: "Run history" }).click();
+  await expect(history.getByRole("button", { name: "Run history" })).toHaveAttribute(
+    "aria-expanded",
+    "true",
+  );
+  await expect(history.getByTestId("routine-run-row")).toHaveCount(1);
+  await captureScreenshot(page, testInfo, "36-routine-run-history");
+  await history.getByRole("link", { name: "View chat" }).click();
+  await expect(page.getByText(/routine-run-now-ok/i).first()).toBeVisible();
   await captureScreenshot(page, testInfo, "35-routine-run-persisted");
+});
+
+test("routine history expands from the latest run and pages older executions", async ({
+  page,
+}, testInfo) => {
+  const stamp = Date.now();
+  await signup(page, `routine-history-${stamp}@rakazo.test`, "password12", "Routine History");
+  await completeOnboarding(page);
+  const botId = activeBotId(page);
+  await rpc<Routine>(page, "routines/create", {
+    botId,
+    name: "Recent checks",
+    prompt: "Check status",
+    crons: ["0 9 * * *"],
+    timezone: "UTC",
+    active: false,
+    notify: true,
+  });
+  const row = (id: string, status: string, hour: number) => ({
+    id,
+    botId,
+    groupId: null,
+    status,
+    messageId: null,
+    createdAt: `2026-01-02T${hour}:00:00Z`,
+    startedAt: `2026-01-02T${hour}:00:00Z`,
+    completedAt: `2026-01-02T${hour}:01:22Z`,
+  });
+  await page.route("**/rpc/routines/history", async (route) => {
+    const input = route.request().postDataJSON() as { json: { before?: unknown } };
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        json: input.json.before
+          ? { runs: [row("oldest", "cancelled", 10)], nextCursor: null }
+          : {
+              runs: [row("latest", "completed", 12), row("older", "failed", 11)],
+              nextCursor: { id: "older", createdAt: "2026-01-02T11:00:00Z" },
+            },
+      }),
+    });
+  });
+  await page.getByTitle("Agent computer").click();
+  await page.getByRole("button", { name: /Recent checks/ }).click();
+  const history = page.getByTestId("routine-run-history");
+  await expect(history.getByTestId("routine-run-row")).toHaveCount(1);
+  await history.getByRole("button", { name: "Run history" }).click();
+  await expect(history.getByTestId("routine-run-row")).toHaveCount(2);
+  await history.getByRole("button", { name: "Load older runs" }).click();
+  await expect(history.getByTestId("routine-run-row")).toHaveCount(3);
+  await expect(history.getByText("Failed", { exact: true })).toBeVisible();
+  await expect(history.getByText("Cancelled", { exact: true })).toBeVisible();
+  await expect(history.getByRole("button", { name: "Load older runs" })).toHaveCount(0);
+  await captureScreenshot(page, testInfo, "routine-history-expanded");
+  await history.getByRole("button", { name: "Run history" }).click();
+  await expect(history.getByTestId("routine-run-row")).toHaveCount(1);
 });

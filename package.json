@@ -31,12 +31,16 @@
     "perf:desktop": "tsx packages/testkit/src/cli/desktop-performance.ts",
     "perf:compare": "tsx packages/testkit/src/cli/compare-performance.ts",
     "compose:up": "docker compose --env-file .env -f infra/compose/docker-compose.yml up --build",
-    "compose:down": "docker compose --env-file .env -f infra/compose/docker-compose.yml down -v"
+    "compose:down": "docker compose --env-file .env -f infra/compose/docker-compose.yml down -v",
+    "brand:apply": "tsx scripts/apply-brand.ts",
+    "brand:check": "tsx scripts/apply-brand.ts --check",
+    "brand:icons": "tsx scripts/generate-brand-icons.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
     "@types/node": "24.13.3",
     "cross-env": "10.1.0",
+    "sharp": "0.35.4",
     "tsx": "4.23.13",
     "turbo": "2.10.12",
     "typescript": "7.0.2",
@@ -45,7 +49,9 @@
   "pnpm": {
     "overrides": {
       "react": "19.2.3",
-      "react-dom": "19.2.3"
+      "react-dom": "19.2.3",
+      "proxy-addr@<2.0.8": "2.0.8",
+      "e2b>undici8": "npm:undici@8.10.2"
     },
     "patchedDependencies": {
       "app-builder-lib@26.15.3": "patches/app-builder-lib@26.15.3.patch"

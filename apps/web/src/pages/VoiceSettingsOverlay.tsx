@@ -13,7 +13,7 @@ import {
   NativeSelectOption,
 } from "@rakazo/ui-web";
 import { XIcon } from "lucide-react";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { rpc } from "../lib/rpc";
 
 export function VoiceSettingsOverlay({
@@ -29,6 +29,7 @@ export function VoiceSettingsOverlay({
   const { t } = useLingui();
   const apiKeyId = useId();
   const voiceSelectId = useId();
+  const speechModelId = useId();
   const [catalog, setCatalog] = useState<VoiceCatalogEntry[]>([]);
   const [credentials, setCredentials] = useState<VoiceCredential[]>([]);
   const [status, setStatus] = useState<VoiceStatus | null>(null);
@@ -36,8 +37,10 @@ export function VoiceSettingsOverlay({
   const [provider, setProvider] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [voiceId, setVoiceId] = useState("");
+  const [speechModel, setSpeechModel] = useState("");
+  const speechModelSave = useRef<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState<"connect" | "voice" | "test" | null>(null);
+  const [pending, setPending] = useState<"connect" | "disconnect" | "voice" | "test" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -47,7 +50,7 @@ export function VoiceSettingsOverlay({
     return () => onBusyChange?.(false);
   }, [onBusyChange]);
 
-  function markPending(next: "connect" | "voice" | "test" | null) {
+  function markPending(next: "connect" | "disconnect" | "voice" | "test" | null) {
     setPending(next);
     onBusyChange?.(next !== null);
   }
@@ -66,6 +69,7 @@ export function VoiceSettingsOverlay({
     const cred = nextCredentials.find((entry) => entry.provider === selected);
     const activeVoice = cred?.voiceId ?? "";
     setVoiceId(activeVoice);
+    setSpeechModel(cred?.speechModel ?? "");
     if (cred) {
       const listed = await rpc.voice.voices({ provider: selected });
       setVoices(listed);
@@ -100,12 +104,29 @@ export function VoiceSettingsOverlay({
         provider: selected.id,
         apiKey: apiKey.trim(),
         voiceId: voiceId || undefined,
+        ...(selected.id === "fish-audio" ? { speechModel: speechModel.trim() } : {}),
       });
       setApiKey("");
       await refresh(selected.id);
       setNotice(t`Connected ${selected.name}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : t`Could not connect this voice provider`);
+    } finally {
+      markPending(null);
+    }
+  }
+
+  async function disconnectProvider() {
+    if (!credential) return;
+    setError(null);
+    setNotice(null);
+    markPending("disconnect");
+    try {
+      await rpc.voice.disconnect({ provider: credential.provider });
+      setApiKey("");
+      await refresh(credential.provider);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t`Could not disconnect this voice provider`);
     } finally {
       markPending(null);
     }
@@ -122,6 +143,26 @@ export function VoiceSettingsOverlay({
     } catch (err) {
       setError(err instanceof Error ? err.message : t`Could not save that voice`);
     } finally {
+      markPending(null);
+    }
+  }
+
+  async function saveSpeechModel() {
+    if (!credential || selected?.id !== "fish-audio") return;
+    const next = speechModel.trim();
+    if (next === credential.speechModel) return;
+    if (speechModelSave.current === next) return;
+    speechModelSave.current = next;
+    setError(null);
+    markPending("voice");
+    try {
+      const saved = await rpc.voice.setSpeechModel({ provider: selected.id, speechModel: next });
+      setSpeechModel(saved.speechModel);
+      setCredentials((current) => current.map((entry) => (entry.id === saved.id ? saved : entry)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t`Could not save that speech model`);
+    } finally {
+      speechModelSave.current = null;
       markPending(null);
     }
   }
@@ -176,14 +217,22 @@ export function VoiceSettingsOverlay({
                 <button
                   key={entry.id}
                   type="button"
+                  disabled={busy}
                   onClick={() => {
                     setProvider(entry.id);
                     setApiKey("");
                     setError(null);
                     setNotice(null);
-                    void refresh(entry.id);
+                    markPending("voice");
+                    void refresh(entry.id)
+                      .catch((err: unknown) =>
+                        setError(
+                          err instanceof Error ? err.message : t`Could not load voice settings`,
+                        ),
+                      )
+                      .finally(() => markPending(null));
                   }}
-                  className={`flex w-full items-center gap-3 border-b border-border px-3.5 py-3 text-start transition-colors last:border-0 ${
+                  className={`flex w-full items-center gap-3 border-b border-border px-3.5 py-3 text-start transition-colors last:border-0 disabled:pointer-events-none disabled:opacity-50 ${
                     entry.id === provider ? "bg-muted" : "hover:bg-accent"
                   }`}
                 >
@@ -245,6 +294,22 @@ export function VoiceSettingsOverlay({
                   <Trans>Connect</Trans>
                 )}
               </Button>
+              {credential ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  disabled={busy}
+                  onClick={() => void disconnectProvider()}
+                >
+                  {pending === "disconnect" ? (
+                    <Trans>Disconnecting…</Trans>
+                  ) : (
+                    <Trans>Disconnect</Trans>
+                  )}
+                </Button>
+              ) : null}
 
               {credential ? (
                 <>
@@ -256,6 +321,7 @@ export function VoiceSettingsOverlay({
                       id={voiceSelectId}
                       className="w-full"
                       value={voiceId}
+                      disabled={busy}
                       onChange={(event) => void chooseVoice(event.target.value)}
                     >
                       {voiceOptions.map((voice) => (
@@ -266,6 +332,29 @@ export function VoiceSettingsOverlay({
                       ))}
                     </NativeSelect>
                   </Field>
+                  {selected.id === "fish-audio" ? (
+                    <Field className="mt-6">
+                      <FieldLabel htmlFor={speechModelId}>
+                        <Trans>Speech model</Trans>
+                      </FieldLabel>
+                      <Input
+                        id={speechModelId}
+                        value={speechModel}
+                        maxLength={64}
+                        autoComplete="off"
+                        spellCheck={false}
+                        disabled={busy}
+                        placeholder={t`Optional`}
+                        onChange={(event) => setSpeechModel(event.target.value)}
+                        onBlur={() => void saveSpeechModel()}
+                        onKeyDown={(event) => {
+                          if (event.key !== "Enter") return;
+                          event.preventDefault();
+                          event.currentTarget.blur();
+                        }}
+                      />
+                    </Field>
+                  ) : null}
                   <Button
                     type="button"
                     variant="secondary"

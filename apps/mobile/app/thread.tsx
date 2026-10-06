@@ -1,4 +1,4 @@
-import { ChatMarkdown } from "@rakazo/chat-ui/native";
+import { ChatMarkdown, LinkifiedText } from "@rakazo/chat-ui/native";
 import type {
   AgentSkillCatalogEntry,
   Connection,
@@ -11,17 +11,21 @@ import {
   MESSAGE_REACTIONS,
   type MessageReaction,
 } from "@rakazo/contracts";
+import type { ThreadItem } from "@rakazo/core";
 import {
   abortableDelay,
   attachmentsForThread,
   buildComposerMentionOptions,
   type ComposerMention,
   cloudAgentHttpsUrl,
+  formatMessageTime,
+  groupVoiceChats,
   isApprovalAskBlock,
   isRunTerminalEvent,
   isSecretAskBlock,
   latestAnswerableAskMessageId,
   mentionChipKey,
+  plainTextFromMarkdown,
   projectMessageReactions,
   resolveComposerSendPlan,
   SLASH_ACTIONS,
@@ -30,11 +34,27 @@ import {
   serializeComposerPrompt,
   truncateSlashDescription,
   userVisibleMessages,
+  withLiveStreamingProgress,
 } from "@rakazo/core";
 import * as Clipboard from "expo-clipboard";
-import { useFocusEffect, useLocalSearchParams, useNavigation, useRouter } from "expo-router";
+import {
+  useFocusEffect,
+  useIsFocused,
+  useLocalSearchParams,
+  useNavigation,
+  useRouter,
+} from "expo-router";
 import { useHeaderHeight } from "expo-router/react-navigation";
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   ActionSheetIOS,
   ActivityIndicator,
@@ -49,6 +69,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  StyleSheet,
   Text,
   TextInput,
   type TextProps,
@@ -60,11 +81,16 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppConnectCard } from "../components/AppConnectCard";
 import { AskActions } from "../components/AskActions";
 import { BotAvatar } from "../components/bot-avatar";
+import type { ImageArtifactPreviewTarget } from "../components/image-artifact-viewer";
+import { InlineImageAttachment } from "../components/inline-image-attachment";
+import { McpApprovalCard } from "../components/McpApprovalCard";
 import {
   MarkdownArtifactPreview,
   type MarkdownArtifactPreviewTarget,
 } from "../components/markdown-artifact-preview";
 import { NativeSymbol } from "../components/native-symbol";
+import { VoiceChatCard } from "../components/VoiceChatCard";
+import { WorkingIndicator } from "../components/WorkingIndicator";
 import {
   applyMobileThreadEvent,
   blockText,
@@ -78,18 +104,23 @@ import {
   type MobileSnapshot,
   mergeMobileSnapshot,
   messagingProviderLabel,
+  mobileThreadRefreshResult,
   prependMobileMessagePage,
   rpc,
   selectedSpaceId,
   selectSpace,
-  shouldApplyMobileThreadRefresh,
   subscribeThread,
 } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
 import { type MobileArtifactTarget, openMobileArtifact } from "../lib/artifact-open";
+import { nextAutoSpeakAction } from "../lib/auto-speak";
 import { confirmDeleteBot } from "../lib/bot-lifecycle";
+import { setCallProviderTranscribe, startCall, useCallSession } from "../lib/call-session";
+import { loadDeviceVoiceEnabled } from "../lib/device-voice";
+import { available as dictationAvailable } from "../lib/dictation";
 import { cancelFocusPrompt, focusPromptThreadActive } from "../lib/focus-prompt";
 import { dateLocaleForUi, t, useI18n } from "../lib/i18n";
+import { isInlineImageMimeType } from "../lib/inline-image";
 import { saveLastBotId } from "../lib/last-bot";
 import {
   dismissThreadNotifications,
@@ -101,8 +132,15 @@ import {
   hasVisibleMessagePresentation,
   isCenteredAgentEvent,
   messagePresentationSegments,
+  quotableMessageSegments,
+  truncateQuoteExcerpt,
 } from "../lib/message-presentation";
 import { native, useMobileTokens, useResolvedAppearance } from "../lib/native";
+import {
+  threadRouteSpaceOnFocus,
+  threadSpaceRequest,
+  threadSpaceSwitchResult,
+} from "../lib/notification-open";
 import {
   type PickedAttachment,
   pickDocuments,
@@ -111,11 +149,16 @@ import {
 } from "../lib/pick-attachments";
 import { threadRefreshDelayMs } from "../lib/refresh";
 import {
+  getCachedResponseStreamingEnabled,
+  subscribeResponseStreaming,
+} from "../lib/response-streaming";
+import {
   type ThreadScrollAction,
   ThreadScrollBehavior,
   type ThreadScrollState,
 } from "../lib/thread-scroll";
 import { speakText } from "../lib/voice";
+import { probeProviderTranscribe, resolveVoiceCallPlan } from "../lib/voice-call-entry";
 
 type PendingAttachment = PickedAttachment & { threadKey: string };
 type AskAction = NonNullable<Extract<MessageBlock, { kind: "ask" }>["actions"]>[number];
@@ -166,46 +209,58 @@ function isWorkingStatus(status: string | undefined): boolean {
   );
 }
 
-type NotificationRouteState = "loading" | "ready" | "failed";
-
 export default function ThreadRoute() {
   const tokens = useMobileTokens();
   const { t } = useI18n();
   const router = useRouter();
+  const focused = useIsFocused();
   const { spaceId } = useLocalSearchParams<{ spaceId?: string | string[] }>();
-  const requestedSpaceId = typeof spaceId === "string" && spaceId ? spaceId : null;
-  const invalidSpaceId = spaceId !== undefined && requestedSpaceId === null;
-  const routeMatchesSelectedSpace =
-    requestedSpaceId === null || selectedSpaceId() === requestedSpaceId;
-  const [routeState, setRouteState] = useState<NotificationRouteState>(() => {
-    if (invalidSpaceId) return "failed";
-    return routeMatchesSelectedSpace ? "ready" : "loading";
+  const [activeSpaceId, setActiveSpaceId] = useState<string | null>(() => selectedSpaceId());
+  const [switchFailed, setSwitchFailed] = useState(false);
+  const [appliedFocus, setAppliedFocus] = useState(focused);
+  // Before paint, so a stacked route cannot render its thread against a space
+  // a newer notification selected.
+  const focusSync = threadRouteSpaceOnFocus({
+    focused,
+    appliedFocus,
+    activeSpaceId,
+    liveSpaceId: selectedSpaceId(),
+    switchFailed,
   });
+  if (focusSync.appliedFocus !== appliedFocus) setAppliedFocus(focusSync.appliedFocus);
+  if (focusSync.activeSpaceId !== activeSpaceId) setActiveSpaceId(focusSync.activeSpaceId);
+  if (focusSync.switchFailed !== switchFailed) setSwitchFailed(focusSync.switchFailed);
+  const request = threadSpaceRequest(spaceId, focusSync.activeSpaceId);
 
   useEffect(() => {
+    if (!focused) return;
+    const next = threadSpaceRequest(spaceId, activeSpaceId);
+    if (next.action === "show") {
+      setSwitchFailed(false);
+      return;
+    }
+    if (next.action === "unavailable") {
+      setSwitchFailed(true);
+      return;
+    }
     let cancelled = false;
-    if (invalidSpaceId) {
-      setRouteState("failed");
-      return () => {
-        cancelled = true;
-      };
-    }
-    if (!requestedSpaceId || selectedSpaceId() === requestedSpaceId) {
-      setRouteState("ready");
-      return () => {
-        cancelled = true;
-      };
-    }
-    setRouteState("loading");
-    void selectSpace(requestedSpaceId).then((selected) => {
-      if (!cancelled) setRouteState(selected ? "ready" : "failed");
+    setSwitchFailed(false);
+    const requestedSpaceId = next.spaceId;
+    void selectSpace(requestedSpaceId).then((switched) => {
+      if (cancelled) return;
+      // selectSpace commits the id before it resolves; a failed write rolls it back.
+      if (threadSpaceSwitchResult(requestedSpaceId, switched, selectedSpaceId()) === "ready") {
+        setActiveSpaceId(requestedSpaceId);
+        return;
+      }
+      setSwitchFailed(true);
     });
     return () => {
       cancelled = true;
     };
-  }, [invalidSpaceId, requestedSpaceId]);
+  }, [activeSpaceId, focused, spaceId]);
 
-  if (routeState === "ready" && !invalidSpaceId && routeMatchesSelectedSpace) return <Thread />;
+  if (request.action === "show" && !focusSync.switchFailed) return <Thread />;
   return (
     <View
       style={{
@@ -215,12 +270,17 @@ export default function ThreadRoute() {
         backgroundColor: tokens.background,
       }}
     >
-      {routeState === "loading" ? (
+      {request.action === "switch" && !focusSync.switchFailed ? (
         <ActivityIndicator color={tokens.foreground} />
       ) : (
-        <Pressable accessibilityRole="button" onPress={() => router.replace("/")}>
-          <Text style={{ color: tokens.foreground, fontSize: 16 }}>{t("Return to inbox")}</Text>
-        </Pressable>
+        <View style={{ alignItems: "center", gap: 12 }}>
+          <Text style={{ color: tokens.foreground, fontSize: 16 }}>
+            {t("Could not switch spaces")}
+          </Text>
+          <Pressable accessibilityRole="button" onPress={() => router.replace("/")}>
+            <Text style={{ color: tokens.foreground, fontSize: 16 }}>{t("Return to inbox")}</Text>
+          </Pressable>
+        </View>
       )}
     </View>
   );
@@ -236,14 +296,19 @@ function Thread() {
   const headerHeight = useHeaderHeight();
   const insets = useSafeAreaInsets();
   const keyboardVisible = useKeyboardState((state) => state.isVisible);
-  const { botId, groupId, name, messageId } = useLocalSearchParams<{
+  const { botId, groupId, name, messageId, threadId } = useLocalSearchParams<{
     botId?: string;
     groupId?: string;
     name?: string;
     messageId?: string;
+    threadId?: string;
   }>();
+  const requestedThreadId = typeof threadId === "string" && threadId ? threadId : undefined;
   const inGroup = Boolean(groupId);
-  const scroll = useRef<FlatList<MobileMessage>>(null);
+  const call = useCallSession();
+  const onCall = Boolean(botId) && call?.botId === botId;
+  const voiceCallStarting = useRef(false);
+  const scroll = useRef<FlatList<ThreadItem<MobileMessage>>>(null);
   const pinnedScroll = useRef<ScrollView>(null);
   const scrollBehavior = useRef(new ThreadScrollBehavior());
   const userDragging = useRef(false);
@@ -251,6 +316,9 @@ function Thread() {
   const expandedHistoryThread = useRef<string | null>(null);
   const historyEpoch = useRef(0);
   const jumpGeneration = useRef(0);
+  const refreshGeneration = useRef(0);
+  const liveSubscribed = useRef(false);
+  const liveSubscriptionGeneration = useRef(0);
   const pinnedAroundRef = useRef<{
     botId?: string;
     groupId?: string;
@@ -269,6 +337,8 @@ function Thread() {
   const mentionBotsRefreshGeneration = useRef(0);
   const mentionBotsAppliedGeneration = useRef(0);
   const readVisibleTarget = useRef<string | null>(null);
+  const autoSpoken = useRef<string | null>(null);
+  const autoSpokenBotId = useRef<string | null>(null);
   const threadKey = groupId ?? botId;
   const [threadScrollState, setThreadScrollState] = useState<ThreadScrollState>(() =>
     scrollBehavior.current.state(),
@@ -288,6 +358,23 @@ function Thread() {
       ? { botId }
       : undefined;
   const [snap, setSnap] = useState<MobileSnapshot | null>(null);
+  const snapRef = useRef<MobileSnapshot | null>(null);
+  const streamResponses = useSyncExternalStore(
+    subscribeResponseStreaming,
+    getCachedResponseStreamingEnabled,
+    () => false,
+  );
+  const streamResponsesRef = useRef(streamResponses);
+  streamResponsesRef.current = streamResponses;
+
+  function commitSnap(next: MobileSnapshot | null) {
+    snapRef.current = next;
+    setSnap(withLiveStreamingProgress(next, streamResponsesRef.current));
+  }
+
+  useEffect(() => {
+    setSnap(withLiveStreamingProgress(snapRef.current, streamResponses));
+  }, [streamResponses]);
   const activeThreadId = useRef<string | undefined>(undefined);
   const [draft, setDraft] = useState("");
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -308,6 +395,8 @@ function Thread() {
   const [selectedSkill, setSelectedSkill] = useState<AgentSkillCatalogEntry | null>(null);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [replyTarget, setReplyTarget] = useState<MobileMessage | null>(null);
+  const [replyQuote, setReplyQuote] = useState<string | null>(null);
+  const [quoteTarget, setQuoteTarget] = useState<MobileMessage | null>(null);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -386,7 +475,7 @@ function Thread() {
       : [];
   const currentBot = botId ? mentionBots.find((bot) => bot.id === botId) : undefined;
   const displayName = currentBot?.name ?? name;
-  const notificationThreadId = snap?.threadId ?? currentBot?.threadId;
+  const notificationThreadId = snap?.threadId ?? requestedThreadId ?? currentBot?.threadId;
   activeThreadId.current = notificationThreadId;
   const currentBotStatus = snap ? snap.run?.status : currentBot?.status;
   const hasLiveProgress = visibleMessages.some((message) => message.id.startsWith("progress:"));
@@ -403,6 +492,35 @@ function Thread() {
     });
   }, [inGroup, snap?.activeRuns, snap?.members, snap?.run]);
   const working = inGroup ? workingGroupBots.length > 0 : isWorkingStatus(currentBotStatus);
+
+  const speakFinishedReply = useCallback(() => {
+    if (!botId || inGroup || !currentBot) return;
+    const decision = nextAutoSpeakAction({
+      botId: currentBot.id,
+      autoSpeak: currentBot.autoSpeak,
+      focused: AppState.currentState === "active" && navigation.isFocused(),
+      snapshotReady: snap?.botId === currentBot.id,
+      lastSpokenBotId: autoSpokenBotId.current,
+      lastSpokenMessageId: autoSpoken.current,
+      runStatus: snap?.run?.status,
+      messages: snap?.messages ?? [],
+    });
+    if (decision.action === "seed") {
+      autoSpokenBotId.current = currentBot.id;
+      autoSpoken.current = decision.messageId;
+      return;
+    }
+    if (decision.action !== "speak") return;
+    autoSpokenBotId.current = currentBot.id;
+    autoSpoken.current = decision.messageId;
+    void speakText(decision.text, { botId: currentBot.id }).catch(() => undefined);
+  }, [botId, inGroup, currentBot, navigation, snap?.botId, snap?.messages, snap?.run?.status]);
+
+  useEffect(() => {
+    speakFinishedReply();
+    const appState = AppState.addEventListener("change", speakFinishedReply);
+    return () => appState.remove();
+  }, [speakFinishedReply]);
 
   useEffect(() => {
     void rpc<AgentSkillCatalogEntry[]>("agentSkills/list")
@@ -608,8 +726,10 @@ function Thread() {
         expandedHistoryThread.current = null;
         pinnedAroundRef.current = null;
         historyEpoch.current += 1;
-        setSnap((current) =>
-          current ? { ...current, messages: [], olderCursor: null, run: null } : current,
+        commitSnap(
+          snapRef.current
+            ? { ...snapRef.current, messages: [], olderCursor: null, run: null }
+            : snapRef.current,
         );
       })
       .catch((err: unknown) =>
@@ -693,25 +813,33 @@ function Thread() {
     const targetBotId = botId;
     const targetGroupId = groupId;
     const epoch = historyEpoch.current;
+    const generation = ++refreshGeneration.current;
     const next = await rpc<MobileSnapshot>(
       "threads/get",
       targetGroupId ? { groupId: targetGroupId } : { botId: targetBotId! },
     );
-    if (
-      !shouldApplyMobileThreadRefresh({
-        requestEpoch: epoch,
-        currentEpoch: historyEpoch.current,
-        targetBotId,
-        targetGroupId,
-        activeBotId: activeBotId.current,
-        activeGroupId: activeGroupId.current,
-      })
-    )
-      return next;
-    setSnap((prev) =>
-      mergeMobileSnapshot(prev, next, expandedHistoryThread.current === next.threadId),
-    );
-    return next;
+    // Only the newest started refresh may commit. Threads also receive live
+    // events; an older snapshot must not overwrite those while a newer refresh
+    // is already in flight. The subscription starts from the snapshot returned
+    // here, so a discarded fetch must not supply its cursor.
+    const result = mobileThreadRefreshResult({
+      fetched: next,
+      onScreen: snapRef.current,
+      requestGeneration: generation,
+      currentGeneration: refreshGeneration.current,
+      requestEpoch: epoch,
+      currentEpoch: historyEpoch.current,
+      targetBotId,
+      targetGroupId,
+      activeBotId: activeBotId.current,
+      activeGroupId: activeGroupId.current,
+    });
+    if (result.commit) {
+      commitSnap(
+        mergeMobileSnapshot(snapRef.current, next, expandedHistoryThread.current === next.threadId),
+      );
+    }
+    return result.snapshot ?? undefined;
   }
 
   async function applyMessageJump(target: { botId?: string; groupId?: string; messageId: string }) {
@@ -743,7 +871,7 @@ function Thread() {
         }
       : null;
     jumpScrollTarget.current = targetInPage ? target.messageId : null;
-    setSnap({
+    commitSnap({
       ...snap,
       messages: targetInPage ? [...page.messages] : snap.messages,
       olderCursor: targetInPage ? page.olderCursor : snap.olderCursor,
@@ -766,7 +894,7 @@ function Thread() {
         return;
       }
       expandedHistoryThread.current = page.threadId;
-      setSnap((prev) => prependMobileMessagePage(prev, page));
+      commitSnap(prependMobileMessagePage(snapRef.current, page));
     } catch (err) {
       loadingOlderContent.current = false;
       setError(err instanceof Error ? err.message : t("Could not load earlier messages"));
@@ -830,10 +958,11 @@ function Thread() {
       }
       void refreshMentionBots();
       markReadIfVisible();
+      speakFinishedReply();
       return () => {
         void setOpenNotificationThread(null).catch(() => undefined);
       };
-    }, [botId, markReadIfVisible, notificationThreadId, refreshMentionBots]),
+    }, [botId, markReadIfVisible, notificationThreadId, refreshMentionBots, speakFinishedReply]),
   );
 
   useEffect(() => {
@@ -861,6 +990,8 @@ function Thread() {
     expandedHistoryThread.current = null;
     historyEpoch.current += 1;
     const abort = new AbortController();
+    const subscriptionGeneration = ++liveSubscriptionGeneration.current;
+    liveSubscribed.current = false;
     void (async () => {
       // Pending search jumps load the around-page separately; avoid replacing it with latest.
       const next = messageId
@@ -879,6 +1010,7 @@ function Thread() {
       let retryMs = 250;
       while (!abort.signal.aborted) {
         try {
+          liveSubscribed.current = true;
           await subscribeThread(
             groupId ? { groupId } : { botId: botId! },
             cursor,
@@ -904,7 +1036,7 @@ function Thread() {
                   pinnedAroundRef.current = null;
                   historyEpoch.current += 1;
                 }
-                setSnap((prev) => applyMobileThreadEvent(prev, event));
+                commitSnap(applyMobileThreadEvent(snapRef.current, event));
               }
               if (event.type === "bot.updated") {
                 void refreshMentionBots();
@@ -924,6 +1056,10 @@ function Thread() {
           );
         } catch {
           // A full refresh reconciles visible state; the event cursor still resumes without gaps.
+        } finally {
+          if (liveSubscriptionGeneration.current === subscriptionGeneration) {
+            liveSubscribed.current = false;
+          }
         }
         if (abort.signal.aborted) break;
         if (!jumpScrollTarget.current && !expandedHistoryThread.current) {
@@ -942,6 +1078,8 @@ function Thread() {
     if (!botId && !groupId) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    const refreshDelay = () =>
+      threadRefreshDelayMs(snap?.run?.status, { liveSubscribed: liveSubscribed.current });
     const tick = async () => {
       if (
         AppState.currentState === "active" &&
@@ -952,10 +1090,10 @@ function Thread() {
         await refresh().catch(() => undefined);
       }
       if (!cancelled) {
-        timer = setTimeout(() => void tick(), threadRefreshDelayMs(snap?.run?.status));
+        timer = setTimeout(() => void tick(), refreshDelay());
       }
     };
-    timer = setTimeout(() => void tick(), threadRefreshDelayMs(snap?.run?.status));
+    timer = setTimeout(() => void tick(), refreshDelay());
     return () => {
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
@@ -979,6 +1117,8 @@ function Thread() {
     setSelectedSkill(null);
     setSelectedMentions([]);
     setReplyTarget(null);
+    setReplyQuote(null);
+    setQuoteTarget(null);
     setAttachmentNotice(null);
     setError(null);
   }, [threadKey]);
@@ -1089,6 +1229,7 @@ function Thread() {
         setSelectedSkill(null);
         setSelectedMentions([]);
         setReplyTarget(null);
+        setReplyQuote(null);
         setAttachmentNotice(null);
       };
       if (!plan.shouldSend) {
@@ -1130,6 +1271,7 @@ function Thread() {
               mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
               artifactIds: artifactIds.length ? artifactIds : undefined,
               replyToMessageId: reroutedToGroup ? undefined : replyTarget?.id,
+              replyQuote: reroutedToGroup ? undefined : (replyQuote ?? undefined),
             }
           : {
               botId: botTarget!,
@@ -1138,6 +1280,7 @@ function Thread() {
               mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
               artifactIds: artifactIds.length ? artifactIds : undefined,
               replyToMessageId: replyTarget?.id,
+              replyQuote: replyQuote ?? undefined,
             },
       );
       dropDelayedSetup();
@@ -1156,7 +1299,7 @@ function Thread() {
         return;
       }
       if (isCurrentTarget(botTarget, groupTarget)) {
-        await refresh();
+        void refresh().catch(() => undefined);
       }
     } catch (err) {
       if (reroutedToGroup && groupTarget) {
@@ -1200,7 +1343,7 @@ function Thread() {
   }
 
   const answerMessage = useCallback(
-    async (message: MobileMessage, answer: string) => {
+    async (message: MobileMessage, answer: string, username?: string) => {
       const targetBotId = botId;
       const targetGroupId = groupId;
       if ((!targetBotId && !targetGroupId) || !message.runId) return;
@@ -1209,6 +1352,7 @@ function Thread() {
         runId: message.runId,
         messageId: message.id,
         answer,
+        ...(username ? { username } : {}),
       });
       if (isCurrentTarget(targetBotId, targetGroupId)) await refresh();
     },
@@ -1229,6 +1373,53 @@ function Thread() {
       ),
     [botId, snap?.members],
   );
+
+  async function startVoiceCall() {
+    const targetBotId = botId;
+    if (!targetBotId || voiceCallStarting.current) return;
+    voiceCallStarting.current = true;
+    const loadVoiceStatus = () => rpc<{ ready: boolean; transcribe: boolean }>("voice/status");
+    try {
+      const plan = await resolveVoiceCallPlan({
+        loadDeviceVoiceEnabled,
+        dictationAvailable,
+        loadVoiceStatus,
+      });
+      if (activeBotId.current !== targetBotId) return;
+      if (plan.kind === "settings") {
+        router.push("/voice");
+        return;
+      }
+      if (plan.kind === "dictation") {
+        Alert.alert(
+          t("Calls need transcription"),
+          t("Allow speech recognition in Settings, or connect ElevenLabs, OpenAI, or Fish Audio."),
+          [
+            { text: t("Not now"), style: "cancel" },
+            { text: t("Open Voice"), onPress: () => router.push("/voice") },
+          ],
+        );
+        return;
+      }
+      const startedCallId = startCall({
+        botId: targetBotId,
+        botName: displayName ?? t("Bot"),
+        botColor: mentionBots.find((bot) => bot.id === targetBotId)?.color,
+        transcribe: plan.transcribe,
+      });
+      if (plan.kind === "device") {
+        void probeProviderTranscribe(loadVoiceStatus)
+          .then((enabled) => {
+            if (enabled) setCallProviderTranscribe(true, startedCallId);
+          })
+          .catch(() => undefined);
+      }
+    } catch {
+      if (activeBotId.current === targetBotId) router.push("/voice");
+    } finally {
+      voiceCallStarting.current = false;
+    }
+  }
 
   function showAttachMenu() {
     Alert.alert(t("Attach"), undefined, [
@@ -1272,7 +1463,8 @@ function Thread() {
 
   const answerableAskMessageId = latestAnswerableAskMessageId(snap);
   const runError = snap?.run?.status === "failed" ? (snap.run.error ?? null) : null;
-  const liveMessages = useMemo(() => [...visibleMessages].reverse(), [visibleMessages]);
+  // Group calls in reading order, then reverse for the inverted list.
+  const liveItems = useMemo(() => groupVoiceChats(visibleMessages).reverse(), [visibleMessages]);
   const messagesById = useMemo(
     () => new Map((snap?.messages ?? []).map((message) => [message.id, message])),
     [snap?.messages],
@@ -1319,7 +1511,18 @@ function Thread() {
 
   function messageActionProps(message: MobileMessage): MessageActionProps {
     const actions = [
-      { name: "reply", text: t("Reply"), onPress: () => setReplyTarget(message) },
+      {
+        name: "reply",
+        text: t("Reply"),
+        onPress: () => {
+          setReplyTarget(message);
+          setReplyQuote(null);
+        },
+      },
+      ...(!message.id.startsWith("progress:") &&
+      quotableMessageSegments(message.role, message.blocks).length > 0
+        ? [{ name: "quote", text: t("Quote"), onPress: () => setQuoteTarget(message) }]
+        : []),
       ...(canReactToThreadMessage(message)
         ? [
             {
@@ -1339,7 +1542,8 @@ function Thread() {
             },
           ]
         : []),
-      ...(message.role === "bot" && blockText(message)
+      // The call already reads replies aloud; a second voice would talk over it.
+      ...(message.role === "bot" && !onCall && blockText(message)
         ? [{ name: "speak", text: t("Speak message"), onPress: () => void speak(message) }]
         : []),
       {
@@ -1356,10 +1560,7 @@ function Thread() {
         presentMessageActionSheet({
           actions,
           title: message.createdAt
-            ? new Date(message.createdAt).toLocaleTimeString(dateLocaleForUi(), {
-                hour: "numeric",
-                minute: "2-digit",
-              })
+            ? formatMessageTime(message.createdAt, dateLocaleForUi())
             : undefined,
           cancel: t("Cancel"),
           more: t("More"),
@@ -1449,6 +1650,12 @@ function Thread() {
               onAnswer={answerMessage}
               onOpenBot={openBot}
               onPreviewMarkdown={setMarkdownPreview}
+              onPreviewImage={(target) =>
+                router.push({
+                  pathname: "/image",
+                  params: { ...target, ...(groupId ? { groupId } : { botId }) },
+                })
+              }
               actionProps={actionProps}
             />
           </Pressable>
@@ -1495,6 +1702,7 @@ function Thread() {
         style={{
           flexDirection: "row",
           alignItems: "center",
+          gap: 8,
           minHeight: 40,
           marginTop: 12,
         }}
@@ -1505,6 +1713,7 @@ function Thread() {
           size={28}
           status={currentBotStatus}
         />
+        <WorkingIndicator />
       </View>
     ) : inGroup && workingGroupBots.length > 0 ? (
       <View
@@ -1534,6 +1743,7 @@ function Thread() {
             </View>
           ))}
         </View>
+        <WorkingIndicator />
       </View>
     ) : null;
 
@@ -1580,9 +1790,9 @@ function Thread() {
           <FlatList
             key={threadKey}
             ref={scroll}
-            data={liveMessages}
+            data={liveItems}
             inverted
-            keyExtractor={(message) => message.id}
+            keyExtractor={(item) => (item.kind === "voiceChat" ? item.key : item.message.id)}
             extraData={answerableAskMessageId}
             style={{ flex: 1, marginTop: 8 }}
             maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
@@ -1617,7 +1827,15 @@ function Thread() {
             }}
             ListFooterComponent={loadEarlierControl}
             ListHeaderComponent={workingFooter}
-            renderItem={({ item }) => renderMessageRow(item)}
+            renderItem={({ item }) =>
+              item.kind === "voiceChat" ? (
+                <View style={{ marginTop: 12, width: "100%" }}>
+                  <VoiceChatCard group={item} />
+                </View>
+              ) : (
+                renderMessageRow(item.message)
+              )
+            }
           />
         )}
         {!showPinnedPage && threadScrollState.detached ? (
@@ -1688,10 +1906,16 @@ function Thread() {
                 {t("Replying to")}
               </Text>
               <Text style={{ color: tokens.foreground, fontSize: 13 }} numberOfLines={1}>
-                {previewMessageText(replyTarget)}
+                {replyQuote ? `“${replyQuote}”` : previewMessageText(replyTarget)}
               </Text>
             </View>
-            <Pressable accessibilityLabel={t("Cancel reply")} onPress={() => setReplyTarget(null)}>
+            <Pressable
+              accessibilityLabel={t("Cancel reply")}
+              onPress={() => {
+                setReplyTarget(null);
+                setReplyQuote(null);
+              }}
+            >
               <Text style={{ color: tokens.mutedForeground }}>✕</Text>
             </Pressable>
           </View>
@@ -2023,6 +2247,28 @@ function Thread() {
               }}
             />
           </View>
+          {botId && !onCall && draft.trim().length === 0 ? (
+            <Pressable
+              accessibilityLabel={t("Call")}
+              onPress={() => void startVoiceCall()}
+              style={{
+                width: 44,
+                height: 44,
+                borderRadius: 22,
+                borderWidth: 1,
+                borderColor: tokens.border,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
+            >
+              <NativeSymbol
+                ios="waveform"
+                android="pulse-outline"
+                size={18}
+                color={tokens.mutedForeground}
+              />
+            </Pressable>
+          ) : null}
           <Pressable
             accessibilityLabel={t("Send")}
             disabled={sending || !canSend}
@@ -2118,6 +2364,17 @@ function Thread() {
           onClose={() => setMarkdownPreview(null)}
         />
       ) : null}
+      {quoteTarget ? (
+        <QuoteSheet
+          message={quoteTarget}
+          onCancel={() => setQuoteTarget(null)}
+          onQuote={(excerpt) => {
+            setReplyTarget(quoteTarget);
+            setReplyQuote(excerpt);
+            setQuoteTarget(null);
+          }}
+        />
+      ) : null}
     </KeyboardAvoidingView>
   );
 }
@@ -2183,6 +2440,107 @@ function MentionOptionIcon({ mention }: { mention: ComposerMention }) {
   );
 }
 
+function QuoteSheet({
+  message,
+  onCancel,
+  onQuote,
+}: {
+  message: MobileMessage;
+  onCancel: () => void;
+  onQuote: (excerpt: string) => void;
+}) {
+  const tokens = useMobileTokens();
+  const insets = useSafeAreaInsets();
+  const segments = useMemo(() => quotableMessageSegments(message.role, message.blocks), [message]);
+  const [selection, setSelection] = useState<{
+    segment: number;
+    start: number;
+    end: number;
+  } | null>(null);
+  const [revision, setRevision] = useState(0);
+  const selectedText = selection === null ? undefined : segments[selection.segment];
+  const start = selection ? Math.min(selection.start, selection.end) : 0;
+  const end = selection ? Math.max(selection.start, selection.end) : 0;
+  const excerpt =
+    selectedText === undefined ? "" : truncateQuoteExcerpt(selectedText.slice(start, end).trim());
+
+  return (
+    <Modal visible animationType="slide" presentationStyle="pageSheet" onRequestClose={onCancel}>
+      <View
+        accessibilityViewIsModal
+        style={{
+          flex: 1,
+          backgroundColor: tokens.background,
+          // Page sheets clear the notch on iOS; Android modals are full-screen.
+          paddingTop: Platform.OS === "ios" ? 12 : insets.top + 12,
+          paddingBottom: insets.bottom,
+        }}
+      >
+        <View
+          style={{
+            flexDirection: "row",
+            justifyContent: "space-between",
+            alignItems: "center",
+            paddingHorizontal: 20,
+            paddingBottom: 12,
+          }}
+        >
+          <Pressable accessibilityRole="button" onPress={onCancel} hitSlop={8}>
+            <Text style={{ color: tokens.mutedForeground, fontSize: 17 }}>{t("Cancel")}</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !excerpt }}
+            disabled={!excerpt}
+            onPress={() => onQuote(excerpt)}
+            hitSlop={8}
+          >
+            <Text
+              style={{
+                color: excerpt ? tokens.primary : tokens.mutedForeground,
+                fontSize: 17,
+                fontWeight: "600",
+              }}
+            >
+              {t("Quote")}
+            </Text>
+          </Pressable>
+        </View>
+        <ScrollView style={{ flex: 1, paddingHorizontal: 20 }}>
+          {segments.map((text, index) => (
+            <TextInput
+              key={`${index}:${revision}`}
+              multiline
+              scrollEnabled={false}
+              showSoftInputOnFocus={false}
+              value={text}
+              // Any edit (paste, hardware keyboard, dictation) remounts the
+              // field with the source text — the excerpt slices the original,
+              // so the displayed text must never diverge from it.
+              onChangeText={() => setRevision((value) => value + 1)}
+              style={{
+                color: tokens.foreground,
+                fontSize: 15.5,
+                lineHeight: 23,
+                padding: 0,
+                marginTop: index === 0 ? 0 : 12,
+                textAlignVertical: "top",
+              }}
+              onSelectionChange={(event) => {
+                const range = event.nativeEvent.selection;
+                // A collapsed caret (tap, focus change, the Quote press
+                // itself) keeps the last real span armed.
+                if (range.start === range.end) return;
+                setSelection({ segment: index, ...range });
+              }}
+            />
+          ))}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
+
 function MentionChipIcon({ mention }: { mention: ComposerMention }) {
   const tokens = useMobileTokens();
   if (mention.kind === "routine") {
@@ -2238,7 +2596,11 @@ function previewMessageText(message: MobileMessage): string {
           `${messagingProviderLabel(block.provider, block.transport)} · ${block.fromLabel}: ${block.text}`,
         ];
       }
-      return block.kind === "text" && block.text ? [block.text] : [];
+      if (block.kind === "text" && block.text) {
+        // Bot text is Markdown; user text is already plain.
+        return [message.role === "bot" ? plainTextFromMarkdown(block.text) : block.text];
+      }
+      return [];
     })
     .join(" ")
     .trim();
@@ -2282,6 +2644,7 @@ const MessageBubble = memo(function MessageBubble({
   onAnswer,
   onOpenBot,
   onPreviewMarkdown,
+  onPreviewImage,
   actionProps,
 }: {
   botId: string;
@@ -2292,9 +2655,10 @@ const MessageBubble = memo(function MessageBubble({
   members?: MobileSnapshot["members"];
   replyPreview?: MobileMessage;
   canAnswer: boolean;
-  onAnswer: (message: MobileMessage, answer: string) => Promise<void>;
+  onAnswer: (message: MobileMessage, answer: string, username?: string) => Promise<void>;
   onOpenBot: (botId: string, name: string) => void;
   onPreviewMarkdown: (target: MarkdownArtifactPreviewTarget) => void;
+  onPreviewImage: (target: ImageArtifactPreviewTarget) => void;
   actionProps: MessageActionProps;
 }) {
   const colorScheme = useResolvedAppearance();
@@ -2307,6 +2671,10 @@ const MessageBubble = memo(function MessageBubble({
     (block): block is Extract<MessageBlock, { kind: "app_connect" }> =>
       block.kind === "app_connect",
   );
+  const mcpApprovalBlocks = message.blocks.filter(
+    (block): block is Extract<MessageBlock, { kind: "mcp_approval" }> =>
+      block.kind === "mcp_approval",
+  );
   const ask = message.blocks.find(
     (block): block is Extract<MessageBlock, { kind: "ask" }> =>
       block.kind === "ask" && !isApprovalAskBlock(block) && !block.actions?.length,
@@ -2318,12 +2686,22 @@ const MessageBubble = memo(function MessageBubble({
           ask={ask}
           actionProps={actionProps}
           canAnswer={canAnswer}
-          onAnswer={(answer) => onAnswer(message, answer)}
+          onAnswer={(answer, username) => onAnswer(message, answer, username)}
         />
         {appConnectBlocks.map((block, index) => (
           <AppConnectCard
             key={`${block.provider}-${index}`}
             botId={cardBotId}
+            block={block}
+            accessibilityActions={actionProps.accessibilityActions}
+            onAccessibilityAction={actionProps.onAccessibilityAction}
+          />
+        ))}
+        {mcpApprovalBlocks.map((block) => (
+          <McpApprovalCard
+            key={block.serverId}
+            botId={cardBotId}
+            threadId={message.threadId}
             block={block}
             accessibilityActions={actionProps.accessibilityActions}
             onAccessibilityAction={actionProps.onAccessibilityAction}
@@ -2578,13 +2956,24 @@ const MessageBubble = memo(function MessageBubble({
       </Pressable>
     );
   }
-  if (appConnectBlocks.length > 0 && appConnectBlocks.length === message.blocks.length) {
+  const inlineCardCount = appConnectBlocks.length + mcpApprovalBlocks.length;
+  if (inlineCardCount > 0 && inlineCardCount === message.blocks.length) {
     return (
       <View style={{ gap: 8, width: "100%" }}>
         {appConnectBlocks.map((block, index) => (
           <AppConnectCard
             key={`${block.provider}-${index}`}
             botId={cardBotId}
+            block={block}
+            accessibilityActions={actionProps.accessibilityActions}
+            onAccessibilityAction={actionProps.onAccessibilityAction}
+          />
+        ))}
+        {mcpApprovalBlocks.map((block) => (
+          <McpApprovalCard
+            key={block.serverId}
+            botId={cardBotId}
+            threadId={message.threadId}
             block={block}
             accessibilityActions={actionProps.accessibilityActions}
             onAccessibilityAction={actionProps.onAccessibilityAction}
@@ -2673,6 +3062,16 @@ const MessageBubble = memo(function MessageBubble({
             onAccessibilityAction={actionProps.onAccessibilityAction}
           />
         ))}
+        {mcpApprovalBlocks.map((block) => (
+          <McpApprovalCard
+            key={block.serverId}
+            botId={cardBotId}
+            threadId={message.threadId}
+            block={block}
+            accessibilityActions={actionProps.accessibilityActions}
+            onAccessibilityAction={actionProps.onAccessibilityAction}
+          />
+        ))}
       </View>
     );
   }
@@ -2710,7 +3109,7 @@ const MessageBubble = memo(function MessageBubble({
             {speaker}
           </Text>
         ) : null}
-        {replyPreview ? (
+        {replyPreview || (message.replyToMessageId && message.replyQuote) ? (
           <Text
             style={{
               color: message.role === "user" ? tokens.secondaryForeground : tokens.mutedForeground,
@@ -2718,7 +3117,11 @@ const MessageBubble = memo(function MessageBubble({
             }}
             numberOfLines={2}
           >
-            {previewMessageText(replyPreview)}
+            {message.replyQuote
+              ? `“${message.replyQuote}”`
+              : replyPreview
+                ? previewMessageText(replyPreview)
+                : ""}
           </Text>
         ) : null}
         {caption ? (
@@ -2733,34 +3136,55 @@ const MessageBubble = memo(function MessageBubble({
         ) : null}
         {attachments.map((attachment, index) =>
           attachment.kind === "image" ? (
-            <Pressable
-              {...actionProps}
-              key={`${attachment.artifactId ?? attachment.name ?? "image"}-${index}`}
-              onPress={() =>
-                attachment.artifactId
-                  ? void openMobileArtifact(
-                      artifactTarget,
-                      attachment.artifactId,
-                      attachment.name ?? t("Image"),
-                      attachment.mimeType ?? "image/png",
-                    ).catch((err) =>
-                      Alert.alert(
-                        t("Could not open image"),
-                        err instanceof Error ? err.message : t("Try again."),
-                      ),
-                    )
-                  : undefined
-              }
-            >
-              <Text
-                style={{
-                  color: message.role === "user" ? tokens.secondaryForeground : tokens.foreground,
-                  fontSize: 15,
-                }}
+            attachment.artifactId && isInlineImageMimeType(attachment.mimeType) ? (
+              <InlineImageAttachment
+                key={`${attachment.artifactId}-${index}`}
+                threadTarget={artifactTarget}
+                artifactId={attachment.artifactId}
+                name={attachment.name ?? t("Image")}
+                mimeType={attachment.mimeType ?? "image/png"}
+                labelColor={
+                  message.role === "user" ? tokens.secondaryForeground : tokens.foreground
+                }
+                pressableProps={actionProps}
+                onOpen={() =>
+                  onPreviewImage({
+                    artifactId: attachment.artifactId!,
+                    name: attachment.name ?? t("Image"),
+                    mimeType: attachment.mimeType ?? "image/png",
+                  })
+                }
+              />
+            ) : (
+              <Pressable
+                {...actionProps}
+                key={`${attachment.artifactId ?? attachment.name ?? "image"}-${index}`}
+                onPress={() =>
+                  attachment.artifactId
+                    ? void openMobileArtifact(
+                        artifactTarget,
+                        attachment.artifactId,
+                        attachment.name ?? t("Image"),
+                        attachment.mimeType ?? "image/png",
+                      ).catch((err) =>
+                        Alert.alert(
+                          t("Could not open image"),
+                          err instanceof Error ? err.message : t("Try again."),
+                        ),
+                      )
+                    : undefined
+                }
               >
-                🖼 {attachment.name ?? t("Image")}
-              </Text>
-            </Pressable>
+                <Text
+                  style={{
+                    color: message.role === "user" ? tokens.secondaryForeground : tokens.foreground,
+                    fontSize: 15,
+                  }}
+                >
+                  🖼 {attachment.name ?? t("Image")}
+                </Text>
+              </Pressable>
+            )
           ) : (
             <Pressable
               {...actionProps}
@@ -2814,6 +3238,16 @@ const MessageBubble = memo(function MessageBubble({
           <AppConnectCard
             key={`${block.provider}-${index}`}
             botId={cardBotId}
+            block={block}
+            accessibilityActions={actionProps.accessibilityActions}
+            onAccessibilityAction={actionProps.onAccessibilityAction}
+          />
+        ))}
+        {mcpApprovalBlocks.map((block) => (
+          <McpApprovalCard
+            key={block.serverId}
+            botId={cardBotId}
+            threadId={message.threadId}
             block={block}
             accessibilityActions={actionProps.accessibilityActions}
             onAccessibilityAction={actionProps.onAccessibilityAction}
@@ -2889,7 +3323,7 @@ function MessageTextCard({
           {speaker}
         </Text>
       ) : null}
-      {replyPreview ? (
+      {replyPreview || (message.replyToMessageId && message.replyQuote) ? (
         <Text
           style={{
             color: message.role === "user" ? tokens.secondaryForeground : tokens.mutedForeground,
@@ -2898,22 +3332,31 @@ function MessageTextCard({
           }}
           numberOfLines={2}
         >
-          {previewMessageText(replyPreview)}
+          {message.replyQuote
+            ? `“${message.replyQuote}”`
+            : replyPreview
+              ? previewMessageText(replyPreview)
+              : ""}
         </Text>
       ) : null}
-      {message.role === "user" ? (
-        <Text style={{ color: tokens.secondaryForeground, fontSize: 15.5, lineHeight: 23 }}>
-          {contentText}
-        </Text>
-      ) : (
-        <ChatMarkdown
-          palette={tokens}
-          colorScheme={colorScheme}
-          streaming={message.id.startsWith("progress:")}
-        >
-          {contentText}
-        </ChatMarkdown>
-      )}
+      {
+        // User bubbles stay literal text on web and mobile. Only explicit URLs
+        // and email addresses are links, so a sent address is tappable without
+        // formatting bold or headings.
+        message.role === "user" ? (
+          <LinkifiedText color={tokens.secondaryForeground} linkColor={tokens.link}>
+            {contentText}
+          </LinkifiedText>
+        ) : (
+          <ChatMarkdown
+            palette={tokens}
+            colorScheme={colorScheme}
+            streaming={message.id.startsWith("progress:")}
+          >
+            {contentText}
+          </ChatMarkdown>
+        )
+      }
     </Pressable>
   );
 }
@@ -2975,18 +3418,22 @@ function AskBlock({
 }: {
   ask: Extract<MobileMessage["blocks"][number], { kind: "ask" }>;
   canAnswer: boolean;
-  onAnswer: (answer: string) => Promise<void>;
+  onAnswer: (answer: string, username?: string) => Promise<void>;
   actionProps: MessageActionProps;
 }) {
   const tokens = useMobileTokens();
   const { t } = useI18n();
   const [answer, setAnswer] = useState("");
+  const [username, setUsername] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const answered = ask.status === "answered";
   const secretInput = isSecretAskBlock(ask);
+  const loginInput = secretInput && ask.credential?.auth.type === "login";
+  const incomplete =
+    (secretInput ? answer.length === 0 : !answer.trim()) || (loginInput && !username.trim());
   const secretLabel =
-    ask.purpose === "password"
+    loginInput || ask.purpose === "password"
       ? t("Password")
       : ask.purpose === "api_key"
         ? t("API key")
@@ -2996,13 +3443,14 @@ function AskBlock({
 
   async function submit() {
     if (submitting) return;
-    if (secretInput ? answer.length === 0 : !answer.trim()) return;
+    if (incomplete) return;
     const submitValue = secretInput ? answer : answer.trim();
+    const submitUsername = loginInput ? username.trim() : undefined;
     setSubmitting(true);
     setError(null);
     if (secretInput) setAnswer("");
     try {
-      await onAnswer(submitValue);
+      await onAnswer(submitValue, submitUsername);
     } catch (cause) {
       setError(!secretInput && cause instanceof Error ? cause.message : t("Could not send answer"));
     } finally {
@@ -3043,6 +3491,23 @@ function AskBlock({
         </Text>
       ) : canAnswer ? (
         <>
+          {loginInput ? (
+            <TextInput
+              accessibilityLabel={t("Username")}
+              value={username}
+              onChangeText={setUsername}
+              placeholder={t("Username")}
+              placeholderTextColor={tokens.mutedForeground}
+              autoComplete="off"
+              autoCorrect={false}
+              autoCapitalize="none"
+              editable={!submitting}
+              style={[
+                askInputStyles.field,
+                { borderColor: tokens.border, color: tokens.foreground },
+              ]}
+            />
+          ) : null}
           <TextInput
             accessibilityLabel={secretInput ? secretLabel : t("Answer")}
             value={answer}
@@ -3055,26 +3520,18 @@ function AskBlock({
             autoCapitalize={secretInput ? "none" : "sentences"}
             editable={!submitting}
             onSubmitEditing={() => void submit()}
-            style={{
-              minHeight: 42,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: tokens.border,
-              color: tokens.foreground,
-              paddingHorizontal: 12,
-              paddingVertical: 9,
-            }}
+            style={[askInputStyles.field, { borderColor: tokens.border, color: tokens.foreground }]}
           />
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={submitLabel}
-            disabled={(secretInput ? answer.length === 0 : !answer.trim()) || submitting}
+            disabled={incomplete || submitting}
             onPress={() => void submit()}
             style={{
               alignSelf: "flex-end",
               borderRadius: 999,
               backgroundColor: tokens.foreground,
-              opacity: (secretInput ? answer.length === 0 : !answer.trim()) || submitting ? 0.5 : 1,
+              opacity: incomplete || submitting ? 0.5 : 1,
               paddingHorizontal: 16,
               paddingVertical: 9,
             }}
@@ -3093,3 +3550,13 @@ function AskBlock({
     </View>
   );
 }
+
+const askInputStyles = StyleSheet.create({
+  field: {
+    minHeight: 42,
+    borderRadius: 12,
+    borderWidth: 1,
+    paddingHorizontal: 12,
+    paddingVertical: 9,
+  },
+});

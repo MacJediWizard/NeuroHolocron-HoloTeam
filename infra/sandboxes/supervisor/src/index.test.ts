@@ -1,6 +1,9 @@
 import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { resolveSupervisorToken } from "@rakazo/core";
 import { describe, expect, it } from "vitest";
 import {
@@ -18,9 +21,11 @@ import {
   ComputerControlUnavailableError,
   clearComputerScreenRegistry,
   completeReleasedScreen,
+  computerCommandEnv,
   computerControlTimeoutMs,
   containerActionStep,
   containerActionSteps,
+  createDockerStreamDemuxer,
   DOCKER_BROWSER_ALIASES,
   demuxDockerStream,
   ensureScreenCommand,
@@ -119,6 +124,25 @@ describe("computer screen readiness", () => {
 });
 
 describe("sandbox supervisor Docker endpoint", () => {
+  it("discovers the unprivileged Docker Desktop socket on macOS", () => {
+    const home = mkdtempSync(path.join(tmpdir(), "rakazo-docker-home-"));
+    try {
+      expect(resolveDockerSocketPath({ HOME: home }, "darwin")).toBe("/var/run/docker.sock");
+      const socket = path.join(home, ".docker", "run", "docker.sock");
+      mkdirSync(path.dirname(socket), { recursive: true });
+      writeFileSync(socket, "");
+      expect(resolveDockerSocketPath({ HOME: home }, "darwin")).toBe(socket);
+      expect(
+        resolveDockerSocketPath({ HOME: home, DOCKER_SOCKET: "/tmp/override.sock" }, "darwin"),
+      ).toBe("/tmp/override.sock");
+      expect(
+        resolveDockerSocketPath({ HOME: home, DOCKER_HOST: "tcp://docker.test:2375" }, "darwin"),
+      ).toBeUndefined();
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
   it("respects Docker host and socket overrides before platform defaults", () => {
     expect(resolveDockerSocketPath({ DOCKER_HOST: "tcp://docker.test:2375" }, "win32")).toBe(
       undefined,
@@ -148,6 +172,7 @@ describe("sandbox supervisor HTTP boundary", () => {
       ["POST", "/computers/id/files"],
       ["GET", "/computers/id/screen"],
       ["POST", "/computers/id/screen-mode"],
+      ["POST", "/computers/id/terminal"],
       ["DELETE", "/computers/id/screen"],
       ["POST", "/computers/id/input"],
       ["POST", "/computers/id/stop"],
@@ -213,6 +238,18 @@ describe("sandbox supervisor HTTP boundary", () => {
     expect(supervisorRequestBodyLimit("POST", "/computers/id/files/extra")).toBe(
       MAX_SUPERVISOR_REQUEST_BYTES,
     );
+  });
+
+  it("rejects terminal requests without a well-formed control token before touching Docker", async () => {
+    for (const body of [{}, { controlToken: "bad token" }, { controlToken: "a".repeat(129) }]) {
+      const response = await supervisorApp.request("/computers/id/terminal", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      expect(response.status, JSON.stringify(body)).toBeGreaterThanOrEqual(400);
+      expect(response.ok).toBe(false);
+    }
   });
 
   it("rejects a provision request whose identity headers do not match its body", async () => {
@@ -302,6 +339,40 @@ describe("sandbox supervisor input containment", () => {
     });
     expect(containerActionStep({ kind: "open", path: "https://example.com" }, ":3")).toEqual({
       argv: ["env", "DISPLAY=:3", "xdg-open", "https://example.com"],
+    });
+  });
+
+  it("routes focus actions through the focus-or-launch wrapper", () => {
+    expect(containerActionStep({ kind: "focus", application: "xterm" }, ":3")).toEqual({
+      argv: ["env", "DISPLAY=:3", "rakazo-focus-or-launch", "xterm"],
+    });
+    expect(
+      containerActionStep(
+        { kind: "focus", application: "chromium", uri: "https://example.com" },
+        ":2",
+      ),
+    ).toEqual({
+      argv: [
+        "env",
+        "DISPLAY=:2",
+        "rakazo-focus-or-launch",
+        "rakazo-browser",
+        "https://example.com",
+      ],
+    });
+    const profile = browserProfilePathForScreen("writer");
+    expect(containerActionStep({ kind: "focus", application: "chromium" }, ":2", profile)).toEqual({
+      argv: [
+        "env",
+        "DISPLAY=:2",
+        `RAKAZO_BROWSER_PROFILE=${profile}`,
+        "rakazo-focus-or-launch",
+        "rakazo-browser",
+      ],
+    });
+    // A non-browser application never receives the per-screen browser profile.
+    expect(containerActionStep({ kind: "focus", application: "xterm" }, ":2", profile)).toEqual({
+      argv: ["env", "DISPLAY=:2", "rakazo-focus-or-launch", "xterm"],
     });
   });
 
@@ -448,26 +519,30 @@ describe("sandbox supervisor input containment", () => {
     expect(shouldReplayComputerActions(reset)).toBe(false);
   });
 
-  it("extends the computer control deadline for mapped waits", () => {
+  it("extends the computer control deadline for mapped waits and focus steps", () => {
     expect(computerControlTimeoutMs([])).toBe(15_000);
     expect(computerControlTimeoutMs([{ kind: "wait", ms: 5_000 }], 5_000)).toBe(25_000);
+    const focus = { kind: "focus" as const, application: "xterm" };
+    expect(computerControlTimeoutMs([focus])).toBe(15_000 + 13_400);
+    expect(computerControlTimeoutMs([focus, { kind: "wait", ms: 1_000 }], 500)).toBe(
+      15_000 + 13_400 + 1_000 + 500,
+    );
+    // Five focus steps need 15s + 67s. The deadline is that sum, not the old 60s clip.
+    expect(computerControlTimeoutMs(Array.from({ length: 5 }, () => focus))).toBe(
+      15_000 + 5 * 13_400,
+    );
     expect(
       computerControlTimeoutMs(
-        [
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-          { kind: "wait", ms: 5_000 },
-        ],
+        Array.from({ length: 24 }, () => focus),
         5_000,
       ),
-    ).toBe(60_000);
+    ).toBe(15_000 + 24 * 13_400 + 5_000);
+    expect(
+      computerControlTimeoutMs(
+        Array.from({ length: 10 }, () => ({ kind: "wait" as const, ms: 5_000 })),
+        5_000,
+      ),
+    ).toBe(15_000 + 10 * 5_000 + 5_000);
   });
 
   it("wraps sandbox commands in a process-tree timeout", () => {
@@ -577,7 +652,7 @@ describe("sandbox supervisor input containment", () => {
     expect(command).not.toContain("/home/rakazo/.browser-profiles/chromium/.");
     expect(command).not.toContain(".rakazo-base-generation");
     expect(command).toContain("browser-pid-");
-    expect(command).toContain("tr '\\0' '\\n' <\"/proc/$pid/cmdline\"");
+    expect(command).toContain("tr '\\0' '\\n' <\"/proc/$1/cmdline\"");
     expect(browserProfilePathForScreen("../../writer")).toMatch(
       /^\/home\/rakazo\/\.browser-profiles\/chromium-bot-[0-9a-f]+$/,
     );
@@ -816,6 +891,30 @@ describe("docker exec stream demux", () => {
     });
   });
 
+  it("emits complete frames before the stream ends", () => {
+    const stream = Buffer.concat([
+      frame(1, "code: ABCD-1234\n"),
+      frame(2, "waiting\n"),
+      frame(1, "done\n"),
+    ]);
+    const demuxer = createDockerStreamDemuxer();
+    const live: Array<{ stream: string; data: string }> = [];
+    const splitAt = 8 + Buffer.byteLength("code: ABCD-1234\n") + 3;
+    live.push(...demuxer.push(stream.subarray(0, splitAt)));
+    expect(live).toEqual([{ stream: "stdout", data: "code: ABCD-1234\n" }]);
+    live.push(...demuxer.push(stream.subarray(splitAt)));
+    live.push(...demuxer.finish());
+    expect(live).toEqual([
+      { stream: "stdout", data: "code: ABCD-1234\n" },
+      { stream: "stderr", data: "waiting\n" },
+      { stream: "stdout", data: "done\n" },
+    ]);
+    expect(demuxDockerStream(stream)).toEqual({
+      stdout: "code: ABCD-1234\ndone\n",
+      stderr: "waiting\n",
+    });
+  });
+
   it("rejects frames with nonzero reserved header padding as raw stdout", () => {
     // type 1, nonzero padding, size 0 — would look like an empty stdout frame without the check
     const padded = Buffer.from([0x01, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00]);
@@ -823,5 +922,30 @@ describe("docker exec stream demux", () => {
       stdout: padded.toString("utf8"),
       stderr: "",
     });
+  });
+});
+
+describe("computer command identity", () => {
+  it("runs the user's terminal as the same workspace user and environment as the bot's shell", () => {
+    expect(computerCommandEnv({ display: ":2" })).toEqual([
+      "DISPLAY=:2",
+      "HOME=/home/rakazo",
+      "PATH=/home/rakazo/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+      "NPM_CONFIG_PREFIX=/home/rakazo/.local",
+      "PIP_USER=1",
+    ]);
+    const source = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
+    // Every exec, including file writes for uploads, inherits the container's non-root user
+    // (see containerCreateOptions).
+    const execs = source.match(/container\.exec\(\{[\s\S]*?\}\)/g) ?? [];
+    expect(execs.length).toBeGreaterThanOrEqual(2);
+    for (const exec of execs) expect(exec).not.toMatch(/\bUser\s*:/);
+    const route = (path: string) =>
+      source.slice(
+        source.indexOf(`app.post("${path}"`),
+        source.indexOf("app.", source.indexOf(`app.post("${path}"`) + 5),
+      );
+    expect(route("/computers/:id/exec")).toContain("computerCommandEnv(layout)");
+    expect(route("/computers/:id/terminal")).toContain("computerCommandEnv(screen.layout)");
   });
 });

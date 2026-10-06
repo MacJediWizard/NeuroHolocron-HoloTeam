@@ -99,6 +99,16 @@ model Verification {
   @@map("verification")
 }
 
+/// Better Auth credential rate limits. `lastRequest` is epoch milliseconds.
+model RateLimit {
+  id          String @id
+  key         String @unique
+  count       Int
+  lastRequest BigInt
+
+  @@map("rateLimit")
+}
+
 model Organization {
   id          String       @id
   name        String
@@ -305,6 +315,7 @@ model SpaceModelPreference {
   credentialId String
   credential   UserModelCredential @relation(fields: [credentialId, userId], references: [id, userId], onDelete: Cascade)
   modelId      String?
+  thinkingLevel String?
   isDefault    Boolean             @default(false)
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
@@ -324,6 +335,8 @@ model SpaceVoicePreference {
   credentialId String
   credential   UserVoiceCredential @relation(fields: [credentialId, userId], references: [id, userId], onDelete: Cascade)
   voiceId      String              @default("")
+  // Fish speech-model override. Null keeps the deployment default.
+  speechModel  String?
   isDefault    Boolean             @default(false)
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
@@ -497,6 +510,7 @@ model Message {
   blocks           Json
   botId            String?
   replyToMessageId String?
+  replyQuote       String?
   replyTo          Message?  @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
   replies          Message[] @relation("MessageReplies")
   runId            String?
@@ -612,6 +626,8 @@ model SteeringMessage {
   userId    String
   runId     String?
   run       Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+  /// Set when a pending row must resume as this trigger so its reply can be delivered.
+  originTrigger String?
   claimedAt DateTime?
   createdAt DateTime @default(now())
 
@@ -965,21 +981,30 @@ model Artifact {
   userId     String
   runId      String?
   name       String
+  description String?
   mimeType   String
   size       Int
   hash       String
   storageKey String
   createdAt  DateTime   @default(now())
 
+  // Null on the first version; that row's id is the family's stable id.
+  rootArtifactId String?
+  rootArtifact   Artifact?  @relation("ArtifactVersions", fields: [rootArtifactId], references: [id], onDelete: Cascade)
+  versions       Artifact[] @relation("ArtifactVersions")
+  version        Int        @default(1)
+
   @@index([spaceId, botId])
   @@index([groupId])
+  @@index([rootArtifactId])
+  // artifacts_family_version_key is raw SQL: Prisma cannot express COALESCE indexes.
   @@map("artifacts")
 }
 
 model UsageRecord {
-  id           String   @id @default(cuid())
-  spaceId      String
-  space        Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
+  id               String   @id @default(cuid())
+  spaceId          String
+  space            Space    @relation(fields: [spaceId], references: [id], onDelete: Cascade)
   /// Which bot spent this. Deliberately NOT a relation: a usage row is spend that really
   /// happened, and no lifecycle event on the bot may delete it or blank its attribution.
   /// `Cascade` erased the row; `SetNull` would erase the attribution instead, and because
@@ -988,15 +1013,17 @@ model UsageRecord {
   ///
   /// So the id outlives the bot and may dangle. Read it with a LEFT JOIN; `BotDeletion.id`
   /// IS the bot id, so a deleted bot's name is still reachable for display.
-  botId        String?
-  userId       String
-  runId        String?
-  run          Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
-  provider     String
-  model        String
-  inputTokens  Int
-  outputTokens Int
-  createdAt    DateTime @default(now())
+  botId            String?
+  userId           String
+  runId            String?
+  run              Run?     @relation(fields: [runId], references: [id], onDelete: SetNull)
+  provider         String
+  model            String
+  inputTokens      Int
+  outputTokens     Int
+  cacheReadTokens  Int      @default(0)
+  cacheWriteTokens Int      @default(0)
+  createdAt        DateTime @default(now())
 
   @@index([spaceId, userId, createdAt])
   @@map("usage_records")

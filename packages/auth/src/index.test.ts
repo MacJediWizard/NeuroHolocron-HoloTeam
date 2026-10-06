@@ -1,15 +1,84 @@
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
-  blockedAuthPaths,
+  authRateLimitOptions,
   buildTrustedOrigins,
+  createAuth,
+  isBlockedAuthPath,
   passwordResetEmail,
   resolveSignupPolicy,
 } from "./index.js";
 
 describe("auth policy", () => {
-  it("blocks invitation and org-creation paths in version 1", () => {
-    expect(blockedAuthPaths.some((path) => path.includes("invite"))).toBe(true);
-    expect(blockedAuthPaths.some((path) => path.includes("create"))).toBe(true);
+  it("closes every organization plugin route", () => {
+    for (const path of [
+      "/organization/delete",
+      "/organization/update",
+      "/organization/leave",
+      "/organization/create",
+      "/organization/invite-member",
+      "/organization/cancel-invitation",
+      "/organization/set-active",
+      "/organization/list",
+      "/organization/create-team",
+      "/organization/some-future-route",
+    ]) {
+      expect(isBlockedAuthPath(path), path).toBe(true);
+    }
+  });
+
+  it("keeps the account routes the apps call", () => {
+    for (const path of [
+      "/sign-up/email",
+      "/sign-in/email",
+      "/sign-out",
+      "/get-session",
+      "/change-password",
+      "/request-password-reset",
+      "/reset-password",
+      "/delete-user",
+    ]) {
+      expect(isBlockedAuthPath(path), path).toBe(false);
+    }
+  });
+
+  it("disables organization deletion inside Better Auth as well", async () => {
+    const auth = createAuth({} as never, {
+      secret: "test-secret-that-is-long-enough-for-better-auth",
+      baseURL: "http://127.0.0.1:3100",
+      webOrigin: "http://127.0.0.1:5173",
+      signupsEnabled: undefined,
+      signupAllowlist: undefined,
+    });
+
+    const res = await auth.handler(
+      new Request("http://127.0.0.1:3100/api/auth/organization/delete", {
+        method: "POST",
+        headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
+        body: JSON.stringify({ organizationId: "space-1" }),
+      }),
+    );
+
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ code: "ORGANIZATION_DELETION_DISABLED" });
+  });
+});
+
+describe("authRateLimitOptions", () => {
+  it("caps credential routes at 10 attempts per 15 minutes in a shared table", () => {
+    expect(authRateLimitOptions("production")).toEqual({
+      enabled: true,
+      storage: "database",
+      customRules: {
+        "/sign-in/email": { window: 15 * 60, max: 10 },
+        "/sign-up/email": { window: 15 * 60, max: 10 },
+        "/request-password-reset": { window: 15 * 60, max: 10 },
+      },
+    });
+  });
+
+  it("stays off outside production so the test suite can sign in", () => {
+    expect(authRateLimitOptions("test").enabled).toBe(false);
   });
 });
 
@@ -47,7 +116,7 @@ describe("passwordResetEmail", () => {
 
     expect(message).toMatchObject({
       to: "ada@example.test",
-      subject: "Reset your Rakazo password",
+      subject: `Reset your ${PRODUCT_NAME} password`,
     });
     expect(message.text).toContain("https://rakazo.test/reset-password?token=secret&next=1");
     expect(message.html).toContain("&lt;Ada &amp; &quot;team&quot;&gt;");

@@ -1,6 +1,6 @@
 {
   "name": "@rakazo/desktop",
-  "productName": "Rakazo",
+  "productName": "Legiara",
   "version": "0.1.6",
   "license": "Apache-2.0",
   "type": "module",
@@ -28,7 +28,7 @@
     "vitest": "4.1.11"
   },
   "build": {
-    "appId": "dev.rakazo.desktop",
+    "appId": "com.legiara.desktop",
     "directories": {
       "output": "out",
       "buildResources": "assets"
@@ -80,8 +80,8 @@
     "publish": [
       {
         "provider": "github",
-        "owner": "elie222",
-        "repo": "rakazo"
+        "owner": "MacJediWizard",
+        "repo": "NeuroHolocron-HoloTeam"
       }
     ]
   }

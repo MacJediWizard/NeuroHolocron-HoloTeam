@@ -38,6 +38,7 @@ import {
   upsertEnvAssignments,
   validateUpdateRequest,
 } from "./compose-update.js";
+import { OFFICIAL_REPO_URL } from "./self-update.js";
 
 const target = {
   composeFiles: ["/srv/rakazo/infra/compose/docker-compose.prod.yml"],
@@ -601,10 +602,10 @@ describe("managed env assignments", () => {
 describe("sidecar boundary validation", () => {
   it("normalizes a request the API already validated", () => {
     expect(
-      validateUpdateRequest({ repoUrl: "https://github.com/elie222/rakazo.git", branch: " main " }),
+      validateUpdateRequest({ repoUrl: `${OFFICIAL_REPO_URL}.git`, branch: " main " }),
     ).toEqual({
       request: {
-        repoUrl: "https://github.com/elie222/rakazo.git",
+        repoUrl: `${OFFICIAL_REPO_URL}.git`,
         branch: "main",
         official: true,
       },

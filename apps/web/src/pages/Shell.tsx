@@ -1,7 +1,7 @@
 import { i18n } from "@lingui/core";
 import { t } from "@lingui/core/macro";
 import { Trans, useLingui } from "@lingui/react/macro";
-import { ChatMarkdown } from "@rakazo/chat-ui/web";
+import { ChatMarkdown, LinkifiedText } from "@rakazo/chat-ui/web";
 import type {
   AgentSkillCatalogEntry,
   Bot,
@@ -38,7 +38,9 @@ import {
   type ComposerMention,
   clampMentionHighlightIndex,
   cronFromPreset,
+  formatMessageTime,
   groupBotsForSidebar,
+  groupVoiceChats,
   inferAttachmentMimeType,
   isActive,
   isPeerReceiptBlocks,
@@ -46,6 +48,8 @@ import {
   isToolActivityBlock,
   latestAnswerableAskMessageId,
   mentionChipKey,
+  nestRosterByParent,
+  plainTextFromMarkdown,
   projectMessageReactions,
   reorderBotTo,
   resolveComposerSendPlan,
@@ -58,6 +62,7 @@ import {
   speechFromBlocks,
   truncateSlashDescription,
   userVisibleMessages,
+  withLiveStreamingProgress,
 } from "@rakazo/core";
 import {
   AvatarStyleProvider,
@@ -76,6 +81,7 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
+  resolvePersonaColorDef,
 } from "@rakazo/ui-web";
 import {
   ArrowDown,
@@ -85,7 +91,9 @@ import {
   ChevronDown,
   Clock,
   Copy,
+  FolderOpen,
   Gauge,
+  LayoutGrid,
   Lock,
   LogOut,
   Maximize2,
@@ -104,6 +112,7 @@ import {
   Settings,
   Smile,
   Square,
+  TextQuote,
   Trash2,
   X,
 } from "lucide-react";
@@ -122,7 +131,9 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from "react";
+import { createPortal } from "react-dom";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ArtifactFileCard } from "../components/ArtifactFileCard";
 import { AskCard } from "../components/AskCard";
@@ -134,7 +145,17 @@ import {
   computersAreUnavailable,
 } from "../components/ComputersUnavailableHint";
 import { ComputerUpdateProgress } from "../components/ComputerUpdateProgress";
+import { CallCard } from "../components/call/CallCard";
+import { VoiceChatCard } from "../components/call/VoiceChatCard";
+import { ComputerWorkspace } from "../components/computer/ComputerWorkspace";
 import { MessageHoverMetadata } from "../components/MessageHoverMetadata";
+import {
+  LIVE_TOOL_STEP_WINDOW,
+  StandaloneToolActivity,
+  ToolActivityDisclosure,
+  ToolOnlyNarration,
+  ToolSteps,
+} from "../components/ToolActivityDisclosure";
 import { SkillDraftCard } from "../components/teach/SkillDraftCard";
 import { TeachCaptureOverlay } from "../components/teach/TeachCaptureOverlay";
 import { TeachComputerOverlayControl } from "../components/teach/TeachComputerOverlay";
@@ -153,7 +174,14 @@ import {
   requestBrowserNotificationPermission,
   shouldNotifyBrowser,
 } from "../lib/browser-notifications";
-import { loadComputerScreen } from "../lib/computer-screen";
+import { startCall, useCallSession } from "../lib/call-session";
+import { newClientId } from "../lib/client-id";
+import {
+  embeddableScreenUrl,
+  loadComputerScreen,
+  screenIframeSandbox,
+} from "../lib/computer-screen";
+import { publishComputerCommand } from "../lib/computer-workspace";
 import { desktopBridge } from "../lib/desktop";
 import { scheduleFocusPrompt } from "../lib/focus-prompt";
 import { localTimezone } from "../lib/local-timezone";
@@ -162,9 +190,19 @@ import { messageProviderLabel } from "../lib/messaging";
 import {
   isFileDrag,
   isFilePaste,
+  readFileAsBase64,
   revokePendingAttachmentPreviews,
 } from "../lib/pending-attachments";
 import { markAfterPaint, markOnce } from "../lib/performance";
+import { quoteDraftForSelection } from "../lib/quote-selection";
+import { getResponseStreamingEnabled, subscribeResponseStreaming } from "../lib/response-streaming";
+import type { Panel, RightPanelState } from "../lib/right-panel-state";
+import {
+  readRightPanelState,
+  rightPanelStorageKey,
+  writeRightPanelState,
+} from "../lib/right-panel-state";
+import { rosterWorkStatusLabel } from "../lib/roster-status";
 import { clearSpaceSelection, rpc, selectedSpaceId, selectSpace } from "../lib/rpc";
 import { readSeenRunErrorIds, rememberSeenRunErrorId } from "../lib/run-error-storage";
 import { sharedInflight } from "../lib/shared-inflight";
@@ -185,6 +223,14 @@ import {
   threadRunError,
   userHoldsComputerControl,
 } from "../lib/thread-events";
+import { getToolActivityEnabled, subscribeToolActivity } from "../lib/tool-activity-preference";
+import {
+  isToolOnlyNarration,
+  messageHasVisibleBlocks,
+  renderableMessageBlocks,
+  shouldRenderToolCard,
+  toolStepCount,
+} from "../lib/tool-activity-view";
 import {
   transcriptCanSnapAfterFrame,
   transcriptIsNearEnd,
@@ -195,6 +241,7 @@ import { ActivityList } from "./ActivityList";
 import type { ContextMenuPosition } from "./BotContextMenu";
 import { CreateGroupForm, GroupSettings, memberName } from "./GroupPanel";
 import { HostComputerPrompt } from "./HostComputerPrompt";
+import { ResizableSidePanel } from "./ResizableSidePanel";
 import {
   draftFromRoutine,
   emptyRoutineDraft,
@@ -247,16 +294,6 @@ const PluginsOverlay = lazy(() =>
 const McpServersOverlay = lazy(() =>
   import("./McpServersOverlay").then((module) => ({ default: module.McpServersOverlay })),
 );
-const CallView = lazy(() => import("./CallView").then((module) => ({ default: module.CallView })));
-
-type Panel =
-  | "computer"
-  | "settings"
-  | "routine"
-  | "create"
-  | "create-group"
-  | "group-settings"
-  | null;
 
 type PendingAttachment = {
   id: string;
@@ -298,8 +335,12 @@ function collapsedSidebarSectionsStorageKey(userId: string | null | undefined): 
   return `rakazo:collapsed-sidebar-sections:${userId}`;
 }
 
-function readCollapsedSidebarSections(userId: string | null | undefined): Set<string> {
-  const storageKey = collapsedSidebarSectionsStorageKey(userId);
+function collapsedRosterParentsStorageKey(userId: string | null | undefined): string | null {
+  if (!userId) return null;
+  return `rakazo:collapsed-roster-parents:${userId}`;
+}
+
+function readCollapsedIdSet(storageKey: string | null): Set<string> {
   if (!storageKey) return new Set();
   try {
     const value = window.localStorage.getItem(storageKey);
@@ -310,6 +351,32 @@ function readCollapsedSidebarSections(userId: string | null | undefined): Set<st
   } catch {
     return new Set();
   }
+}
+
+function toggleCollapsedIdSet(
+  previous: ReadonlySet<string>,
+  id: string,
+  storageKey: string | null,
+): Set<string> {
+  const next = new Set(previous);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  if (storageKey) {
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify([...next]));
+    } catch {
+      // Keep the UI usable when storage is unavailable.
+    }
+  }
+  return next;
+}
+
+function readCollapsedSidebarSections(userId: string | null | undefined): Set<string> {
+  return readCollapsedIdSet(collapsedSidebarSectionsStorageKey(userId));
+}
+
+function readCollapsedRosterParents(userId: string | null | undefined): Set<string> {
+  return readCollapsedIdSet(collapsedRosterParentsStorageKey(userId));
 }
 
 export function ShellPage() {
@@ -337,9 +404,11 @@ export function ShellPage() {
   const [archivedGroups, setArchivedGroups] = useState<Group[]>([]);
   const [archivedOpen, setArchivedOpen] = useState(false);
   const [collapsedSidebarSections, setCollapsedSidebarSections] = useState(() => new Set<string>());
+  const [collapsedRosterParents, setCollapsedRosterParents] = useState(() => new Set<string>());
 
   useEffect(() => {
     setCollapsedSidebarSections(readCollapsedSidebarSections(userId));
+    setCollapsedRosterParents(readCollapsedRosterParents(userId));
   }, [userId]);
   useEffect(() => {
     setBotsSidebarCollapsed(readBotsSidebarCollapsed(userId));
@@ -349,13 +418,48 @@ export function ShellPage() {
   const [searchLoading, setSearchLoading] = useState(false);
   const [snapshot, setSnapshot] = useState<ThreadSnapshot | null>(null);
   const snapshotRef = useRef<ThreadSnapshot | null>(null);
+  const streamResponses = useSyncExternalStore(
+    subscribeResponseStreaming,
+    getResponseStreamingEnabled,
+    () => false,
+  );
+  const streamResponsesRef = useRef(streamResponses);
+  streamResponsesRef.current = streamResponses;
+  const showToolActivity = useSyncExternalStore(
+    subscribeToolActivity,
+    getToolActivityEnabled,
+    () => true,
+  );
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [replyTarget, setReplyTarget] = useState<ThreadMessage | null>(null);
+  const [replyQuote, setReplyQuote] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [attachmentNotice, setAttachmentNotice] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [panel, setPanel] = useState<Panel>(null);
+  const [panel, setPanelState] = useState<Panel>(null);
+  const [restoredPanelKey, setRestoredPanelKey] = useState<string | null>(null);
+  const panelStorageKeyRef = useRef<string | null>(null);
+  const observedPanelKey = useRef<string | null>(null);
+  const explicitPanelTarget = useRef<string | null>(null);
+  const pendingPanelRestore = useRef<RightPanelState | null>(null);
+  const pendingExplicitPanel = useRef(false);
+  const panelSearch = useRef({ searchParams, setSearchParams });
+  panelSearch.current = { searchParams, setSearchParams };
+  const setPanel = useCallback((next: Panel | ((current: Panel) => Panel)) => {
+    // A user navigation wins over a saved routine still waiting for its list.
+    pendingPanelRestore.current = null;
+    pendingExplicitPanel.current = panelStorageKeyRef.current === null;
+    setRestoredPanelKey(panelStorageKeyRef.current);
+    setPanelState(next);
+    const currentSearch = panelSearch.current;
+    if (currentSearch.searchParams.has("routine")) {
+      const params = new URLSearchParams(currentSearch.searchParams);
+      params.delete("routine");
+      currentSearch.setSearchParams(params, { replace: true });
+    }
+  }, []);
   const [peerConversation, setPeerConversation] = useState<{
     peerBotId: string;
     peerBotName: string;
@@ -414,8 +518,12 @@ export function ShellPage() {
 
   function commitSnapshot(next: ThreadSnapshot | null) {
     snapshotRef.current = next;
-    setSnapshot(next);
+    setSnapshot(withLiveStreamingProgress(next, streamResponsesRef.current));
   }
+
+  useEffect(() => {
+    setSnapshot(withLiveStreamingProgress(snapshotRef.current, streamResponses));
+  }, [streamResponses]);
 
   function commitComputer(next: ComputerStatus | null) {
     computerRef.current = next;
@@ -436,7 +544,7 @@ export function ShellPage() {
     SpaceMemoryConfig | null | undefined
   >(undefined);
   const memoryProviderConfigRevision = useRef(0);
-  const [callOpen, setCallOpen] = useState(false);
+  const call = useCallSession();
   const [voiceStatus, setVoiceStatus] = useState<VoiceStatus | null>(null);
   const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
   const [dismissedRunErrorIds, setDismissedRunErrorIds] =
@@ -534,6 +642,11 @@ export function ShellPage() {
   const [routineError, setRoutineError] = useState<string | null>(null);
   const [screenUrl, setScreenUrl] = useState<string | null>(null);
   const [computerOpen, setComputerOpen] = useState(false);
+  const [computerBotId, setComputerBotId] = useState<string | undefined>();
+  const computerOpenRef = useRef(false);
+  const computerBotIdRef = useRef<string | undefined>(undefined);
+  const computerBootEpoch = useRef(0);
+  const openComputerRef = useRef<(botId?: string) => Promise<boolean>>(async () => false);
   const [computerViewport, setComputerViewport] = useState<{
     height: number;
     offsetTop: number;
@@ -599,6 +712,11 @@ export function ShellPage() {
   const expandedHistoryThread = useRef<string | null>(null);
   const historyEpoch = useRef(0);
   const jumpGeneration = useRef(0);
+  const [scrollRequest, setScrollRequest] = useState<{
+    messageId: string;
+    nonce: number;
+  } | null>(null);
+  const clearScrollRequest = useCallback(() => setScrollRequest(null), []);
   const initiallyScrolledThread = useRef<string | null>(null);
   const messageScroll = useRef<HTMLDivElement>(null);
   const pinnedAroundRef = useRef<{
@@ -620,12 +738,22 @@ export function ShellPage() {
 
   const inGroup = Boolean(groupId);
   const active = inGroup ? undefined : (bots.find((b) => b.id === botId) ?? bots[0]);
+  const computerBot =
+    (computerBotId ? bots.find((bot) => bot.id === computerBotId) : undefined) ?? active;
+  computerOpenRef.current = computerOpen;
+  computerBotIdRef.current = computerBotId ?? active?.id;
   const activeGroup = groups.find((group) => group.id === groupId);
   const activePendingAttachments = useMemo(
     () => attachmentsForThread(pendingAttachments, inGroup ? groupId : active?.id),
     [active?.id, groupId, inGroup, pendingAttachments],
   );
   const activeRoutines = !inGroup && routinesBotId === active?.id ? routines : [];
+  const panelTarget = inGroup ? activeGroup?.id : active?.id;
+  const panelStorageKey =
+    userId && bootstrapMe?.spaceId && panelTarget
+      ? rightPanelStorageKey(userId, bootstrapMe.spaceId, inGroup ? "group" : "bot", panelTarget)
+      : null;
+  panelStorageKeyRef.current = panelStorageKey;
   const activeTaughtSkills = taughtSkillsBotId === active?.id ? taughtSkills : [];
   const recordingSkill = activeTaughtSkills.find((skill) => skill.status === "recording") ?? null;
   const routeBotId = useRef<string | undefined>(botId);
@@ -846,7 +974,7 @@ export function ShellPage() {
       expandedHistoryThread.current === snap.threadId,
     );
     commitSnapshot(reconciled.snapshot);
-    commitComputer(null);
+    if (!computerOpenRef.current) commitComputer(null);
     setRoutines([]);
     setRoutinesBotId(null);
     // Keep the search-jump viewport; expandedHistoryThread merge still accepts live messages.
@@ -923,7 +1051,9 @@ export function ShellPage() {
     return loadComputerScreen({
       load: () => rpc.computer.screenUrl({ botId: id }),
       isCurrent: () =>
-        request === screenRequest.current && activeBotId.current === id && computerVisible.current,
+        request === screenRequest.current &&
+        (activeBotId.current === id || computerBotIdRef.current === id) &&
+        computerVisible.current,
       commit: (screen) => {
         setScreenUrl(screen.url);
         setComputerError(screen.error);
@@ -1110,7 +1240,7 @@ export function ShellPage() {
       autoSpoken.current = lastBot?.id ?? null;
       return;
     }
-    if (callOpen || !active.autoSpeak) {
+    if (call?.botId === active.id || !active.autoSpeak) {
       autoSpoken.current = lastBot?.id ?? null;
       return;
     }
@@ -1126,7 +1256,7 @@ export function ShellPage() {
     snapshot?.botId,
     active?.autoSpeak,
     active?.id,
-    callOpen,
+    call?.botId,
   ]);
 
   useEffect(() => {
@@ -1216,6 +1346,7 @@ export function ShellPage() {
         } else if (
           event.type === "bot.spawned" ||
           event.type === "bot.deleted" ||
+          event.type === "bot.updated" ||
           event.type === "run.started" ||
           isRunTerminalEvent(event) ||
           event.type === "thread.cleared"
@@ -1294,7 +1425,16 @@ export function ShellPage() {
       currentSnapshot: () => snapshotRef.current,
       subscribe: (cursor) => rpc.threads.subscribe({ groupId, cursor }, { signal: abort.signal }),
       applyEvent: (event) =>
-        applyThreadEvent(event, commitSnapshot, commitComputer, snapshotRef, computerRef),
+        applyThreadEvent(
+          event,
+          commitSnapshot,
+          (next) => {
+            if (isComputerStatusEvent(event) && event.botId !== computerBotIdRef.current) return;
+            commitComputer(next);
+          },
+          snapshotRef,
+          computerRef,
+        ),
       onEvent: (event, initial) => {
         const eventBot = botsRef.current.find((bot) => bot.id === event.botId);
         notifyBrowserForEvent(
@@ -1310,7 +1450,11 @@ export function ShellPage() {
           readVisibleGroups.current.delete(groupId);
           markVisibleGroupRead();
         }
-        if (event.type === "run.started" || isRunTerminalEvent(event)) {
+        if (
+          event.type === "run.started" ||
+          event.type === "bot.updated" ||
+          isRunTerminalEvent(event)
+        ) {
           void refreshBots().catch(() => undefined);
         }
         if (isRunTerminalEvent(event) || event.type === "run.waiting_input") {
@@ -1359,7 +1503,13 @@ export function ShellPage() {
         [
           ...visibleBots.map((chat) => ({ kind: "bot" as const, chat })),
           ...visibleGroups.map((chat) => ({ kind: "group" as const, chat })),
-        ].map((item) => ({ ...item, pinned: item.chat.pinned, sectionId: item.chat.sectionId })),
+        ].map((item) => ({
+          ...item,
+          id: item.chat.id,
+          parentBotId: item.kind === "bot" ? item.chat.parentBotId : null,
+          pinned: item.chat.pinned,
+          sectionId: item.chat.sectionId,
+        })),
         space.botSections,
       ).map((group, index) => ({
         ...group,
@@ -1457,20 +1607,17 @@ export function ShellPage() {
   );
   const toggleSidebarSection = useCallback(
     (key: string) => {
-      setCollapsedSidebarSections((previous) => {
-        const next = new Set(previous);
-        if (next.has(key)) next.delete(key);
-        else next.add(key);
-        const storageKey = collapsedSidebarSectionsStorageKey(userId);
-        if (storageKey) {
-          try {
-            window.localStorage.setItem(storageKey, JSON.stringify([...next]));
-          } catch {
-            // Keep the UI usable when storage is unavailable.
-          }
-        }
-        return next;
-      });
+      setCollapsedSidebarSections((previous) =>
+        toggleCollapsedIdSet(previous, key, collapsedSidebarSectionsStorageKey(userId)),
+      );
+    },
+    [userId],
+  );
+  const toggleRosterParent = useCallback(
+    (botId: string) => {
+      setCollapsedRosterParents((previous) =>
+        toggleCollapsedIdSet(previous, botId, collapsedRosterParentsStorageKey(userId)),
+      );
     },
     [userId],
   );
@@ -1567,21 +1714,30 @@ export function ShellPage() {
       setRoutines([]);
       setRoutinesBotId(null);
     }
-    window.requestAnimationFrame(() => {
-      if (epoch !== historyEpoch.current || jumpId !== jumpGeneration.current) return;
-      if (!targetInPage) {
+    if (targetInPage) {
+      // The transcript owns the scroll: it retries until the pinned row is
+      // mounted and unfollows the tail, so live commits cannot cancel it.
+      setScrollRequest({ messageId: target.messageId, nonce: jumpId });
+    } else {
+      window.requestAnimationFrame(() => {
+        if (epoch !== historyEpoch.current || jumpId !== jumpGeneration.current) return;
         const element = messageScroll.current;
         if (element) {
           element.scrollTop = element.scrollHeight;
           initiallyScrolledThread.current = page.threadId;
         }
-        return;
-      }
-      document
-        .querySelector(`[data-message-id="${target.messageId}"]`)
-        ?.scrollIntoView({ behavior: "smooth", block: "center" });
-    });
+      });
+    }
   }
+
+  // The routine panel copies a routine's data into local draft state at click time
+  // rather than deriving it from `active`, so it goes stale across a bot switch —
+  // without this, Save on bot B could silently update bot A's routine.
+  useEffect(() => {
+    setEditingRoutine(null);
+    setDeleteRoutineTarget(null);
+    setPanelState((current) => (current === "routine" ? null : current));
+  }, [active?.id]);
 
   useEffect(() => {
     const messageId = searchParams.get("m");
@@ -1625,10 +1781,15 @@ export function ShellPage() {
     : snapshot?.botId === active?.id
       ? snapshot
       : null;
-  const activeReplyTarget =
-    replyTarget && activeSnapshot?.messages.some((message) => message.id === replyTarget.id)
-      ? replyTarget
-      : null;
+  // Keep the armed reply even when its parent leaves the loaded page: the
+  // server resolves a paged-out target and degrades a deleted one to a plain
+  // reply instead of failing the send.
+  const activeReplyTarget = replyTarget;
+  const activeReplyQuote = replyTarget ? replyQuote : null;
+  const clearReply = useCallback(() => {
+    setReplyTarget(null);
+    setReplyQuote(null);
+  }, []);
   const currentRuns = activeThreadRuns(activeSnapshot);
   const answerableAskMessageId = latestAnswerableAskMessageId(activeSnapshot);
   const workingRuns = currentRuns.filter((run) =>
@@ -1823,7 +1984,7 @@ export function ShellPage() {
     if (existing) {
       // Cancel any in-flight around-fetch so it cannot overwrite this scroll.
       jumpGeneration.current += 1;
-      existing.scrollIntoView({ behavior: "smooth", block: "center" });
+      setScrollRequest({ messageId, nonce: jumpGeneration.current });
       return;
     }
     const groupId = activeGroupId.current;
@@ -1834,22 +1995,26 @@ export function ShellPage() {
     const botId = activeBotId.current;
     if (botId) void jumpToMessageRef.current({ botId, messageId });
   }, []);
-  const answerMessage = useCallback(async (message: ThreadMessage, text: string) => {
-    const botId = activeBotId.current;
-    const groupId = activeGroupId.current;
-    if (!botId && !groupId) return;
-    await rpc.threads.answer({
-      ...(groupId ? { groupId } : { botId: botId! }),
-      runId: message.runId ?? "",
-      messageId: message.id,
-      answer: text,
-    });
-    if (groupId && activeGroupId.current === groupId) {
-      await refreshGroupThreadRef.current(groupId);
-    } else if (botId && activeBotId.current === botId) {
-      await refreshThreadRef.current(botId);
-    }
-  }, []);
+  const answerMessage = useCallback(
+    async (message: ThreadMessage, text: string, username?: string) => {
+      const botId = activeBotId.current;
+      const groupId = activeGroupId.current;
+      if (!botId && !groupId) return;
+      await rpc.threads.answer({
+        ...(groupId ? { groupId } : { botId: botId! }),
+        runId: message.runId ?? "",
+        messageId: message.id,
+        answer: text,
+        ...(username ? { username } : {}),
+      });
+      if (groupId && activeGroupId.current === groupId) {
+        await refreshGroupThreadRef.current(groupId);
+      } else if (botId && activeBotId.current === botId) {
+        await refreshThreadRef.current(botId);
+      }
+    },
+    [],
+  );
   const reactToMessage = useCallback(
     async (message: ThreadMessage, reaction: MessageReaction) => {
       const botId = activeBotId.current;
@@ -1936,6 +2101,7 @@ export function ShellPage() {
         if (permissionRequest) void permissionRequest.then(flushPendingBrowserNotifications);
       }
       const trimmed = plan.trimmed;
+      sendingRef.current = true;
       setSending(true);
       setSendError(null);
       const dropDelayedSetup = () => {
@@ -1958,7 +2124,7 @@ export function ShellPage() {
         }
         if (!plan.shouldSend) {
           dropDelayedSetup();
-          setReplyTarget(null);
+          clearReply();
           revokePendingAttachmentPreviews(attachments);
           setPendingAttachments((current) =>
             current.filter((attachment) => attachment.threadKey !== originThreadKey),
@@ -1998,6 +2164,7 @@ export function ShellPage() {
             mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
             artifactIds: artifactIds.length ? artifactIds : undefined,
             replyToMessageId: reroutedToGroup ? undefined : activeReplyTarget?.id,
+            replyQuote: reroutedToGroup ? undefined : (activeReplyQuote ?? undefined),
           });
         } else if (botTarget) {
           const sent = await rpc.threads.send({
@@ -2007,6 +2174,7 @@ export function ShellPage() {
             mentions: plan.mentionPayload.length ? plan.mentionPayload : undefined,
             artifactIds: artifactIds.length ? artifactIds : undefined,
             replyToMessageId: activeReplyTarget?.id,
+            replyQuote: activeReplyQuote ?? undefined,
           });
           if (activeBotId.current === botTarget) {
             updateSnapshot((current) =>
@@ -2023,7 +2191,7 @@ export function ShellPage() {
           }
         }
         dropDelayedSetup();
-        setReplyTarget(null);
+        clearReply();
         revokePendingAttachmentPreviews(attachments);
         setPendingAttachments((current) =>
           current.filter((attachment) => attachment.threadKey !== originThreadKey),
@@ -2036,8 +2204,8 @@ export function ShellPage() {
         }
         if (groupTarget && activeGroupId.current === groupTarget) setAttachmentNotice(null);
         if (botTarget && activeBotId.current === botTarget) setAttachmentNotice(null);
-        if (groupTarget) await refreshGroupThreadRef.current(groupTarget);
-        else if (botTarget) await refreshThreadRef.current(botTarget);
+        if (groupTarget) void refreshGroupThreadRef.current(groupTarget).catch(() => undefined);
+        else if (botTarget) void refreshThreadRef.current(botTarget).catch(() => undefined);
       } catch (error) {
         if (reroutedToGroup && groupTarget) {
           setSendError(error instanceof Error ? error.message : t`Failed to send message`);
@@ -2047,11 +2215,14 @@ export function ShellPage() {
           setSendError(error instanceof Error ? error.message : t`Failed to send message`);
         }
       } finally {
+        sendingRef.current = false;
         setSending(false);
       }
     },
     [
       activeReplyTarget?.id,
+      activeReplyQuote,
+      clearReply,
       flushPendingBrowserNotifications,
       navigate,
       pendingAttachments,
@@ -2059,14 +2230,9 @@ export function ShellPage() {
       t,
     ],
   );
-  const followUpMessage = useCallback(async (text: string) => {
-    const id = activeBotId.current;
-    if (!id) return;
-    await rpc.threads.followUp({ botId: id, text });
-    await refreshThreadRef.current(id);
-  }, []);
   const stopRun = useCallback(async () => {
     if (sending) return;
+    sendingRef.current = true;
     setSending(true);
     try {
       const botTarget = activeBotId.current;
@@ -2081,7 +2247,7 @@ export function ShellPage() {
           }
           return;
         }
-        // Stop has no terminal event; clear run UI before refresh races with in-flight gets.
+        // Clear run UI ahead of the run.cancelled event so refresh races with in-flight gets.
         if (activeGroupId.current === groupTarget) {
           updateSnapshot((prev) =>
             prev && prev.groupId === groupTarget ? clearActiveThreadRuns(prev) : prev,
@@ -2100,7 +2266,7 @@ export function ShellPage() {
         }
         return;
       }
-      // Stop does not emit a terminal thread event. Clear local run/busy immediately so a
+      // Clear local run/busy immediately rather than waiting for run.cancelled so a
       // superseded in-flight refresh (older cursor) cannot leave Stop enabled / Take control
       // blocked while the API is already idle.
       if (activeBotId.current === botTarget) {
@@ -2114,6 +2280,7 @@ export function ShellPage() {
       }
       await refreshThreadRef.current(botTarget).catch(() => undefined);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }, [sending, t]);
@@ -2239,6 +2406,7 @@ export function ShellPage() {
     void scheduleFocusPrompt({
       immediate: isFirstBot,
       signal: controller.signal,
+      shouldSkip: () => sendingRef.current,
       prompt: async () => {
         if (focusPromptBotIdRef.current !== bot.id || activeBotId.current !== bot.id) return;
         await rpc.onboarding.promptFocus({ botId: bot.id }).catch(() => undefined);
@@ -2253,30 +2421,60 @@ export function ShellPage() {
   }
 
   async function bootComputer({
+    botId: targetBotId,
     takeControl,
     overlay,
     force = false,
   }: {
+    botId: string;
     takeControl: boolean;
     overlay: boolean;
     force?: boolean;
   }) {
-    if (!active) return;
-    const needsBoot = force || computer?.state !== "running" || !screenUrl;
+    const epoch = ++computerBootEpoch.current;
+    const stillThisBoot = () => computerBootEpoch.current === epoch;
+    const stillThisBot = () =>
+      computerBotIdRef.current === targetBotId || activeBotId.current === targetBotId;
+    const cached = computerCacheRef.current.get(targetBotId);
+    const targetComputer = computer?.botId === targetBotId ? computer : (cached?.computer ?? null);
+    const targetScreen = computer?.botId === targetBotId ? screenUrl : (cached?.screenUrl ?? null);
+    const needsBoot = force || targetComputer?.state !== "running" || !targetScreen;
     if (overlay && needsBoot) setBooting(true);
     setComputerError(null);
     setComputerErrorFromScreen(false);
     try {
-      if (needsBoot) await rpc.computer.boot({ botId: active.id });
-      if (takeControl) await rpc.computer.takeover({ botId: active.id });
-      await refreshThread(active.id);
+      if (needsBoot) {
+        const status = await rpc.computer.boot({ botId: targetBotId });
+        if (!stillThisBoot() || !stillThisBot()) return;
+        commitComputer(status);
+        cacheComputerFor(targetBotId, { computer: status });
+      }
+      if (takeControl) {
+        await rpc.computer.takeover({ botId: targetBotId });
+        if (!stillThisBoot() || !stillThisBot()) return;
+      }
+      await refreshComputerFor(targetBotId);
     } catch (error) {
+      if (!stillThisBoot() || !stillThisBot()) return;
       setComputerError(error instanceof Error ? error.message : t`Could not take control`);
       setComputerErrorFromScreen(false);
       throw error;
     } finally {
-      setBooting(false);
+      if (stillThisBoot()) setBooting(false);
     }
+  }
+
+  async function refreshComputerFor(targetBotId: string) {
+    if (activeBotId.current === targetBotId) {
+      await refreshThread(targetBotId);
+      return;
+    }
+    if (computerBotIdRef.current !== targetBotId) return;
+    const status = await rpc.computer.status({ botId: targetBotId });
+    if (computerBotIdRef.current !== targetBotId) return;
+    commitComputer(status);
+    cacheComputerFor(targetBotId, { computer: status });
+    await refreshComputerScreen(targetBotId);
   }
 
   useEffect(() => {
@@ -2304,6 +2502,7 @@ export function ShellPage() {
       autoBooted.current = botId;
       if (!computerPanelAutoUsesBoot(action)) return;
       await bootComputer({
+        botId,
         takeControl: false,
         overlay: action === "boot",
         force: true,
@@ -2318,6 +2517,7 @@ export function ShellPage() {
     setComputerOpen(false);
     setComputerError(null);
     setComputerErrorFromScreen(false);
+    setComputerBotId(active?.id);
   }, [active?.id]);
 
   useEffect(() => {
@@ -2342,14 +2542,61 @@ export function ShellPage() {
     }
   }, [panel]);
 
-  // The routine panel copies a routine's data into local draft state at click time
-  // rather than deriving it from `active`, so it goes stale across a bot switch —
-  // without this, Save on bot B could silently update bot A's routine.
   useEffect(() => {
-    setEditingRoutine(null);
-    setDeleteRoutineTarget(null);
-    setPanel((current) => (current === "routine" ? null : current));
-  }, [active?.id]);
+    if (!panelStorageKey) return;
+    if (observedPanelKey.current !== panelStorageKey) {
+      observedPanelKey.current = panelStorageKey;
+      if (pendingExplicitPanel.current || explicitPanelTarget.current === panelStorageKey) {
+        pendingExplicitPanel.current = false;
+        explicitPanelTarget.current = null;
+        pendingPanelRestore.current = null;
+        setRestoredPanelKey(panelStorageKey);
+        return;
+      }
+      explicitPanelTarget.current = null;
+      // Reload starts with panel=null so storage restores. In-session chat switches used to
+      // keep computer/settings open; only routine was cleared (handled above). Carry is
+      // session-only — do not write the carried panel onto the destination's saved prefs.
+      if (panel === "computer" || panel === "settings" || panel === "group-settings") {
+        const carried = panel === "computer" ? "computer" : inGroup ? "group-settings" : "settings";
+        pendingPanelRestore.current = null;
+        if (carried !== panel) setPanelState(carried);
+        setRestoredPanelKey(null);
+        return;
+      }
+      pendingPanelRestore.current = readRightPanelState(panelStorageKey);
+    }
+    const saved = pendingPanelRestore.current;
+    if (!saved) return;
+    // Explicit routine links take precedence over a local layout preference.
+    if (searchParams.has("routine")) {
+      pendingPanelRestore.current = null;
+      return;
+    }
+    if (saved.panel === "routine" && saved.routineId && routinesBotId !== active?.id) return;
+    let next = saved.panel;
+    if (next === "routine") {
+      const routine = saved.routineId
+        ? routines.find((item) => item.id === saved.routineId)
+        : undefined;
+      if (saved.routineId && !routine) next = "computer";
+      setEditingRoutine(routine ?? null);
+      setRoutineDraft(routine ? draftFromRoutine(routine) : emptyRoutineDraft());
+      setRoutineWebhookSecret(null);
+    }
+    pendingPanelRestore.current = null;
+    setPanelState(next);
+    setRestoredPanelKey(panelStorageKey);
+  }, [panelStorageKey, active?.id, inGroup, panel, routinesBotId, routines, searchParams]);
+
+  useEffect(() => {
+    // Do not gate writes on ?routine= staying in the URL — a stuck/failed routine
+    // list would freeze layout prefs. Deep-link handling uses setPanelState for the
+    // bot-switch close so restoredPanelKey stays unset until an intentional setPanel.
+    if (!panelStorageKey || restoredPanelKey !== panelStorageKey || pendingPanelRestore.current)
+      return;
+    writeRightPanelState(panelStorageKey, panel, editingRoutine?.id);
+  }, [panelStorageKey, restoredPanelKey, panel, editingRoutine?.id]);
 
   useEffect(() => {
     const threadKey = inGroup ? groupId : active?.id;
@@ -2358,10 +2605,10 @@ export function ShellPage() {
       revokePendingAttachmentPreviews(stale);
       return attachmentsForThread(current, threadKey);
     });
-    setReplyTarget(null);
+    clearReply();
     setAttachmentNotice(null);
     setSendError(null);
-  }, [active?.id, groupId, inGroup]);
+  }, [active?.id, clearReply, groupId, inGroup]);
 
   useEffect(() => {
     if (!computerOpen) return;
@@ -2383,40 +2630,69 @@ export function ShellPage() {
   }, []);
 
   useEffect(() => {
-    if ((panel !== "computer" && !computerOpen) || !active || computer?.state !== "running") return;
-    const ping = () => void rpc.computer.heartbeat({ botId: active.id }).catch(() => undefined);
+    const heartbeatBotId = computerBot?.id ?? active?.id;
+    if ((panel !== "computer" && !computerOpen) || !heartbeatBotId || computer?.state !== "running")
+      return;
+    const ping = () =>
+      void rpc.computer.heartbeat({ botId: heartbeatBotId }).catch(() => undefined);
     ping();
     const timer = window.setInterval(ping, 60_000);
     return () => window.clearInterval(timer);
-  }, [panel, computerOpen, active?.id, computer?.state]);
+  }, [panel, computerOpen, computerBot?.id, active?.id, computer?.state]);
 
-  async function openComputer() {
-    if (!active) return;
-    const needsTakeover = !userHoldsComputerControl(computer, active.id);
-    const blocked = computerTakeoverBlocked(computer, snapshot?.run?.status);
+  /** Open the computer view, taking control when possible. Resolves false if booting failed. */
+  async function openComputer(botId?: string) {
+    const id = botId ?? active?.id;
+    if (!id) return false;
+    const bot = botsRef.current.find((candidate) => candidate.id === id);
+    if (!bot) return false;
+    computerBotIdRef.current = id;
+    setComputerBotId(id);
+    const cached = computerCacheRef.current.get(id);
+    const targetComputer = computer?.botId === id ? computer : (cached?.computer ?? null);
+    const targetScreen = computer?.botId === id ? screenUrl : (cached?.screenUrl ?? null);
+    if (computer?.botId !== id) {
+      commitComputer(targetComputer);
+      setScreenUrl(targetScreen);
+    }
+    setComputerOpen(true);
+    computerVisible.current = true;
+    const needsTakeover = !userHoldsComputerControl(targetComputer, id);
+    const blocked = computerTakeoverBlocked(targetComputer, snapshot?.run?.status);
     try {
       await bootComputer({
+        botId: id,
         takeControl: needsTakeover && !blocked,
-        overlay: (needsTakeover && !blocked) || computer?.state !== "running",
-        force: computer?.state !== "running",
+        overlay: (needsTakeover && !blocked) || targetComputer?.state !== "running",
+        force: targetComputer?.state !== "running",
       });
-      setComputerOpen(true);
+      return true;
     } catch {
       // computerError already set in bootComputer
+      return false;
     }
   }
+  openComputerRef.current = openComputer;
+  const onOpenComputer = useCallback((botId?: string) => {
+    void openComputerRef.current(botId);
+  }, []);
 
   const releaseComputer = useCallback(
     async (reason?: ComputerReleaseReason) => {
-      const botId = activeBotId.current;
+      const botId = computerBotIdRef.current ?? activeBotId.current;
       if (!botId) return;
       try {
         await rpc.computer.release({ botId, reason });
-        if (activeBotId.current !== botId) return;
+        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
         setComputerOpen(false);
-        await refreshThreadRef.current(botId).catch(() => undefined);
+        const groupId = activeGroupId.current;
+        if (groupId) {
+          await refreshGroupThreadRef.current(groupId).catch(() => undefined);
+        } else {
+          await refreshThreadRef.current(botId).catch(() => undefined);
+        }
       } catch {
-        if (activeBotId.current !== botId) return;
+        if (computerBotIdRef.current !== botId && activeBotId.current !== botId) return;
         setComputerError(t`Could not continue`);
         setComputerErrorFromScreen(false);
       }
@@ -2436,7 +2712,7 @@ export function ShellPage() {
   }
 
   const embeddedScreenUrl = embeddableScreenUrl(screenUrl);
-  const hasControl = userHoldsComputerControl(computer, active?.id);
+  const hasControl = userHoldsComputerControl(computer, computerBot?.id);
   const hideScreenLoadError = computerErrorFromScreen && Boolean(embeddedScreenUrl);
   const computerScreenError =
     computerError && !hideScreenLoadError ? (
@@ -2445,7 +2721,7 @@ export function ShellPage() {
         <Button
           variant="outline"
           size="sm"
-          onClick={() => active && void refreshComputerScreen(active.id)}
+          onClick={() => computerBot && void refreshComputerScreen(computerBot.id)}
         >
           <Trans>Retry screen</Trans>
         </Button>
@@ -2629,7 +2905,7 @@ export function ShellPage() {
         </div>
         <InputGroup
           data-testid="sidebar-search"
-          className="mx-2.5 mb-3 w-auto rounded-xl bg-card dark:bg-input"
+          className="mx-2.5 mb-3 w-auto rounded-xl bg-card dark:bg-input border border-border text-muted-foreground focus-within:border-ring"
         >
           <InputGroupAddon>
             <Search size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -2665,13 +2941,23 @@ export function ShellPage() {
                 const groupBotIds = group.bots.flatMap((item) =>
                   item.kind === "bot" ? [item.chat.id] : [],
                 );
+                const nestedRows = nestRosterByParent(group.bots, collapsedRosterParents);
+                const treeActive = nestedRows.some((row) => row.depth > 0 || row.hasChildren);
+                const rosterParent = new Map(
+                  nestedRows.map((row) => [row.item.chat.id, row.parentId] as const),
+                );
+                // Reorder among visible siblings so keyboard and drag moves match the tree.
+                const siblingBotIds = (parentId: string | null) =>
+                  nestedRows.flatMap((row) =>
+                    row.item.kind === "bot" && row.parentId === parentId ? [row.item.chat.id] : [],
+                  );
                 return (
                   <div key={group.key} data-sidebar-group={group.key}>
                     {group.title ? (
-                      <div className="flex items-center pt-2">
+                      <div className="flex items-center pt-3 pb-0.5">
                         <button
                           type="button"
-                          className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium text-muted-foreground/80 hover:bg-sidebar-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
+                          className="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-lg px-2.5 py-1 text-[11px] font-semibold tracking-wider uppercase text-muted-foreground/60 hover:text-foreground focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-ring"
                           onClick={() => {
                             if (group.emptySpaceId) {
                               openSpaceChat(group.emptySpaceId, "/onboarding");
@@ -2760,166 +3046,208 @@ export function ShellPage() {
                       </div>
                     ) : null}
                     {!collapsed &&
-                      group.bots.map((item) => (
-                        <button
-                          key={`${item.kind}:${item.chat.id}`}
-                          type="button"
-                          draggable={item.kind === "bot"}
-                          data-roster-bot-id={item.kind === "bot" ? item.chat.id : undefined}
-                          aria-keyshortcuts={
-                            item.kind === "bot" ? "Alt+ArrowUp Alt+ArrowDown" : undefined
-                          }
-                          onDragStart={(event) => {
-                            if (item.kind !== "bot") return;
-                            setDraggedBotId(item.chat.id);
-                            event.dataTransfer.effectAllowed = "move";
-                            event.dataTransfer.setData("text/plain", item.chat.id);
-                          }}
-                          onDragOver={(event) => {
-                            if (
-                              item.kind === "bot" &&
-                              draggedBotId &&
-                              groupBotIds.includes(draggedBotId)
-                            ) {
-                              event.preventDefault();
-                              event.dataTransfer.dropEffect = "move";
-                            }
-                          }}
-                          onDrop={(event) => {
-                            if (item.kind !== "bot" || !draggedBotId) return;
-                            event.preventDefault();
-                            reorderRosterBot(draggedBotId, item.chat.id, groupBotIds);
-                            setDraggedBotId(null);
-                          }}
-                          onDragEnd={() => setDraggedBotId(null)}
-                          onKeyDown={(event) => {
-                            if (
-                              item.kind !== "bot" ||
-                              !event.altKey ||
-                              (event.key !== "ArrowUp" && event.key !== "ArrowDown")
-                            )
-                              return;
-                            const index = groupBotIds.indexOf(item.chat.id);
-                            const target = groupBotIds[index + (event.key === "ArrowUp" ? -1 : 1)];
-                            if (!target) return;
-                            event.preventDefault();
-                            reorderRosterBot(item.chat.id, target, groupBotIds);
-                          }}
-                          onClick={() => {
-                            openSpaceChat(
-                              item.chat.spaceId,
-                              item.kind === "bot"
-                                ? `/app/${item.chat.id}`
-                                : `/app/g/${item.chat.id}`,
-                            );
-                          }}
-                          onContextMenu={(event) => {
-                            if (item.chat.spaceId !== bootstrapMe?.spaceId) return;
-                            event.preventDefault();
-                            botMenuAnchor.current = event.currentTarget;
-                            setBotMenu({
-                              kind: item.kind,
-                              id: item.chat.id,
-                              position: { x: event.clientX, y: event.clientY },
-                            });
-                          }}
-                          className={`flex w-full gap-3 rounded-xl px-2.5 py-[11px] text-start ${
-                            item.kind === "bot" ? "cursor-grab active:cursor-grabbing" : ""
-                          } ${
-                            (item.kind === "bot" && !inGroup && active?.id === item.chat.id) ||
-                            (item.kind === "group" && inGroup && activeGroup?.id === item.chat.id)
-                              ? "bg-sidebar-accent"
-                              : "hover:bg-sidebar-accent"
-                          }`}
-                          style={{
-                            opacity:
-                              item.kind === "bot" && draggedBotId === item.chat.id ? 0.55 : 1,
-                          }}
-                        >
-                          {item.kind === "bot" ? (
-                            <BotAvatar
-                              color={item.chat.color}
-                              identity={item.chat.id}
-                              size={38}
-                              status={item.chat.status}
-                            />
-                          ) : (
-                            <GroupAvatar
-                              members={
-                                item.chat.id === activeSnapshot?.groupId
-                                  ? (activeSnapshot.members ?? item.chat.members)
-                                  : item.chat.members
-                              }
-                              size={38}
-                            />
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-baseline justify-between gap-2">
+                      nestedRows.map(({ item, depth, hasChildren, parentId }) => {
+                        const parentCollapsed =
+                          hasChildren && collapsedRosterParents.has(item.chat.id);
+                        const selected =
+                          (item.kind === "bot" && !inGroup && active?.id === item.chat.id) ||
+                          (item.kind === "group" && inGroup && activeGroup?.id === item.chat.id);
+                        const workStatusLabel =
+                          item.kind === "bot" ? rosterWorkStatusLabel(item.chat.status) : null;
+                        const rosterLine =
+                          workStatusLabel ??
+                          (item.kind === "bot"
+                            ? item.chat.preview ||
+                              (item.chat.status !== "idle" ? item.chat.status : "")
+                            : item.chat.preview ||
+                              item.chat.members.map((member) => member.name).join(", "));
+                        return (
+                          <div
+                            key={`${item.kind}:${item.chat.id}`}
+                            className="group/row relative"
+                            style={{
+                              opacity:
+                                item.kind === "bot" && draggedBotId === item.chat.id ? 0.55 : 1,
+                            }}
+                          >
+                            {hasChildren ? (
                               <span
-                                dir="auto"
-                                data-roster-bot-name={item.kind === "bot" ? "" : undefined}
-                                className={`truncate text-[15px] text-foreground ${
-                                  item.chat.unread ? "font-semibold" : "font-medium"
-                                }`}
+                                className="absolute inset-y-0 z-10 flex w-3.5 items-center justify-center"
+                                style={{ insetInlineStart: `${10 + depth * 14}px` }}
                               >
-                                {item.chat.name}
-                                {item.chat.unread ? (
-                                  <span className="sr-only">
-                                    <Trans> (unread)</Trans>
-                                  </span>
-                                ) : null}
-                              </span>
-                              <span className="flex shrink-0 items-center gap-1.5 text-[12.5px] text-muted-foreground/80">
-                                {item.kind === "bot" && item.chat.status !== "idle"
-                                  ? item.chat.status
-                                  : ""}
-                                {item.chat.unread ? (
-                                  <span
-                                    aria-hidden="true"
-                                    className="inline-block h-2 w-2 rounded-full bg-foreground"
-                                  />
-                                ) : null}
-                              </span>
-                            </div>
-                            {item.kind === "bot" && item.chat.title ? (
-                              <>
-                                <div
-                                  dir="auto"
-                                  className={`mt-0.5 truncate text-[13.5px] ${
-                                    item.chat.unread
-                                      ? "font-medium text-foreground/75"
-                                      : "text-muted-foreground"
-                                  }`}
+                                <button
+                                  type="button"
+                                  aria-expanded={!parentCollapsed}
+                                  aria-label={
+                                    parentCollapsed
+                                      ? t`Expand ${item.chat.name}`
+                                      : t`Collapse ${item.chat.name}`
+                                  }
+                                  className="inline-flex size-3.5 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                                  onClick={() => toggleRosterParent(item.chat.id)}
                                 >
-                                  {item.chat.title}
+                                  <ChevronDown
+                                    size={12}
+                                    strokeWidth={2}
+                                    className={`transition-transform ${
+                                      parentCollapsed ? "-rotate-90" : ""
+                                    }`}
+                                    aria-hidden="true"
+                                  />
+                                </button>
+                              </span>
+                            ) : null}
+                            <button
+                              type="button"
+                              draggable={item.kind === "bot"}
+                              data-roster-bot-id={item.kind === "bot" ? item.chat.id : undefined}
+                              data-roster-depth={
+                                item.kind === "bot" && treeActive ? depth : undefined
+                              }
+                              aria-keyshortcuts={
+                                item.kind === "bot" ? "Alt+ArrowUp Alt+ArrowDown" : undefined
+                              }
+                              onDragStart={(event) => {
+                                if (item.kind !== "bot") return;
+                                setDraggedBotId(item.chat.id);
+                                event.dataTransfer.effectAllowed = "move";
+                                event.dataTransfer.setData("text/plain", item.chat.id);
+                              }}
+                              onDragOver={(event) => {
+                                if (
+                                  item.kind === "bot" &&
+                                  draggedBotId &&
+                                  groupBotIds.includes(draggedBotId) &&
+                                  rosterParent.get(draggedBotId) === parentId
+                                ) {
+                                  event.preventDefault();
+                                  event.dataTransfer.dropEffect = "move";
+                                }
+                              }}
+                              onDrop={(event) => {
+                                if (
+                                  item.kind !== "bot" ||
+                                  !draggedBotId ||
+                                  rosterParent.get(draggedBotId) !== parentId
+                                )
+                                  return;
+                                event.preventDefault();
+                                reorderRosterBot(draggedBotId, item.chat.id, groupBotIds);
+                                setDraggedBotId(null);
+                              }}
+                              onDragEnd={() => setDraggedBotId(null)}
+                              onKeyDown={(event) => {
+                                if (
+                                  item.kind !== "bot" ||
+                                  !event.altKey ||
+                                  (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+                                )
+                                  return;
+                                const siblings = siblingBotIds(parentId);
+                                const index = siblings.indexOf(item.chat.id);
+                                const target = siblings[index + (event.key === "ArrowUp" ? -1 : 1)];
+                                if (!target) return;
+                                event.preventDefault();
+                                reorderRosterBot(item.chat.id, target, groupBotIds);
+                              }}
+                              onClick={() => {
+                                openSpaceChat(
+                                  item.chat.spaceId,
+                                  item.kind === "bot"
+                                    ? `/app/${item.chat.id}`
+                                    : `/app/g/${item.chat.id}`,
+                                );
+                              }}
+                              onContextMenu={(event) => {
+                                if (item.chat.spaceId !== bootstrapMe?.spaceId) return;
+                                event.preventDefault();
+                                botMenuAnchor.current = event.currentTarget;
+                                setBotMenu({
+                                  kind: item.kind,
+                                  id: item.chat.id,
+                                  position: { x: event.clientX, y: event.clientY },
+                                });
+                              }}
+                              className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-[10px] text-start ${
+                                item.kind === "bot" ? "cursor-grab active:cursor-grabbing" : ""
+                              } ${
+                                selected ? "bg-sidebar-accent" : "group-hover/row:bg-sidebar-accent"
+                              }`}
+                              style={
+                                treeActive
+                                  ? { paddingInlineStart: `${24 + depth * 14}px` }
+                                  : undefined
+                              }
+                            >
+                              {item.kind === "bot" ? (
+                                <BotAvatar
+                                  color={item.chat.color}
+                                  identity={item.chat.id}
+                                  size={38}
+                                  status={item.chat.status}
+                                />
+                              ) : (
+                                <GroupAvatar
+                                  members={
+                                    item.chat.id === activeSnapshot?.groupId
+                                      ? (activeSnapshot.members ?? item.chat.members)
+                                      : item.chat.members
+                                  }
+                                  size={38}
+                                />
+                              )}
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center justify-between gap-1.5">
+                                  <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+                                    <span
+                                      dir="auto"
+                                      data-roster-bot-name={item.kind === "bot" ? "" : undefined}
+                                      className={`min-w-0 truncate text-[14px] text-foreground ${
+                                        item.chat.unread ? "font-semibold" : "font-medium"
+                                      }`}
+                                    >
+                                      {item.chat.name}
+                                    </span>
+                                    {item.chat.unread ? (
+                                      <span className="sr-only">
+                                        <Trans> (unread)</Trans>
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div className="flex shrink-0 items-center gap-1.5">
+                                    <span className="text-[11.5px] text-muted-foreground/60 tabular-nums">
+                                      {formatRosterTime(item.chat.updatedAt)}
+                                    </span>
+                                    {item.chat.unread ? (
+                                      <span
+                                        aria-hidden="true"
+                                        className="inline-block h-2 w-2 rounded-full bg-foreground"
+                                      />
+                                    ) : null}
+                                  </div>
                                 </div>
-                                {item.chat.preview ? (
-                                  <div
-                                    dir="auto"
-                                    className="truncate text-[12.5px] text-muted-foreground/80"
-                                  >
-                                    {item.chat.preview}
+                                {item.kind === "bot" && item.chat.title ? (
+                                  <div className="mt-1 flex">
+                                    <span className="max-w-full truncate rounded-md border border-border bg-muted px-2 py-0.5 text-[11px] font-normal text-muted-foreground">
+                                      {item.chat.title}
+                                    </span>
                                   </div>
                                 ) : null}
-                              </>
-                            ) : (
-                              <div
-                                dir="auto"
-                                className={`mt-0.5 truncate text-[13.5px] ${
-                                  item.chat.unread
-                                    ? "font-medium text-foreground/75"
-                                    : "text-muted-foreground"
-                                }`}
-                              >
-                                {item.kind === "bot"
-                                  ? item.chat.preview
-                                  : item.chat.preview ||
-                                    item.chat.members.map((member) => member.name).join(", ")}
+                                <div
+                                  dir="auto"
+                                  className={`mt-1 line-clamp-2 text-[12.5px] break-words whitespace-normal ${
+                                    workStatusLabel || item.chat.unread
+                                      ? "font-medium text-foreground/75"
+                                      : "text-muted-foreground/60"
+                                  }`}
+                                >
+                                  {rosterLine}
+                                </div>
                               </div>
-                            )}
+                            </button>
                           </div>
-                        </button>
-                      ))}
+                        );
+                      })}
                   </div>
                 );
               })}
@@ -3013,12 +3341,12 @@ export function ShellPage() {
         <button
           type="button"
           onClick={() => setPluginsOpen(true)}
-          className="mx-3 mb-1 flex items-center gap-3 rounded-[11px] px-2.5 py-2 hover:bg-sidebar-accent"
+          className="mx-3 mb-1 flex items-center gap-3 rounded-xl px-2.5 py-2 hover:bg-sidebar-accent"
         >
-          <span className="grid h-[30px] w-[30px] place-items-center rounded-full bg-muted text-foreground/75">
-            <Puzzle size={15} strokeWidth={1.7} />
+          <span className="grid h-[30px] w-[30px] place-items-center rounded-lg bg-accent text-foreground/80">
+            <LayoutGrid size={15} strokeWidth={1.8} />
           </span>
-          <span className="text-[14.5px] text-foreground/90">
+          <span className="text-[14px] font-medium text-foreground/90">
             <Trans>Integrations</Trans>
           </span>
         </button>
@@ -3038,6 +3366,18 @@ export function ShellPage() {
               align="start"
               className="w-[calc(316px-1.5rem)] max-w-[calc(100vw-3rem)] gap-0 p-1 data-closed:animate-none"
             >
+              <Button
+                variant="ghost"
+                className="w-full justify-start font-normal"
+                onClick={() => {
+                  setMenuOpen(false);
+                  setMobileSidebarOpen(false);
+                  navigate("/app/artifacts");
+                }}
+              >
+                <FolderOpen className="text-muted-foreground" strokeWidth={1.75} />
+                <Trans>Artifacts</Trans>
+              </Button>
               <Button
                 variant="ghost"
                 className="w-full justify-start font-normal"
@@ -3084,48 +3424,51 @@ export function ShellPage() {
         </Popover>
       </aside>
 
-      <button
-        type="button"
-        data-testid="bots-sidebar-edge"
-        aria-label={botsSidebarCollapsed ? t`Show bots` : t`Hide bots`}
-        aria-pressed={!botsSidebarCollapsed}
-        className={`absolute inset-y-0 z-50 hidden w-2 cursor-ew-resize touch-none border-0 bg-transparent p-0 md:block ${
-          botsSidebarCollapsed ? "start-0" : "start-[308px]"
-        }`}
-        onPointerDown={(event) => {
-          event.currentTarget.setPointerCapture(event.pointerId);
-          botsSidebarEdgeDragRef.current = {
-            startX: event.clientX,
-            mode: botsSidebarCollapsed ? "expand" : "collapse",
-          };
-        }}
-        onPointerMove={(event) => {
-          const drag = botsSidebarEdgeDragRef.current;
-          if (!drag) return;
-          const rtl =
-            typeof document !== "undefined" &&
-            document.documentElement.getAttribute("dir") === "rtl";
-          const delta = rtl ? drag.startX - event.clientX : event.clientX - drag.startX;
-          if (drag.mode === "expand" && delta >= BOTS_SIDEBAR_EDGE_DRAG_PX) {
+      {/* The full-screen computer covers the sidebar, so its edge must not catch clicks there. */}
+      {computerOpen || booting ? null : (
+        <button
+          type="button"
+          data-testid="bots-sidebar-edge"
+          aria-label={botsSidebarCollapsed ? t`Show bots` : t`Hide bots`}
+          aria-pressed={!botsSidebarCollapsed}
+          className={`absolute inset-y-0 z-50 hidden w-2 cursor-ew-resize touch-none border-0 bg-transparent p-0 md:block ${
+            botsSidebarCollapsed ? "start-0" : "start-[308px]"
+          }`}
+          onPointerDown={(event) => {
+            event.currentTarget.setPointerCapture(event.pointerId);
+            botsSidebarEdgeDragRef.current = {
+              startX: event.clientX,
+              mode: botsSidebarCollapsed ? "expand" : "collapse",
+            };
+          }}
+          onPointerMove={(event) => {
+            const drag = botsSidebarEdgeDragRef.current;
+            if (!drag) return;
+            const rtl =
+              typeof document !== "undefined" &&
+              document.documentElement.getAttribute("dir") === "rtl";
+            const delta = rtl ? drag.startX - event.clientX : event.clientX - drag.startX;
+            if (drag.mode === "expand" && delta >= BOTS_SIDEBAR_EDGE_DRAG_PX) {
+              botsSidebarEdgeDragRef.current = null;
+              setBotsSidebarCollapsedPref(false);
+            } else if (drag.mode === "collapse" && delta <= -BOTS_SIDEBAR_EDGE_DRAG_PX) {
+              botsSidebarEdgeDragRef.current = null;
+              setBotsSidebarCollapsedPref(true);
+            }
+          }}
+          onPointerUp={(event) => {
+            const drag = botsSidebarEdgeDragRef.current;
             botsSidebarEdgeDragRef.current = null;
-            setBotsSidebarCollapsedPref(false);
-          } else if (drag.mode === "collapse" && delta <= -BOTS_SIDEBAR_EDGE_DRAG_PX) {
+            if (!drag) return;
+            if (Math.abs(event.clientX - drag.startX) < BOTS_SIDEBAR_EDGE_DRAG_PX) {
+              setBotsSidebarCollapsedPref(!botsSidebarCollapsed);
+            }
+          }}
+          onPointerCancel={() => {
             botsSidebarEdgeDragRef.current = null;
-            setBotsSidebarCollapsedPref(true);
-          }
-        }}
-        onPointerUp={(event) => {
-          const drag = botsSidebarEdgeDragRef.current;
-          botsSidebarEdgeDragRef.current = null;
-          if (!drag) return;
-          if (Math.abs(event.clientX - drag.startX) < BOTS_SIDEBAR_EDGE_DRAG_PX) {
-            setBotsSidebarCollapsedPref(!botsSidebarCollapsed);
-          }
-        }}
-        onPointerCancel={() => {
-          botsSidebarEdgeDragRef.current = null;
-        }}
-      />
+          }}
+        />
+      )}
 
       <main
         aria-hidden={mobileSidebarOpen || undefined}
@@ -3197,7 +3540,7 @@ export function ShellPage() {
                     void refreshThread(active.id).catch(() => undefined);
                   }
                 }}
-                data-active={panel ? "" : undefined}
+                data-active={panel === "computer" ? "" : undefined}
                 className="app-no-drag grid h-[30px] w-[34px] place-items-center rounded-[9px] hover:bg-accent data-active:bg-accent"
               >
                 <Monitor size={18} strokeWidth={1.6} className="text-foreground/75" />
@@ -3216,8 +3559,11 @@ export function ShellPage() {
           <Transcript
             key={activeSnapshot?.threadId}
             scrollRef={messageScroll}
+            scrollRequest={scrollRequest}
+            onScrollRequestHandled={clearScrollRequest}
             artifactTarget={transcriptArtifactTarget}
             messages={transcriptMessages}
+            showToolActivity={showToolActivity}
             olderCursor={activeSnapshot?.olderCursor ?? null}
             loadingOlder={loadingOlder}
             answerableAskMessageId={answerableAskMessageId}
@@ -3226,7 +3572,14 @@ export function ShellPage() {
             onLoadOlder={loadOlder}
             onOpenBot={openBot}
             onAnswer={answerMessage}
-            onReply={setReplyTarget}
+            onReply={(message) => {
+              setReplyTarget(message);
+              setReplyQuote(null);
+            }}
+            onQuote={(message, quote) => {
+              setReplyTarget(message);
+              setReplyQuote(quote);
+            }}
             onReact={reactToMessage}
             onJumpToMessage={jumpToReplyMessage}
             onOpenPeerMessages={(peer) => {
@@ -3240,6 +3593,7 @@ export function ShellPage() {
             voiceReady={Boolean(voiceStatus?.ready)}
             speakingMessageId={speakingMessageId}
             onSpeak={speakMessage}
+            onOpenComputer={onOpenComputer}
           />
         )}
         {recordingSkill ? (
@@ -3273,13 +3627,19 @@ export function ShellPage() {
                       openSettings("voice");
                       return;
                     }
-                    setCallOpen(true);
+                    startCall({
+                      botId: active.id,
+                      botName: active.name,
+                      botColor: active.color,
+                      transcribe: Boolean(voiceStatus?.transcribe),
+                    });
                   }
                 : undefined
             }
             replyTarget={activeReplyTarget}
+            replyQuote={activeReplyQuote}
             replyTargetName={replyTargetName}
-            onClearReply={() => setReplyTarget(null)}
+            onClearReply={clearReply}
             mentionTargets={composerMentionTargets}
             agentSkills={agentSkills}
             onSlashOpen={refreshAgentSkills}
@@ -3304,17 +3664,15 @@ export function ShellPage() {
         ) : null}
       </main>
 
-      <aside
-        data-testid="side-panel"
-        data-panel={panel ?? "closed"}
-        className={`absolute inset-y-0 end-0 z-20 flex min-h-0 shrink-0 flex-col overflow-hidden bg-background transition-[width] duration-150 ease-out md:relative ${
-          panel && (active || activeGroup || panel === "create")
-            ? "w-full max-w-[384px] border-s border-sidebar-border md:w-[384px] md:max-w-none"
-            : "pointer-events-none w-0"
-        }`}
+      <CallCard onSettings={() => openSettings("voice")} />
+
+      <ResizableSidePanel
+        botsSidebarCollapsed={botsSidebarCollapsed}
+        open={Boolean(panel && (active || activeGroup || panel === "create"))}
+        panel={panel ?? "closed"}
       >
         {panel && (active || activeGroup || panel === "create") ? (
-          <div className="rk-scroll h-full w-full overflow-y-auto px-5 py-[17px] md:w-[384px]">
+          <div className="rk-scroll h-full w-full overflow-y-auto px-5 py-[17px]">
             {panel !== "routine" &&
             panel !== "create" &&
             panel !== "create-group" &&
@@ -3675,7 +4033,7 @@ export function ShellPage() {
             ) : null}
           </div>
         ) : null}
-      </aside>
+      </ResizableSidePanel>
 
       <Suspense fallback={null}>
         {contextChat && botMenu ? (
@@ -3738,8 +4096,21 @@ export function ShellPage() {
               setBotMenu(null);
             }}
             onEdit={() => {
+              const destKey =
+                userId && bootstrapMe?.spaceId
+                  ? rightPanelStorageKey(
+                      userId,
+                      bootstrapMe.spaceId,
+                      contextBot ? "bot" : "group",
+                      contextChat.id,
+                    )
+                  : null;
+              explicitPanelTarget.current = destKey;
+              pendingPanelRestore.current = null;
               navigate(contextBot ? `/app/${contextBot.id}` : `/app/g/${contextGroup!.id}`);
-              setPanel(contextBot ? "settings" : "group-settings");
+              // Mark the destination key restored so we do not write settings onto the source chat.
+              setPanelState(contextBot ? "settings" : "group-settings");
+              setRestoredPanelKey(destKey);
               setBotMenu(null);
             }}
             onDuplicate={() => {
@@ -4061,7 +4432,7 @@ export function ShellPage() {
                   await Promise.race([rpc.voice.status(), voiceStatusRefreshTimeout()]),
                 );
               } catch {
-                // Prefer reopening Voice settings over CallView with stale readiness.
+                // Prefer reopening Voice settings over starting a call with stale readiness.
                 setVoiceStatus(null);
               }
             }}
@@ -4084,30 +4455,18 @@ export function ShellPage() {
             onClose={() => setPeerConversation(null)}
           />
         ) : null}
-        {callOpen && active ? (
-          <CallView
-            botId={active.id}
-            botName={active.name}
-            transcribe={Boolean(voiceStatus?.transcribe)}
-            snapshot={activeSnapshot}
-            onSend={sendMessage}
-            onFollowUp={followUpMessage}
-            onAnswer={answerMessage}
-            onClose={() => setCallOpen(false)}
-          />
-        ) : null}
       </Suspense>
 
       {booting ? (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-[22px] bg-background/95">
           <div className="text-[19px] font-medium text-foreground">
-            <Trans>Booting up {active?.name}’s computer</Trans>
+            <Trans>Booting up {computerBot?.name ?? active?.name}’s computer</Trans>
           </div>
           <div className="h-[5px] w-[min(420px,70%)] overflow-hidden rounded-full bg-accent">
             <div className="h-full w-2/3 rounded-full bg-primary" />
           </div>
         </div>
-      ) : computerOpen && active ? (
+      ) : computerOpen && computerBot ? (
         <div className="fixed inset-0 z-30 bg-background">
           <div
             data-testid="computer-viewport"
@@ -4123,21 +4482,22 @@ export function ShellPage() {
             >
               <div className="flex min-w-0 flex-1 items-center gap-3">
                 <BotAvatar
-                  color={active.color}
-                  identity={active.id}
+                  color={computerBot.color}
+                  identity={computerBot.id}
                   size={28}
-                  status={active.status}
+                  status={computerBot.status}
                 />
                 {recordingSkill ? (
                   <TeachRecordingChrome
                     recording={recordingSkill}
+                    botId={computerBot.id}
                     busy={teachBusy}
                     onStop={stopTeaching}
                     variant="overlay"
                   />
                 ) : (
                   <span className="truncate text-[15.5px] font-medium text-foreground" dir="auto">
-                    {computerLabel(computer?.mode, active.name)}
+                    {computerLabel(computer?.mode, computerBot.name)}
                   </span>
                 )}
                 {!recordingSkill && hasControl ? (
@@ -4174,21 +4534,21 @@ export function ShellPage() {
                     onRelease={releaseComputer}
                   />
                 ) : null}
-                {active && !recordingSkill ? (
+                {computerBot && !recordingSkill ? (
                   <TeachComputerOverlayControl
-                    key={active.id}
-                    botId={active.id}
+                    key={computerBot.id}
+                    botId={computerBot.id}
                     computer={computer}
                     busy={teachBusy}
                     onRefresh={refreshActiveTeaching}
                   />
                 ) : null}
-                {active && !recordingSkill ? (
+                {computerBot && !recordingSkill ? (
                   <ComputerMaintenanceActions
-                    botId={active.id}
+                    botId={computerBot.id}
                     computer={computer}
                     onChanged={async () => {
-                      await refreshThread(active.id);
+                      await refreshComputerFor(computerBot.id);
                     }}
                   />
                 ) : null}
@@ -4212,38 +4572,52 @@ export function ShellPage() {
               </div>
             ) : null}
             <div className="relative min-h-0 flex-1 bg-background">
-              {computer?.kind === "desktop" ? (
-                <DesktopKindEmptyState className="grid h-full place-items-center px-8 text-center text-sm text-muted-foreground/80" />
-              ) : computer?.state === "running" && embeddedScreenUrl && !computerScreenError ? (
-                <>
-                  <iframe
-                    title={t`Bot screen`}
-                    src={embeddedScreenUrl}
-                    sandbox={screenIframeSandbox(embeddedScreenUrl)}
-                    className="h-full w-full border-0 bg-black"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                    style={{
-                      pointerEvents: recordingSkill || !hasControl ? "none" : "auto",
-                    }}
-                  />
-                  {active ? (
-                    <TeachCaptureOverlay
-                      botId={active.id}
-                      skill={recordingSkill}
-                      enabled={Boolean(recordingSkill)}
-                      screenWidth={computer?.screenWidth}
-                      screenHeight={computer?.screenHeight}
+              <ComputerWorkspace
+                botId={computerBot.id}
+                computer={computer}
+                hasControl={hasControl}
+                dock={!recordingSkill}
+                onTakeControl={
+                  computer?.state === "running" &&
+                  !hasControl &&
+                  !computerTakeoverBlocked(computer, snapshot?.run?.status)
+                    ? () => openComputer(computerBot.id)
+                    : undefined
+                }
+              >
+                {computer?.kind === "desktop" ? (
+                  <DesktopKindEmptyState className="grid h-full place-items-center px-8 text-center text-sm text-muted-foreground/80" />
+                ) : computer?.state === "running" && embeddedScreenUrl && !computerScreenError ? (
+                  <>
+                    <iframe
+                      title={t`Bot screen`}
+                      src={embeddedScreenUrl}
+                      sandbox={screenIframeSandbox(embeddedScreenUrl)}
+                      className="h-full w-full border-0 bg-black"
+                      allow="clipboard-read; clipboard-write; fullscreen"
+                      style={{
+                        pointerEvents: recordingSkill || !hasControl ? "none" : "auto",
+                      }}
                     />
-                  ) : null}
-                </>
-              ) : (
-                <div className="grid h-full place-items-center text-sm text-muted-foreground/80">
-                  {computerScreenError ??
-                    (computer?.state === "suspended"
-                      ? t`Computer is asleep`
-                      : computerLabel(computer?.mode, active.name))}
-                </div>
-              )}
+                    {computerBot ? (
+                      <TeachCaptureOverlay
+                        botId={computerBot.id}
+                        skill={recordingSkill}
+                        enabled={Boolean(recordingSkill)}
+                        screenWidth={computer?.screenWidth}
+                        screenHeight={computer?.screenHeight}
+                      />
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="grid h-full place-items-center text-sm text-muted-foreground/80">
+                    {computerScreenError ??
+                      (computer?.state === "suspended"
+                        ? t`Computer is asleep`
+                        : computerLabel(computer?.mode, computerBot.name))}
+                  </div>
+                )}
+              </ComputerWorkspace>
             </div>
           </div>
         </div>
@@ -4258,8 +4632,11 @@ export function ShellPage() {
 
 const Transcript = memo(function Transcript({
   scrollRef,
+  scrollRequest,
+  onScrollRequestHandled,
   artifactTarget,
   messages,
+  showToolActivity,
   olderCursor,
   loadingOlder,
   answerableAskMessageId,
@@ -4269,6 +4646,7 @@ const Transcript = memo(function Transcript({
   onOpenBot,
   onAnswer,
   onReply,
+  onQuote,
   onReact,
   onJumpToMessage,
   onOpenPeerMessages,
@@ -4280,10 +4658,14 @@ const Transcript = memo(function Transcript({
   voiceReady,
   speakingMessageId,
   onSpeak,
+  onOpenComputer,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
+  scrollRequest: { messageId: string; nonce: number } | null;
+  onScrollRequestHandled: () => void;
   artifactTarget: ArtifactTarget;
   messages: ThreadMessage[];
+  showToolActivity: boolean;
   olderCursor: number | null;
   loadingOlder: boolean;
   answerableAskMessageId: string | null;
@@ -4291,8 +4673,9 @@ const Transcript = memo(function Transcript({
   workingBots: GroupAvatarMember[];
   onLoadOlder: () => void | Promise<void>;
   onOpenBot: (botId: string) => void;
-  onAnswer: (message: ThreadMessage, text: string) => Promise<void>;
+  onAnswer: (message: ThreadMessage, text: string, username?: string) => Promise<void>;
   onReply: (message: ThreadMessage) => void;
+  onQuote: (message: ThreadMessage, quote: string) => void;
   onReact: (message: ThreadMessage, reaction: MessageReaction) => Promise<void>;
   onJumpToMessage: (messageId: string) => void;
   onOpenPeerMessages: (peer: { peerBotId: string; peerBotName: string }) => void;
@@ -4304,6 +4687,7 @@ const Transcript = memo(function Transcript({
   voiceReady: boolean;
   speakingMessageId: string | null;
   onSpeak: (message: ThreadMessage) => void;
+  onOpenComputer: (botId?: string) => void;
 }) {
   const { t } = useLingui();
   const [atEnd, setAtEnd] = useState(true);
@@ -4322,6 +4706,92 @@ const Transcript = memo(function Transcript({
     workingBotName != null && workingBotName !== ""
       ? t`${workingBotName} is working`
       : t`Bots are working`;
+  const [quoteDraft, setQuoteDraft] = useState<{
+    message: ThreadMessage;
+    text: string;
+    range: Range;
+  } | null>(null);
+  const selectingWithMouse = useRef(false);
+
+  const evaluateSelection = useCallback(() => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      setQuoteDraft(null);
+      return;
+    }
+    const range = selection.getRangeAt(0);
+    const contentOf = (node: Node) =>
+      (node instanceof Element ? node : node.parentElement)?.closest<HTMLElement>(
+        "[data-quote-message-id]",
+      ) ?? null;
+    const startContent = contentOf(range.startContainer);
+    const endContent = contentOf(range.endContainer);
+    // selection.toString() serializes the whole range (a Ctrl+A transcript is
+    // unbounded), so it only runs once both endpoints sit in one message.
+    const draft = quoteDraftForSelection(
+      {
+        startContent,
+        endContent,
+        text: startContent && startContent === endContent ? selection.toString() : "",
+      },
+      messageById,
+    );
+    setQuoteDraft((prev) => {
+      if (!draft) return null;
+      // Repeat firings for an unchanged selection reuse the draft so the
+      // transcript isn't re-rendered by every unrelated selection event. A
+      // moved selection (e.g. keyboard-selecting a second occurrence of the
+      // same text) must carry its new Range — the pill anchors to it.
+      if (
+        prev &&
+        prev.message === draft.message &&
+        prev.text === draft.text &&
+        prev.range.compareBoundaryPoints(Range.START_TO_START, range) === 0 &&
+        prev.range.compareBoundaryPoints(Range.END_TO_END, range) === 0
+      ) {
+        return prev;
+      }
+      return { ...draft, range };
+    });
+  }, [messageById]);
+
+  // Keyboard and assistive-tech selections never reach a mouseup, so the pill
+  // lifecycle listens on selectionchange; the mouse flag keeps it hidden while
+  // a drag is still in flight.
+  useEffect(() => {
+    const onMouseDown = (event: MouseEvent) => {
+      selectingWithMouse.current = true;
+      if ((event.target as Element | null)?.closest?.("[data-quote-selection]")) return;
+      setQuoteDraft(null);
+    };
+    const onMouseUp = () => {
+      selectingWithMouse.current = false;
+      evaluateSelection();
+    };
+    const onSelectionChange = () => {
+      if (!selectingWithMouse.current) evaluateSelection();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setQuoteDraft(null);
+    };
+    // A drag that ends outside the window never fires document mouseup; reset
+    // the flag on blur so keyboard selections keep working afterwards.
+    const onWindowBlur = () => {
+      selectingWithMouse.current = false;
+    };
+    document.addEventListener("mousedown", onMouseDown, true);
+    document.addEventListener("mouseup", onMouseUp, true);
+    document.addEventListener("selectionchange", onSelectionChange);
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("blur", onWindowBlur);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown, true);
+      document.removeEventListener("mouseup", onMouseUp, true);
+      document.removeEventListener("selectionchange", onSelectionChange);
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("blur", onWindowBlur);
+    };
+  }, [evaluateSelection]);
   const snapToEnd = useCallback(() => {
     const element = scrollRef.current;
     if (!element) return;
@@ -4351,6 +4821,38 @@ const Transcript = memo(function Transcript({
       reducedMotion ? 0 : 2_000,
     );
   }, [scrollRef]);
+
+  const scrolledJump = useRef<number | null>(null);
+  const jumpScrolling = useRef(false);
+  const jumpScrollTimer = useRef<number | undefined>(undefined);
+  const endJumpScroll = useCallback(() => {
+    jumpScrolling.current = false;
+    window.clearTimeout(jumpScrollTimer.current);
+    scrollRef.current?.removeEventListener("scrollend", endJumpScroll);
+  }, [scrollRef]);
+  // A jump scroll must win over follow-the-tail: unfollow inside the commit
+  // that mounts the row so a live commit cannot cancel the animation, keep
+  // retrying while the pinned window is still rendering, and suppress the
+  // near-end follow re-arm only for the jump's own scroll events — scrollend
+  // (or user input interrupting it, which also fires scrollend) ends the
+  // suppression, with the timeout as fallback when no scroll happens.
+  useLayoutEffect(() => {
+    if (!scrollRequest || scrolledJump.current === scrollRequest.nonce) return;
+    const element = scrollRef.current;
+    const row = element?.querySelector(
+      `[data-message-id="${CSS.escape(scrollRequest.messageId)}"]`,
+    );
+    if (!element || !row) return;
+    scrolledJump.current = scrollRequest.nonce;
+    following.current = false;
+    autoScrolling.current = false;
+    jumpScrolling.current = true;
+    element.addEventListener("scrollend", endJumpScroll, { once: true });
+    window.clearTimeout(jumpScrollTimer.current);
+    jumpScrollTimer.current = window.setTimeout(endJumpScroll, 2_000);
+    row.scrollIntoView({ behavior: "smooth", block: "center" });
+    onScrollRequestHandled();
+  }, [messages, scrollRequest, scrollRef, endJumpScroll, onScrollRequestHandled]);
 
   useLayoutEffect(() => {
     if (following.current) snapToEnd();
@@ -4383,6 +4885,7 @@ const Transcript = memo(function Transcript({
   useEffect(
     () => () => {
       window.clearTimeout(autoScrollTimer.current);
+      window.clearTimeout(jumpScrollTimer.current);
     },
     [],
   );
@@ -4417,6 +4920,9 @@ const Transcript = memo(function Transcript({
           lastScrollTop.current = event.currentTarget.scrollTop;
           const nearEnd = transcriptIsNearEnd(event.currentTarget);
           setAtEnd(nearEnd);
+          // A jump scroll owns the viewport until its animation settles; its
+          // own near-end crossings must not re-arm tail-following.
+          if (jumpScrolling.current) return;
           if (nearEnd) {
             if (scrolledDown) following.current = true;
             if (autoScrolling.current) {
@@ -4439,8 +4945,18 @@ const Transcript = memo(function Transcript({
             {loadingOlder ? t`Loading…` : t`Load earlier messages`}
           </button>
         ) : null}
-        {reactionView.visibleMessages.map((message) => {
-          if (!message.blocks.some((block) => !isToolActivityBlock(block))) return null;
+        {groupVoiceChats(reactionView.visibleMessages).map((item) => {
+          if (item.kind === "voiceChat") {
+            return (
+              <VoiceChatCard
+                key={item.key}
+                group={item}
+                revealMessageId={scrollRequest?.messageId}
+              />
+            );
+          }
+          const message = item.message;
+          if (!messageHasVisibleBlocks(message.blocks, showToolActivity)) return null;
           const peerReceipt = isPeerReceiptBlocks(message.blocks);
           const messageReactions = reactionView.reactions.get(message.id);
           return (
@@ -4449,21 +4965,6 @@ const Transcript = memo(function Transcript({
               data-message-id={message.id}
               className={peerReceipt ? "relative py-0.5" : "group/message relative hover:z-20"}
             >
-              {!peerReceipt && !message.id.startsWith("progress:") ? (
-                <time
-                  dateTime={message.createdAt}
-                  data-testid="message-hover-time"
-                  className={cn(
-                    "pointer-events-none absolute top-1 z-10 text-xs tabular-nums text-muted-foreground opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 group-has-[[aria-expanded=true]]/message:opacity-100",
-                    message.role === "user" ? "start-0" : "end-0",
-                  )}
-                >
-                  {new Date(message.createdAt).toLocaleTimeString(i18n.locale || "en", {
-                    hour: "numeric",
-                    minute: "2-digit",
-                  })}
-                </time>
-              ) : null}
               <div
                 className={
                   peerReceipt
@@ -4478,19 +4979,11 @@ const Transcript = memo(function Transcript({
                       ? undefined
                       : `relative w-fit min-w-0 ${
                           message.role === "user"
-                            ? "max-w-[min(70%,calc(100%_-_6rem))]"
-                            : "max-w-[min(74%,calc(100%_-_6rem))]"
+                            ? "max-w-[min(84%,calc(100%_-_8rem))] [@media(hover:none)]:max-w-[84%]"
+                            : "max-w-[min(88%,calc(100%_-_8rem))] [@media(hover:none)]:max-w-[88%]"
                         }`
                   }
                 >
-                  {peerReceipt ? null : (
-                    <MessageHoverActions
-                      message={message}
-                      side={message.role === "user" ? "start" : "end"}
-                      onReply={onReply}
-                      onReact={onReact}
-                    />
-                  )}
                   <MessageView
                     artifactTarget={artifactTarget}
                     message={message}
@@ -4520,9 +5013,42 @@ const Transcript = memo(function Transcript({
                     voiceReady={voiceReady}
                     speaking={speakingMessageId === message.id}
                     onSpeak={() => onSpeak(message)}
+                    onOpenComputer={onOpenComputer}
+                    showToolActivity={showToolActivity}
                   />
+                  {peerReceipt ? null : (
+                    <MessageHoverActions
+                      message={message}
+                      side={message.role === "user" ? "start" : "end"}
+                      onReply={onReply}
+                      onReact={onReact}
+                    />
+                  )}
                 </div>
               </div>
+              {!peerReceipt && !message.id.startsWith("progress:") ? (
+                <time
+                  dateTime={message.createdAt}
+                  data-testid="message-hover-time"
+                  className={cn(
+                    "pointer-events-none absolute top-1 z-10 text-xs tabular-nums text-muted-foreground opacity-0 transition-opacity group-hover/message:opacity-100 group-focus-within/message:opacity-100 group-has-[[aria-expanded=true]]/message:opacity-100 [@media(hover:none)]:transition-none",
+                    // Hover keeps the date in the side margin. Touch leaves that margin for the bubble and drops the revealed time under it.
+                    message.role === "user"
+                      ? "start-0 max-w-[max(8rem,16%)] text-start"
+                      : "end-0 max-w-[max(8rem,12%)] text-end",
+                    "[@media(hover:none)]:group-hover/message:static [@media(hover:none)]:group-focus-within/message:static [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:static",
+                    "[@media(hover:none)]:group-hover/message:block [@media(hover:none)]:group-focus-within/message:block [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:block",
+                    "[@media(hover:none)]:group-hover/message:mt-1 [@media(hover:none)]:group-focus-within/message:mt-1 [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:mt-1",
+                    "[@media(hover:none)]:group-hover/message:w-full [@media(hover:none)]:group-focus-within/message:w-full [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:w-full",
+                    "[@media(hover:none)]:group-hover/message:max-w-none [@media(hover:none)]:group-focus-within/message:max-w-none [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:max-w-none",
+                    message.role === "user"
+                      ? "[@media(hover:none)]:group-hover/message:text-end [@media(hover:none)]:group-focus-within/message:text-end [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:text-end"
+                      : "[@media(hover:none)]:group-hover/message:text-start [@media(hover:none)]:group-focus-within/message:text-start [@media(hover:none)]:group-has-[[aria-expanded=true]]/message:text-start",
+                  )}
+                >
+                  {formatMessageTime(message.createdAt, i18n.locale || "en")}
+                </time>
+              ) : null}
               {!peerReceipt && messageReactions ? (
                 <div
                   data-testid="message-reactions"
@@ -4557,6 +5083,16 @@ const Transcript = memo(function Transcript({
           <ActiveBotGlyph bots={workingBots} label={workingLabel} />
         ) : null}
       </div>
+      {quoteDraft ? (
+        <QuoteSelectionButton
+          range={quoteDraft.range}
+          onQuote={() => {
+            onQuote(quoteDraft.message, quoteDraft.text);
+            window.getSelection()?.removeAllRanges();
+            setQuoteDraft(null);
+          }}
+        />
+      ) : null}
       <button
         ref={jumpButtonRef}
         type="button"
@@ -4571,6 +5107,80 @@ const Transcript = memo(function Transcript({
         <ArrowDown size={17} strokeWidth={1.8} />
       </button>
     </div>
+  );
+});
+
+/**
+ * Floating Quote action anchored to the selection's bounding rect. Measures
+ * itself after mount so it can flip below the selection when there is no room
+ * above and stay clamped inside the viewport; re-anchors on scroll/resize.
+ */
+const QuoteSelectionButton = memo(function QuoteSelectionButton({
+  range,
+  onQuote,
+}: {
+  range: Range;
+  onQuote: () => void;
+}) {
+  const { t } = useLingui();
+  const buttonRef = useRef<HTMLButtonElement>(null);
+  const [placement, setPlacement] = useState<{
+    top: number;
+    left: number;
+    above: boolean;
+  } | null>(null);
+
+  useLayoutEffect(() => {
+    const update = () => {
+      if (range.collapsed || !document.contains(range.commonAncestorContainer)) {
+        setPlacement(null);
+        return;
+      }
+      const rect = range.getBoundingClientRect();
+      const width = buttonRef.current?.offsetWidth ?? 0;
+      const height = buttonRef.current?.offsetHeight ?? 0;
+      const above = rect.top >= height + 8;
+      setPlacement({
+        top: above ? rect.top - 8 : rect.bottom + 8,
+        left: Math.min(
+          Math.max(rect.left + rect.width / 2, width / 2 + 8),
+          window.innerWidth - width / 2 - 8,
+        ),
+        above,
+      });
+    };
+    update();
+    window.addEventListener("resize", update);
+    // Scroll doesn't bubble — listen on the capture phase to catch any scroller.
+    window.addEventListener("scroll", update, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [range]);
+
+  return createPortal(
+    <button
+      ref={buttonRef}
+      type="button"
+      data-quote-selection
+      data-testid="quote-selection"
+      onMouseDown={(event) => {
+        // Keep the highlight alive until the click commits the quote.
+        event.preventDefault();
+        event.stopPropagation();
+      }}
+      onClick={onQuote}
+      style={placement ? { top: placement.top, left: placement.left } : { visibility: "hidden" }}
+      className={cn(
+        "fixed z-50 flex -translate-x-1/2 items-center gap-1.5 rounded-full border border-border bg-background px-3 py-1.5 text-[13px] font-medium text-foreground shadow-md hover:bg-muted",
+        placement?.above === false ? "translate-y-0" : "-translate-y-full",
+      )}
+    >
+      <TextQuote size={13} strokeWidth={2} />
+      {t`Quote`}
+    </button>,
+    document.body,
   );
 });
 
@@ -4593,6 +5203,7 @@ const Composer = memo(function Composer({
   onStop,
   onVoice,
   replyTarget,
+  replyQuote,
   replyTargetName,
   onClearReply,
   mentionTargets,
@@ -4618,6 +5229,7 @@ const Composer = memo(function Composer({
   onStop: () => Promise<void>;
   onVoice?: () => void;
   replyTarget?: ThreadMessage | null;
+  replyQuote?: string | null;
   replyTargetName?: string;
   onClearReply?: () => void;
   mentionTargets?: ComposerMention[];
@@ -4633,6 +5245,11 @@ const Composer = memo(function Composer({
   const [selectedSkill, setSelectedSkill] = useState<AgentSkillCatalogEntry | null>(null);
   const [selectedMentions, setSelectedMentions] = useState<ComposerMention[]>([]);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [replyAnnouncement, setReplyAnnouncement] = useState("");
+  // What the live region currently holds — a send disarming the reply clears
+  // "reply" text, while an explicit cancel must keep "Reply cancelled".
+  const replyAnnouncementKind = useRef<"reply" | "cancelled" | null>(null);
+  const prevReplyTarget = useRef<ThreadMessage | null>(null);
   const runErrorRef = useRef<HTMLDivElement>(null);
   const presentedRunErrorIdRef = useRef<string | null>(null);
   const mentionListboxId = useId();
@@ -4877,6 +5494,44 @@ const Composer = memo(function Composer({
   const showComposerPlaceholder =
     draft.length === 0 && selectedSkill === null && selectedMentions.length === 0;
   const replyName = replyTarget ? (replyTargetName ?? previewMessageText(replyTarget)) : "";
+  const replyNameRef = useRef(replyName);
+  replyNameRef.current = replyName;
+  const announceTimer = useRef(0);
+  useEffect(() => () => window.clearTimeout(announceTimer.current), []);
+
+  // Arming or retargeting a reply unmounts the control that started it, so
+  // focus would drop to <body>; announce on start and when the target changes.
+  // The timer lives in a ref: a same-id rerender (e.g. the display name
+  // resolving after arming) must not cancel the pending announcement.
+  useEffect(() => {
+    const prev = prevReplyTarget.current;
+    prevReplyTarget.current = replyTarget ?? null;
+    if (!replyTarget) {
+      // Cancel (or send) within the delay must not let a stale "Replying to"
+      // overwrite the cancel announcement — kill the pending timer.
+      window.clearTimeout(announceTimer.current);
+      // A send disarms the reply without touching the region — drop the stale
+      // "Replying to" so it cannot linger or re-announce. An explicit cancel
+      // sets "Reply cancelled" in the same event, so only clear "reply" text.
+      if (replyAnnouncementKind.current === "reply") {
+        replyAnnouncementKind.current = null;
+        setReplyAnnouncement("");
+      }
+      return;
+    }
+    if (!prev || prev.id !== replyTarget.id) {
+      textareaRef.current?.focus();
+      // Clear-then-set so a switch between same-author targets re-announces —
+      // identical live-region text would otherwise be a no-op.
+      setReplyAnnouncement("");
+      replyAnnouncementKind.current = null;
+      window.clearTimeout(announceTimer.current);
+      announceTimer.current = window.setTimeout(() => {
+        replyAnnouncementKind.current = "reply";
+        setReplyAnnouncement(t`Replying to ${replyNameRef.current}`);
+      }, 50);
+    }
+  }, [replyTarget, replyName, t]);
 
   return (
     <fieldset
@@ -4890,6 +5545,9 @@ const Composer = memo(function Composer({
         draggingFiles ? "rounded-[14px] ring-2 ring-inset ring-ring" : ""
       }`}
     >
+      <div role="status" data-testid="composer-announcement" className="sr-only">
+        {replyAnnouncement}
+      </div>
       {sendError || runError ? (
         <div
           ref={runErrorRef}
@@ -4917,11 +5575,25 @@ const Composer = memo(function Composer({
           data-testid="reply-chip"
           className="mb-2 flex items-center gap-2 rounded-full border border-border bg-muted px-3 py-1.5 text-[13px] text-foreground/75"
         >
-          <span className="min-w-0 flex-1 truncate text-muted-foreground">{t`Replying to ${replyName}`}</span>
+          <span className="min-w-0 flex-1 truncate text-muted-foreground">
+            {replyQuote
+              ? t`Replying to ${replyName}: “${replyQuote}”`
+              : t`Replying to ${replyName}`}
+          </span>
           <button
             type="button"
             aria-label={t`Cancel reply`}
-            onClick={onClearReply}
+            onClick={() => {
+              replyAnnouncementKind.current = "cancelled";
+              // Kill a pending arm announce in this event — the effect's
+              // cleanup can lag the timer, and a late "Replying to" would
+              // then be cleared as stale, dropping the cancel announcement.
+              window.clearTimeout(announceTimer.current);
+              onClearReply?.();
+              setReplyAnnouncement(t`Reply cancelled`);
+              // The chip unmounts with this button — keep focus in the composer.
+              textareaRef.current?.focus();
+            }}
             className="shrink-0 text-muted-foreground hover:text-foreground"
           >
             <X size={13} strokeWidth={2} />
@@ -5049,7 +5721,7 @@ const Composer = memo(function Composer({
       ) : null}
       <div
         data-testid="composer-bar"
-        className="flex items-center gap-3.5 rounded-full border border-border bg-background py-[9px] pe-2.5 ps-3"
+        className="flex items-center gap-3.5 rounded-full border border-border bg-background py-[9px] pe-2.5 ps-3 transition-colors focus-within:border-ring"
       >
         <input
           ref={fileInputRef}
@@ -5060,14 +5732,14 @@ const Composer = memo(function Composer({
           onChange={(event) => void onAttachmentPick(event.target.files)}
         />
         <Button
-          variant="outline"
+          variant="ghost"
           size="icon"
           aria-label={t`Attach file`}
           disabled={disabled}
           onClick={() => fileInputRef.current?.click()}
-          className="rounded-full text-foreground/75"
+          className="size-8 shrink-0 rounded-full border border-border bg-muted text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
         >
-          <Plus size={17} strokeWidth={1.8} />
+          <Plus size={16} strokeWidth={2} />
         </Button>
         <div className="flex min-w-0 flex-1 flex-wrap items-end gap-1.5">
           {selectedSkill ? (
@@ -5183,7 +5855,7 @@ const Composer = memo(function Composer({
             className="max-h-32 min-h-[24px] min-w-[8rem] flex-1 resize-none overflow-y-auto bg-transparent py-0.5 text-[15.5px] leading-6 text-foreground outline-none placeholder:text-muted-foreground disabled:opacity-40"
           />
         </div>
-        {onVoice ? (
+        {onVoice && draft.trim().length === 0 ? (
           <Button
             variant="outline"
             size="icon"
@@ -5191,21 +5863,21 @@ const Composer = memo(function Composer({
             title={t`Voice`}
             disabled={disabled}
             onClick={onVoice}
-            className="rounded-full text-foreground/75"
+            className="size-8 shrink-0 rounded-full text-foreground/75"
           >
             <Mic size={16} strokeWidth={1.8} />
           </Button>
         ) : null}
         {running ? (
-          <>
+          <div className="flex items-center gap-1.5 shrink-0">
             <Button
               size="icon"
               aria-label={t`Send`}
               disabled={sending || !canSend || disabled}
               onClick={send}
-              className="size-10 rounded-full"
+              className="size-8 rounded-full bg-white text-black hover:bg-white/90 shadow-sm transition-transform active:scale-95"
             >
-              <ArrowUp size={18} strokeWidth={2} />
+              <ArrowUp size={16} strokeWidth={2.2} />
             </Button>
             <Button
               variant="outline"
@@ -5213,20 +5885,20 @@ const Composer = memo(function Composer({
               aria-label={t`Stop`}
               disabled={sending}
               onClick={() => void onStop()}
-              className="size-10 rounded-full text-foreground/75"
+              className="size-8 rounded-full border border-border bg-muted text-foreground/80 shadow-sm transition-colors hover:bg-accent hover:text-foreground"
             >
-              <Square size={12} strokeWidth={0} fill="currentColor" />
+              <Square size={11} strokeWidth={0} fill="currentColor" />
             </Button>
-          </>
+          </div>
         ) : (
           <Button
             size="icon"
             aria-label={t`Send`}
             disabled={sending || !canSend || disabled}
             onClick={send}
-            className="size-9 rounded-full"
+            className="size-8 shrink-0 rounded-full bg-white text-black hover:bg-white/90 shadow-sm transition-transform active:scale-95 disabled:bg-white/10 disabled:text-muted-foreground/30 disabled:shadow-none"
           >
-            <ArrowUp size={18} strokeWidth={2} />
+            <ArrowUp size={16} strokeWidth={2.2} />
           </Button>
         )}
       </div>
@@ -5288,7 +5960,14 @@ function MentionChipIcon({ mention }: { mention: ComposerMention }) {
 
 function previewMessageText(message: ThreadMessage): string {
   const text = message.blocks
-    .map((block) => (block.kind === "text" || block.kind === "channel_message" ? block.text : ""))
+    .map((block) => {
+      if (block.kind === "channel_message") return block.text;
+      if (block.kind === "text") {
+        // Bot text is Markdown; user text is already plain.
+        return message.role === "bot" ? plainTextFromMarkdown(block.text) : block.text;
+      }
+      return "";
+    })
     .filter(Boolean)
     .join(" ")
     .trim();
@@ -5297,6 +5976,46 @@ function previewMessageText(message: ThreadMessage): string {
     return t`Attachment`;
   }
   return t`Message`;
+}
+
+/** Bound reply excerpts used in accessible names (visible UI truncates via CSS). */
+function accessibleReplyExcerpt(text: string, max = 120): string {
+  const normalized = text.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  // Reserve a slot for the ellipsis; never split a surrogate pair at the cut.
+  const end = (normalized.charCodeAt(max - 2) & 0xfc00) === 0xd800 ? max - 2 : max - 1;
+  return `${normalized.slice(0, end).trimEnd()}…`;
+}
+
+function formatRosterTime(isoDate?: string | null): string {
+  if (!isoDate) return "";
+  try {
+    const d = new Date(isoDate);
+    if (Number.isNaN(d.getTime())) return "";
+    const locale = i18n.locale || "en";
+    const now = new Date();
+    const isToday =
+      d.getDate() === now.getDate() &&
+      d.getMonth() === now.getMonth() &&
+      d.getFullYear() === now.getFullYear();
+    if (isToday) {
+      return d.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" });
+    }
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    const isYesterday =
+      d.getDate() === yesterday.getDate() &&
+      d.getMonth() === yesterday.getMonth() &&
+      d.getFullYear() === yesterday.getFullYear();
+    if (isYesterday) return t`Yesterday`;
+    const diffDays = Math.floor((now.getTime() - d.getTime()) / (1000 * 60 * 60 * 24));
+    if (diffDays < 7) {
+      return d.toLocaleDateString(locale, { weekday: "short" });
+    }
+    return d.toLocaleDateString(locale, { month: "short", day: "numeric" });
+  } catch {
+    return "";
+  }
 }
 
 function MessageHoverActions({
@@ -5366,7 +6085,10 @@ function MessageHoverActions({
           type="button"
           aria-label={t`Reply`}
           onClick={() => onReply(message)}
-          className={`${iconButtonClass} hidden [@media(hover:hover)_and_(pointer:fine)]:grid`}
+          className={cn(
+            iconButtonClass,
+            "h-11 w-11 [@media(hover:hover)_and_(pointer:fine)]:h-7 [@media(hover:hover)_and_(pointer:fine)]:w-7",
+          )}
         >
           <Reply size={15} strokeWidth={1.7} />
         </button>
@@ -5381,13 +6103,6 @@ function MessageHoverActions({
             <MoreHorizontal size={15} strokeWidth={1.7} />
           </DropdownMenuTrigger>
           <DropdownMenuContent align={side === "end" ? "start" : "end"}>
-            <DropdownMenuItem
-              className="[@media(hover:hover)_and_(pointer:fine)]:hidden"
-              onClick={() => onReply(message)}
-            >
-              <Reply size={15} />
-              <Trans>Reply</Trans>
-            </DropdownMenuItem>
             <DropdownMenuItem onClick={copyMessage}>
               <Copy size={14} strokeWidth={1.7} />
               <Trans>Copy</Trans>
@@ -5415,6 +6130,7 @@ function applyThreadEvent(
   snapshotRef: MutableRefObject<ThreadSnapshot | null>,
   computerRef: MutableRefObject<ComputerStatus | null>,
 ) {
+  publishComputerCommand(event);
   if (isThreadSnapshotEvent(event)) {
     const next = reduceThreadSnapshot(snapshotRef.current, event);
     commitSnapshot(next);
@@ -5470,11 +6186,13 @@ const MessageView = memo(function MessageView({
   voiceReady,
   speaking,
   onSpeak,
+  onOpenComputer,
+  showToolActivity,
 }: {
   artifactTarget: ArtifactTarget;
   canAnswer: boolean;
   message: ThreadMessage;
-  onAnswer: (message: ThreadMessage, text: string) => Promise<void>;
+  onAnswer: (message: ThreadMessage, text: string, username?: string) => Promise<void>;
   onOpenBot: (botId: string) => void;
   onOpenPeerMessages: (peer: { peerBotId: string; peerBotName: string }) => void;
   speakerName?: string;
@@ -5489,6 +6207,8 @@ const MessageView = memo(function MessageView({
   voiceReady: boolean;
   speaking: boolean;
   onSpeak: () => void;
+  onOpenComputer: (botId?: string) => void;
+  showToolActivity: boolean;
 }) {
   const { t } = useLingui();
   const isNarration =
@@ -5498,12 +6218,27 @@ const MessageView = memo(function MessageView({
       (block) => block.kind === "text" || block.kind === "progress" || block.kind === "steps",
     );
   const isLive = message.id.startsWith("progress:");
-  const visibleNarrationBlocks = message.blocks.filter((block) => !isToolActivityBlock(block));
+  const quoteMessageId = message.id.includes(":") ? undefined : message.id;
+  const visibleNarrationBlocks = renderableMessageBlocks(message.blocks, showToolActivity);
   const parentJumpId = replyPreview?.id ?? replyToMessageId;
+  const speakerBot = message.botId ? peerBot?.(message.botId) : undefined;
+  const speakerColorDef = useMemo(
+    () => resolvePersonaColorDef(message.botId ?? "bot", speakerBot?.color),
+    [message.botId, speakerBot?.color],
+  );
   const messageContext = (
     <>
       {speakerName ? (
-        <div className="mb-1 text-[12.5px] font-medium text-muted-foreground" dir="auto">
+        <div
+          className="mb-1.5 flex items-center gap-2 text-[13px] font-semibold tracking-tight"
+          dir="auto"
+          style={{ color: speakerColorDef.light }}
+        >
+          <BotAvatar
+            color={speakerBot?.color ?? FALLBACK_BOT_COLOR}
+            identity={message.botId}
+            size={22}
+          />
           {speakerName}
         </div>
       ) : null}
@@ -5511,31 +6246,70 @@ const MessageView = memo(function MessageView({
         <button
           type="button"
           data-testid="reply-parent-preview"
-          aria-label={t`Jump to replied message`}
+          // Name the action and a short excerpt; a bare action label would
+          // hide the quote, and an unbounded quote can be thousands of chars.
+          aria-label={
+            message.replyQuote
+              ? t`Jump to replied message: “${accessibleReplyExcerpt(message.replyQuote)}”`
+              : replyPreview
+                ? t`Jump to replied message: ${accessibleReplyExcerpt(previewMessageText(replyPreview))}`
+                : t`Jump to replied message`
+          }
           onClick={() => onJumpToMessage?.(parentJumpId)}
           className="mb-2 block max-w-[74%] truncate rounded-[14px] border border-border bg-background px-3 py-2 text-start text-[12.5px] text-muted-foreground hover:border-border hover:text-foreground/75"
           dir="auto"
         >
-          {replyPreview ? previewMessageText(replyPreview) : t`Earlier message`}
+          {message.replyQuote
+            ? `“${message.replyQuote}”`
+            : replyPreview
+              ? previewMessageText(replyPreview)
+              : t`Earlier message`}
         </button>
       ) : null}
     </>
   );
   if (isNarration) {
     if (visibleNarrationBlocks.length === 0) return null;
+    if (isToolOnlyNarration(message.blocks, showToolActivity)) {
+      return (
+        <>
+          {messageContext}
+          <ToolOnlyNarration blocks={visibleNarrationBlocks} live={isLive} />
+        </>
+      );
+    }
     return (
       <>
         {messageContext}
-        <div className="flex w-fit max-w-full justify-start">
+        <div className="flex w-fit max-w-full justify-start [@media(hover:none)]:w-full">
           <div
             data-testid="message-bot-bubble"
             className="max-w-full space-y-2.5 rounded-[20px] bg-muted px-[18px] py-3 text-[15.5px] leading-[1.5] text-foreground/90"
             dir="auto"
           >
             {visibleNarrationBlocks.map((block, i) => {
+              if (block.kind === "steps") {
+                return (
+                  <ToolActivityDisclosure
+                    key={i}
+                    live={isLive}
+                    stepCount={toolStepCount(block.steps)}
+                    durationMs={block.durationMs}
+                  >
+                    <ToolSteps
+                      steps={block.steps}
+                      currentIndex={isLive ? block.steps.length - 1 : undefined}
+                      limit={isLive ? LIVE_TOOL_STEP_WINDOW : undefined}
+                    />
+                  </ToolActivityDisclosure>
+                );
+              }
               if (block.kind === "text" || block.kind === "progress") {
                 return (
-                  <div key={i}>
+                  <div
+                    key={i}
+                    data-quote-message-id={block.kind === "text" ? quoteMessageId : undefined}
+                  >
                     <ChatMarkdown streaming={block.kind === "progress"}>{block.text}</ChatMarkdown>
                   </div>
                 );
@@ -5561,6 +6335,17 @@ const MessageView = memo(function MessageView({
     <>
       {messageContext}
       {message.blocks.map((block, i) => {
+        if (block.kind === "steps" && shouldRenderToolCard(block, showToolActivity)) {
+          return (
+            <StandaloneToolActivity
+              key={i}
+              live={isLive}
+              steps={block.steps}
+              stepCount={toolStepCount(block.steps)}
+              durationMs={block.durationMs}
+            />
+          );
+        }
         if (isToolActivityBlock(block)) return null;
         if (block.kind === "handoff") {
           const from = memberName?.(block.fromBotId) ?? t`bot`;
@@ -5619,7 +6404,10 @@ const MessageView = memo(function MessageView({
         }
         if (block.kind === "progress") {
           return (
-            <div key={i} className="flex w-fit max-w-full justify-start">
+            <div
+              key={i}
+              className="flex w-fit max-w-full justify-start [@media(hover:none)]:w-full"
+            >
               <div
                 data-testid="message-bot-bubble"
                 className="max-w-full rounded-[20px] bg-muted px-[18px] py-3 text-[15.5px] leading-[1.5] text-foreground/90"
@@ -5728,16 +6516,11 @@ const MessageView = memo(function MessageView({
           );
         }
         if (block.kind === "mcp_approval") {
+          const botId = "botId" in artifactTarget ? artifactTarget.botId : message.botId;
+          if (!botId) return null;
           return (
             <div key={i} className="flex justify-start">
-              <McpApprovalCard
-                botId={"botId" in artifactTarget ? artifactTarget.botId : message.botId}
-                name={block.name}
-                serverId={block.serverId}
-                transport={block.transport}
-                endpoint={block.endpoint}
-                needsOAuth={block.needsOAuth}
-              />
+              <McpApprovalCard botId={botId} threadId={message.threadId} block={block} />
             </div>
           );
         }
@@ -5772,27 +6555,36 @@ const MessageView = memo(function MessageView({
           );
         }
         if (block.kind === "text" && message.role === "user") {
+          // User bubbles stay literal text on web and mobile. Only explicit URLs
+          // and email addresses are links, so a sent address is tappable without
+          // formatting bold or headings.
           return (
-            <div key={i} className="flex w-fit max-w-full justify-end">
+            <div key={i} className="flex w-fit max-w-full justify-end [@media(hover:none)]:w-full">
               <div
                 data-testid="message-user-bubble"
+                data-quote-message-id={quoteMessageId}
                 className="max-w-full whitespace-pre-wrap wrap-anywhere rounded-[20px] bg-chat-user px-[18px] py-3 text-[15.5px] leading-[1.45] text-chat-user-foreground"
                 dir="auto"
               >
-                {block.text}
+                <LinkifiedText>{block.text}</LinkifiedText>
               </div>
             </div>
           );
         }
         if (block.kind === "text") {
           return (
-            <div key={i} className="flex w-fit max-w-full justify-start">
+            <div
+              key={i}
+              className="flex w-fit max-w-full justify-start [@media(hover:none)]:w-full"
+            >
               <div
                 data-testid="message-bot-bubble"
                 className="max-w-full rounded-[20px] bg-muted px-[18px] py-3 text-[15.5px] leading-[1.5] text-foreground/90"
                 dir="auto"
               >
-                <ChatMarkdown>{block.text}</ChatMarkdown>
+                <div data-quote-message-id={quoteMessageId}>
+                  <ChatMarkdown>{block.text}</ChatMarkdown>
+                </div>
                 {voiceReady ? (
                   <button
                     type="button"
@@ -5829,7 +6621,7 @@ const MessageView = memo(function MessageView({
               key={i}
               block={block}
               canAnswer={canAnswer}
-              onAnswer={(text) => onAnswer(message, text)}
+              onAnswer={(text, username) => onAnswer(message, text, username)}
             />
           );
         }
@@ -5845,6 +6637,7 @@ const MessageView = memo(function MessageView({
           return (
             <div
               key={i}
+              data-testid="computer-card"
               className="w-[340px] rounded-[18px] border border-border bg-muted px-[18px] py-4"
             >
               <div className="flex items-center justify-between">
@@ -5864,6 +6657,14 @@ const MessageView = memo(function MessageView({
               <div className="my-2.5 text-[14.5px] leading-[1.5] text-foreground/75">
                 <ChatMarkdown>{block.text}</ChatMarkdown>
               </div>
+              <Button
+                type="button"
+                size="sm"
+                data-testid="computer-card-open"
+                onClick={() => onOpenComputer(message.botId)}
+              >
+                <Trans>Open</Trans>
+              </Button>
             </div>
           );
         }
@@ -5872,33 +6673,6 @@ const MessageView = memo(function MessageView({
     </>
   );
 });
-
-function embeddableScreenUrl(url: string | null): string | null {
-  if (!url) return null;
-  try {
-    const parsed = new URL(url, window.location.href);
-    const page = new URL(window.location.href);
-    const local = parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost";
-    const pagePort = page.port || (page.protocol === "https:" ? "443" : "80");
-    if (local && parsed.port && parsed.port !== pagePort) {
-      return null;
-    }
-    return parsed.toString();
-  } catch {
-    return url;
-  }
-}
-
-function screenIframeSandbox(url: string | null) {
-  if (!url) return undefined;
-  try {
-    return new URL(url, window.location.href).pathname.startsWith("/novnc/")
-      ? "allow-scripts allow-pointer-lock"
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
 
 function DesktopKindEmptyState({ className }: { className?: string }) {
   return (
@@ -5927,22 +6701,5 @@ function computerLabel(mode: ComputerStatus["mode"] | undefined, botName: string
 }
 
 function newClientNonce(): string {
-  const webCrypto = globalThis.crypto;
-  if (webCrypto && typeof webCrypto.randomUUID === "function") {
-    return webCrypto.randomUUID();
-  }
-  return `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function readFileAsBase64(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = typeof reader.result === "string" ? reader.result : "";
-      const base64 = result.includes(",") ? (result.split(",")[1] ?? "") : result;
-      resolve(base64);
-    };
-    reader.onerror = () => reject(reader.error ?? new Error("Failed to read file"));
-    reader.readAsDataURL(file);
-  });
+  return newClientId();
 }

@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { BotSecretDestination, SecretHttpRequest } from "./bot-secrets.js";
+import {
+  BotSecretDestination,
+  botSecretDestinationSchema,
+  decodeLoginSecret,
+  encodeLoginSecret,
+  isCloudMetadataHost,
+  isPrivateNetworkHost,
+  SecretHttpRequest,
+} from "./bot-secrets.js";
 
 const destination = {
   name: "example_api",
@@ -17,6 +25,18 @@ describe("credential contracts", () => {
   ])("rejects non-origin destination %s", (origin) => {
     expect(BotSecretDestination.safeParse({ ...destination, origin }).success).toBe(false);
   });
+  it.each(["feishu-app-credentials", "my-creds-2", "team_a-bot"])(
+    "accepts hyphenated credential names like %s",
+    (name) => {
+      expect(BotSecretDestination.safeParse({ ...destination, name }).success).toBe(true);
+    },
+  );
+  it.each(["Feishu App", "-leading", "with space", ""])(
+    "rejects malformed credential names %s",
+    (name) => {
+      expect(BotSecretDestination.safeParse({ ...destination, name }).success).toBe(false);
+    },
+  );
   it.each([
     "Host",
     "Connection",
@@ -61,5 +81,87 @@ describe("credential contracts", () => {
         body: "x".repeat(100_001),
       }).success,
     ).toBe(false);
+  });
+});
+
+describe("private HTTP credential origins", () => {
+  const relaxed = botSecretDestinationSchema({ allowPrivateHttpOrigin: true });
+
+  it("rejects private HTTP origins by default", () => {
+    expect(
+      BotSecretDestination.safeParse({ ...destination, origin: "http://192.168.2.10:8080" })
+        .success,
+    ).toBe(false);
+  });
+  it.each([
+    "http://192.168.2.10:8080",
+    "http://10.1.2.3",
+    "http://172.16.5.4",
+    "http://172.31.255.254",
+    "http://100.100.1.5",
+    "http://localhost:3000",
+    "http://nas.local",
+  ])("accepts private HTTP origin %s when the owner opts in", (origin) => {
+    expect(relaxed.safeParse({ ...destination, origin }).success).toBe(true);
+  });
+  it("still rejects public HTTP origins when the owner opts in", () => {
+    expect(relaxed.safeParse({ ...destination, origin: "http://api.example.test" }).success).toBe(
+      false,
+    );
+  });
+  it("rejects a private HTTP origin for a website login even when the owner opts in", () => {
+    expect(
+      relaxed.safeParse({
+        ...destination,
+        origin: "http://192.168.2.10:8080",
+        auth: { type: "login" },
+      }).success,
+    ).toBe(false);
+    expect(relaxed.safeParse({ ...destination, auth: { type: "login" } }).success).toBe(true);
+  });
+  it.each([
+    "http://192.168.2.10:8080/upload",
+    "http://192.168.2.10:8080?key=1",
+    "http://100.100.100.200",
+    "http://169.254.170.2",
+    "http://169.254.169.254",
+  ])("relaxed schema still rejects non-origin URLs %s", (origin) => {
+    expect(relaxed.safeParse({ ...destination, origin }).success).toBe(false);
+  });
+  it.each(["100.100.100.200", "169.254.170.2", "169.254.169.254", "metadata.google.internal"])(
+    "classifies metadata host %s",
+    (host) => {
+      expect(isCloudMetadataHost(host)).toBe(true);
+    },
+  );
+  it.each([
+    ["100.63.0.1", false],
+    ["100.64.0.1", true],
+    ["100.127.255.254", true],
+    ["100.128.0.1", false],
+    ["172.15.0.1", false],
+    ["172.16.0.1", true],
+    ["172.32.0.1", false],
+    ["192.169.0.1", false],
+    ["example.test", false],
+  ])("classifies private host %s", (host, expected) => {
+    expect(isPrivateNetworkHost(host)).toBe(expected);
+  });
+});
+
+describe("login credentials", () => {
+  it("accepts a login destination and round-trips its value", () => {
+    expect(
+      BotSecretDestination.safeParse({ ...destination, auth: { type: "login" } }).success,
+    ).toBe(true);
+    const value = { username: "fake-user", password: "fake:password\nwith newline" };
+    expect(decodeLoginSecret(encodeLoginSecret(value))).toEqual(value);
+  });
+
+  it.each([
+    { username: "", password: "fake-password" },
+    { username: "fake-user", password: "" },
+  ])("rejects an incomplete login %j", (value) => {
+    expect(() => encodeLoginSecret(value)).toThrow();
   });
 });

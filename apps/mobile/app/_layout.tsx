@@ -1,25 +1,42 @@
+import { PRODUCT_NAME } from "@rakazo/contracts";
 import { DarkTheme, Stack, ThemeProvider } from "expo-router";
+import * as ScreenOrientation from "expo-screen-orientation";
+import * as SplashScreen from "expo-splash-screen";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useMemo, useState } from "react";
 import { View } from "react-native";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { KeyboardProvider } from "react-native-keyboard-controller";
 import { AvatarStyleProvider } from "../components/avatar-style";
+import { CallCard } from "../components/CallCard";
 import { ComputerUpdateProgress } from "../components/computer-update-progress";
 import { currentApiBase, loadApiBase, loadSessionToken, selectedSpaceId } from "../lib/api";
 import { loadAppearancePreference, mobileTokens } from "../lib/appearance";
+import { loadAvatarStyle } from "../lib/avatar-style";
 import { bootstrapI18n, useI18n } from "../lib/i18n";
 import {
   configureForegroundNotifications,
   resumeLiveNotifications,
 } from "../lib/live-notifications";
 import { native, useResolvedAppearance } from "../lib/native";
+import { useNotificationResponses } from "../lib/open-notification";
+import { loadResponseStreamingPreference } from "../lib/response-streaming";
 
 configureForegroundNotifications();
+// Keep the splash up until the saved appearance applies, so the first frame isn't in the OS scheme.
+void SplashScreen.preventAutoHideAsync().catch(() => undefined);
 
 export default function Layout() {
+  useEffect(() => {
+    // The app is portrait-only; the computer screen unlocks rotation while it is open.
+    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(
+      () => undefined,
+    );
+  }, []);
   const { t } = useI18n();
   const [ready, setReady] = useState(false);
+  useNotificationResponses(ready);
+  const [appearanceReady, setAppearanceReady] = useState(false);
   const resolved = useResolvedAppearance();
   const navigationTheme = useMemo(() => {
     const tokens = mobileTokens();
@@ -39,8 +56,17 @@ export default function Layout() {
   }, [resolved]);
 
   useEffect(() => {
+    if (appearanceReady && ready) void SplashScreen.hideAsync().catch(() => undefined);
+  }, [appearanceReady, ready]);
+
+  useEffect(() => {
     void Promise.all([
-      Promise.all([loadApiBase(), loadAppearancePreference()])
+      Promise.all([
+        loadApiBase(),
+        loadAppearancePreference().finally(() => setAppearanceReady(true)),
+        loadResponseStreamingPreference(),
+        loadAvatarStyle(),
+      ])
         .then(async () =>
           resumeLiveNotifications(
             currentApiBase(),
@@ -69,7 +95,7 @@ export default function Layout() {
                   contentStyle: { backgroundColor: String(native.page) },
                 }}
               >
-                <Stack.Screen name="index" options={{ headerShown: false, title: "Rakazo" }} />
+                <Stack.Screen name="index" options={{ headerShown: false, title: PRODUCT_NAME }} />
                 <Stack.Screen name="sign-in" options={{ headerShown: false }} />
                 <Stack.Screen
                   name="integration-setup"
@@ -115,14 +141,25 @@ export default function Layout() {
                     headerBackVisible: false,
                   }}
                 />
+                <Stack.Screen name="artifacts" options={{ title: t("Artifacts") }} />
+                <Stack.Screen name="artifact" options={{ title: t("Artifact") }} />
                 <Stack.Screen name="group-thread" options={{ title: t("Group") }} />
                 <Stack.Screen name="group-settings" options={{ title: t("Group settings") }} />
                 <Stack.Screen name="bot-settings" options={{ title: t("Chat settings") }} />
                 <Stack.Screen name="thread" options={{ title: t("Thread") }} />
                 <Stack.Screen name="routine" options={{ title: t("Routine") }} />
                 <Stack.Screen name="computer" options={{ title: t("Computer") }} />
+                <Stack.Screen
+                  name="image"
+                  options={{
+                    headerShown: false,
+                    presentation: "fullScreenModal",
+                    animation: "fade",
+                  }}
+                />
               </Stack>
               <ComputerUpdateProgress />
+              <CallCard />
             </ThemeProvider>
           </AvatarStyleProvider>
         ) : (

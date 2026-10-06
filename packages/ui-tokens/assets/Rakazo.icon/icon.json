@@ -5,13 +5,13 @@
       "layers": [
         {
           "glass": false,
-          "image-name": "orange-bot.png",
-          "name": "orange-bot"
+          "image-name": "brand-icon.png",
+          "name": "brand-icon"
         }
       ],
       "position": {
         "scale": 1,
-        "translation-in-points": [0, 90]
+        "translation-in-points": [0, 0]
       },
       "shadow": {
         "kind": "neutral",

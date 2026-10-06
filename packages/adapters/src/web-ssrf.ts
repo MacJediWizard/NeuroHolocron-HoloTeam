@@ -1,5 +1,6 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
+import { PRODUCT_NAME, SOURCE_REPO } from "@rakazo/contracts";
 import { readBoundedResponseBytes } from "@rakazo/core";
 import { Agent } from "undici";
 import {
@@ -8,7 +9,7 @@ import {
   type ResolvedAddress,
   type ResolveHostname,
 } from "./network-address.js";
-import { dispatcherFetch } from "./undici-fetch.js";
+import { fetchPairedWithDispatcher } from "./undici-fetch.js";
 
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
@@ -88,7 +89,7 @@ export async function fetchSafeWebText(
   const resolve = options.resolveHostname ?? defaultResolveHostname;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
-  const baseFetch = options.fetch ?? dispatcherFetch;
+  const baseFetch = fetchPairedWithDispatcher(options.fetch);
   const dispatcher = new Agent({
     connect: { lookup: createAddressCheckedLookup(resolve, assertPublicAddresses) },
   });
@@ -109,7 +110,7 @@ export async function fetchSafeWebText(
       resolve,
       dispatcher,
       maxBytes,
-      userAgent: options.userAgent ?? "Rakazo/0.1 (+https://github.com/elie222/rakazo)",
+      userAgent: options.userAgent ?? `${PRODUCT_NAME}/0.1 (+https://github.com/${SOURCE_REPO})`,
       headers: options.headers,
       signal,
       redirectsRemaining: MAX_REDIRECTS,

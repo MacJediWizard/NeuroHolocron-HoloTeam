@@ -1,5 +1,12 @@
 import type { BackgroundJobHandlers } from "@rakazo/adapter-kit";
+import {
+  HISTORY_COMPACT_MAX_ATTEMPTS,
+  historyCompactJob,
+  messagingDeliverJob,
+} from "@rakazo/adapter-kit";
+import { createLogger, createTestSink, installLogger, wrapJobPayload } from "@rakazo/logging";
 import type { Runner } from "graphile-worker";
+import { makeWorkerUtils } from "graphile-worker";
 import type { Pool } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -10,7 +17,11 @@ vi.mock("graphile-worker", () => ({
   makeWorkerUtils: vi.fn(),
 }));
 
-import { databaseCapacityBackoffMs, GraphileJobWorkerHost } from "./wakeup.js";
+import {
+  databaseCapacityBackoffMs,
+  GraphileJobPublisher,
+  GraphileJobWorkerHost,
+} from "./wakeup.js";
 
 function handlers(): BackgroundJobHandlers {
   return {
@@ -64,6 +75,37 @@ describe("databaseCapacityBackoffMs", () => {
     expect(databaseCapacityBackoffMs(3)).toBe(1_600);
     expect(databaseCapacityBackoffMs(8)).toBe(30_000);
     expect(databaseCapacityBackoffMs(20)).toBe(30_000);
+  });
+});
+
+describe("GraphileJobPublisher.enqueue", () => {
+  function publisherWith(addJob: ReturnType<typeof vi.fn>) {
+    vi.mocked(makeWorkerUtils).mockResolvedValue({
+      addJob,
+      release: vi.fn(async () => undefined),
+    } as never);
+    return new GraphileJobPublisher({} as Pool);
+  }
+
+  it("forwards the job's maxAttempts cap to graphile", async () => {
+    const addJob = vi.fn(async () => undefined);
+    const publisher = publisherWith(addJob);
+    await publisher.enqueue(historyCompactJob("thread-1"));
+    expect(addJob).toHaveBeenCalledWith(
+      "history.compact",
+      expect.anything(),
+      expect.objectContaining({ maxAttempts: HISTORY_COMPACT_MAX_ATTEMPTS }),
+    );
+    await publisher.close();
+  });
+
+  it("leaves the queue default when the job sets no cap", async () => {
+    const addJob = vi.fn(async (..._args: unknown[]) => undefined);
+    const publisher = publisherWith(addJob);
+    await publisher.enqueue(messagingDeliverJob("run-1"));
+    const options = addJob.mock.calls[0]?.[2] as { maxAttempts?: number } | undefined;
+    expect(options?.maxAttempts).toBeUndefined();
+    await publisher.close();
   });
 });
 
@@ -131,6 +173,67 @@ describe("GraphileJobWorkerHost runner lifecycle", () => {
     expect(run).toHaveBeenCalledTimes(1);
 
     await host.stop();
+  });
+
+  it("logs when history compaction fails permanently", async () => {
+    const first = mockRunner();
+    run.mockResolvedValueOnce(first.runner);
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo-worker", sinks: [sink] }));
+    const host = new GraphileJobWorkerHost({} as Pool, {
+      sleep: async () => undefined,
+    });
+
+    try {
+      await host.start(handlers());
+      const on = first.runner.events.on as ReturnType<typeof vi.fn>;
+      const failed = on.mock.calls.find((call) => call[0] === "job:failed")?.[1] as
+        | ((event: {
+            job: {
+              task_identifier: string;
+              payload: unknown;
+              attempts: number;
+              max_attempts: number;
+            };
+            error: unknown;
+          }) => void)
+        | undefined;
+      expect(failed).toBeTypeOf("function");
+      failed?.({
+        job: {
+          task_identifier: "history.compact",
+          payload: wrapJobPayload({ threadId: "thread-9" }),
+          attempts: HISTORY_COMPACT_MAX_ATTEMPTS,
+          max_attempts: HISTORY_COMPACT_MAX_ATTEMPTS,
+        },
+        error: new Error("The operation was aborted due to timeout"),
+      });
+      failed?.({
+        job: {
+          task_identifier: "run.continue",
+          payload: wrapJobPayload({ runId: "run-1" }),
+          attempts: 25,
+          max_attempts: 25,
+        },
+        error: new Error("handler failed"),
+      });
+    } finally {
+      await host.stop();
+      installLogger(createLogger({ service: "rakazo-worker", level: "off", sinks: [] }));
+    }
+
+    expect(sink.events).toEqual([
+      expect.objectContaining({
+        level: "error",
+        message: "history.compact failed permanently",
+        "thread.id": "thread-9",
+        "history.compact.reason": "attempts_exhausted",
+        "history.compact.retryable": false,
+        "job.attempts": HISTORY_COMPACT_MAX_ATTEMPTS,
+        "job.max_attempts": HISTORY_COMPACT_MAX_ATTEMPTS,
+        error: expect.objectContaining({ message: "The operation was aborted due to timeout" }),
+      }),
+    ]);
   });
 
   it("wakes a pending restart delay when stop is called", async () => {

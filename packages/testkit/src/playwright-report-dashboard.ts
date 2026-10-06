@@ -1,5 +1,7 @@
+import { PRODUCT_NAME, SOURCE_REPO } from "@rakazo/contracts";
+
 const MAX_HISTORY_LENGTH = 100;
-export const MAX_PLAYWRIGHT_SCREENSHOT_COUNT = 300;
+export const MAX_PLAYWRIGHT_SCREENSHOT_COUNT = 350;
 export const MAX_PLAYWRIGHT_SCREENSHOT_BYTES = 250 * 1024 * 1024;
 const SHARED_PAGE_STYLES = `
     :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #09090b; color: #fafafa; }
@@ -201,7 +203,7 @@ export function renderPlaywrightDashboard(history: PlaywrightRun[]): string {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="color-scheme" content="dark" />
-  <title>Playwright · Rakazo</title>
+  <title>Playwright · ${PRODUCT_NAME}</title>
   <style>
     ${SHARED_PAGE_STYLES}
     body { margin: 0; min-height: 100vh; background: radial-gradient(circle at top, #312e81 0, #09090b 34rem); }
@@ -242,14 +244,14 @@ export function renderPlaywrightDashboard(history: PlaywrightRun[]): string {
   <main>
     <header>
       <div>
-        <p class="eyebrow">Rakazo · browser checks</p>
+        <p class="eyebrow">${PRODUCT_NAME} · browser checks</p>
         <h1>Playwright</h1>
         <p class="subtitle">Persistent visual evidence and results from the emulated end-to-end suite.</p>
       </div>
       <div class="actions">
         <a class="button" href="#" id="latest-screenshots">Latest screenshots</a>
         <a class="button" href="#" id="latest-report">Latest report</a>
-        <a class="button" href="https://github.com/elie222/rakazo/actions">GitHub Actions</a>
+        <a class="button" href="https://github.com/${SOURCE_REPO}/actions">GitHub Actions</a>
       </div>
     </header>
 

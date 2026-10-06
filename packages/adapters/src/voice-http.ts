@@ -1,3 +1,4 @@
+import type { VoiceVerifyResult } from "@rakazo/adapter-kit";
 import { readBodyCapped } from "./web-ssrf.js";
 
 /** A 2,000-character utterance should stay far below this, even at high MP3 bitrates. */
@@ -53,7 +54,7 @@ export function speechUploadName(mimeType?: string): string {
 
 export async function readVoiceJson(
   res: Response,
-  options: { requireValid?: boolean } = {},
+  options: { requireValid?: boolean; rawOnInvalid?: boolean } = {},
 ): Promise<unknown> {
   let bytes: Uint8Array;
   try {
@@ -63,11 +64,12 @@ export async function readVoiceJson(
     if (options.requireValid) throw new Error("Voice provider response could not be read.");
     return null;
   }
+  const text = new TextDecoder().decode(bytes);
   try {
-    return JSON.parse(new TextDecoder().decode(bytes));
+    return JSON.parse(text);
   } catch {
     if (options.requireValid) throw new Error("Voice provider returned invalid JSON.");
-    return null;
+    return options.rawOnInvalid ? text : null;
   }
 }
 
@@ -117,6 +119,35 @@ export function voiceHttpError(
 export async function requireOk(res: Response, provider: string, what: string): Promise<Response> {
   if (res.ok) return res;
   throw new Error(voiceHttpError(statusFor(res), provider, what, await readVoiceJson(res)));
+}
+
+export async function verifyVoiceHttpGet(options: {
+  url: string;
+  headers: Record<string, string>;
+  signal: AbortSignal;
+  provider: string;
+}): Promise<VoiceVerifyResult> {
+  try {
+    const res = await fetch(options.url, {
+      headers: options.headers,
+      signal: voiceDeadline(options.signal, 20_000),
+    });
+    if (res.ok) return { ok: true };
+    return {
+      ok: false,
+      message: voiceHttpError(
+        res.status,
+        options.provider,
+        "checking that key",
+        await readVoiceJson(res),
+      ),
+    };
+  } catch {
+    return {
+      ok: false,
+      message: voiceUnreachable(options.provider),
+    };
+  }
 }
 
 function statusFor(res: Response) {

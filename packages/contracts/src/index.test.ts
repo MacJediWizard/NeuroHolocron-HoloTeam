@@ -22,6 +22,7 @@ import {
   RunSchema,
   UpdateBotInput,
   UpdateGroupInput,
+  usableModelId,
 } from "./index.js";
 
 describe("contracts", () => {
@@ -56,6 +57,17 @@ describe("contracts", () => {
     expect(parseModelContextWindow("1.5")).toBeUndefined();
   });
 
+  it("treats null, undefined, and their string forms as an unset model id", () => {
+    expect(usableModelId(null)).toBeNull();
+    expect(usableModelId(undefined)).toBeNull();
+    expect(usableModelId("null")).toBeNull();
+    expect(usableModelId("undefined")).toBeNull();
+    expect(usableModelId("  null  ")).toBeNull();
+    expect(usableModelId("")).toBeNull();
+    expect(usableModelId("   ")).toBeNull();
+    expect(usableModelId("claude-opus-4-6")).toBe("claude-opus-4-6");
+  });
+
   it("rejects maxTokens larger than contextWindow on model connect", () => {
     const invalid = ModelConnectInputSchema.safeParse({
       provider: "openai-compatible",
@@ -77,6 +89,19 @@ describe("contracts", () => {
       contextWindow: 32768,
     });
     expect(valid.success).toBe(true);
+  });
+
+  it("lets a built-in connection update maxTokens without a new API key", () => {
+    expect(
+      ModelConnectInputSchema.safeParse({ provider: "anthropic", maxTokens: 8192 }).success,
+    ).toBe(true);
+    expect(
+      ModelConnectInputSchema.safeParse({ provider: "anthropic", maxTokens: null }).success,
+    ).toBe(true);
+    expect(ModelConnectInputSchema.safeParse({ provider: "anthropic" }).success).toBe(false);
+    expect(
+      ModelConnectInputSchema.safeParse({ provider: "anthropic", apiKey: "short" }).success,
+    ).toBe(false);
   });
 
   it("accepts optional persisted duration only on valid steps blocks", () => {
@@ -328,7 +353,7 @@ describe("contracts", () => {
     ).toBe(false);
   });
 
-  it("allows localhost HTTP MCP endpoints and rejects other non-HTTPS URLs before storage", () => {
+  it("allows localhost HTTP MCP endpoints and other HTTP(S) URLs without credentials", () => {
     const base = {
       slug: "demo",
       name: "Demo",
@@ -343,15 +368,21 @@ describe("contracts", () => {
         .success,
     ).toBe(true);
     expect(
+      McpServerConfigInput.safeParse({ ...base, endpoint: "http://10.0.0.8:3927/mcp" }).success,
+    ).toBe(true);
+    expect(
       McpServerConfigInput.safeParse({ ...base, endpoint: "http://localhost:8123/api/mcp#" })
         .success,
     ).toBe(false);
     expect(
       McpServerConfigInput.safeParse({ ...base, endpoint: "http://example.test/mcp" }).success,
-    ).toBe(false);
+    ).toBe(true);
     expect(
       McpServerConfigInput.safeParse({ ...base, endpoint: "https://mcp.example.test/mcp" }).success,
     ).toBe(true);
+    expect(
+      McpServerConfigInput.safeParse({ ...base, endpoint: "ftp://mcp.example.test/mcp" }).success,
+    ).toBe(false);
   });
 
   it("rejects oversized chart data wherever it is embedded", () => {

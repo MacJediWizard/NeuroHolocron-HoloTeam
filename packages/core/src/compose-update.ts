@@ -1,3 +1,4 @@
+import { SOURCE_REPO } from "@rakazo/contracts";
 import {
   DEFAULT_UPDATE_REMOTE,
   isOfficialRepoUrl,
@@ -8,12 +9,12 @@ import {
 /**
  * The GitHub repository whose CI fills the image namespace. `publish-server-image.yml` pushes to
  * `ghcr.io/${{ github.repository }}`, so the namespace always belongs to whichever repository ran
- * the workflow. Naming a different owner here points the deployment at packages nobody publishes.
+ * the workflow, lowercased as GHCR requires. Naming a different owner here points the deployment at packages nobody publishes.
  *
  * `OFFICIAL_REPO_URL` names the same repository, so the source commit selected from a release is
  * guaranteed to have been eligible for this repository's publishing workflow.
  */
-export const PUBLISHED_IMAGE_REPO = "elie222/rakazo";
+export const PUBLISHED_IMAGE_REPO = SOURCE_REPO.toLowerCase();
 
 /** The published server image. One image runs api, worker, and web. */
 export const OFFICIAL_SERVER_IMAGE = `ghcr.io/${PUBLISHED_IMAGE_REPO}/app`;

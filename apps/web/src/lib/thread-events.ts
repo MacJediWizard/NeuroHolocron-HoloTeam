@@ -26,12 +26,15 @@ const runTriggers = new Set<Run["trigger"]>([
   "routine",
   "resume",
   "follow_up",
+  "reaction",
+  "call_end",
   "spawn",
   "skill",
   "bot_message",
   "webhook",
   "messaging",
   "cloud_agent",
+  "created",
 ]);
 
 function runFromStartedEvent(event: ProductEvent, previous: Run | undefined): Run {
@@ -159,8 +162,9 @@ export function mergeThreadSnapshot(
  *
  * A refresh that started earlier can still return running+busyBotName after the client
  * already applied waiting_takeover. Cursor comparisons only apply within the same thread.
- * Stop clears run/busy optimistically in the shell because it has no terminal event; an
- * older-cursor refresh must keep that cleared local state (see Shell stopRun).
+ * Stop clears run/busy optimistically in the shell so an in-flight refresh cannot revive
+ * the run before its run.cancelled event lands; an older-cursor refresh must keep that
+ * cleared local state (see Shell stopRun).
  */
 export function reconcileRefreshedThread(
   prev: ThreadSnapshot | null,
@@ -476,18 +480,23 @@ export function reduceThreadSnapshot(
   if (event.type === "thread.message.created" || event.type === "thread.message.updated") {
     const role = (event.payload.role as ThreadMessage["role"]) ?? "bot";
     const blocks = (event.payload.blocks as ThreadMessage["blocks"]) ?? [];
+    const id = String(event.payload.messageId ?? event.id);
+    const known = prev.messages.find((message) => message.id === id);
     const next: ThreadMessage = {
-      id: String(event.payload.messageId ?? event.id),
+      id,
       threadId: event.threadId,
       seq: event.seq,
       role,
       blocks,
       botId: event.botId,
       runId: event.runId,
+      callId: typeof event.payload.callId === "string" ? event.payload.callId : known?.callId,
       replyToMessageId:
         typeof event.payload.replyToMessageId === "string"
           ? event.payload.replyToMessageId
           : undefined,
+      replyQuote:
+        typeof event.payload.replyQuote === "string" ? event.payload.replyQuote : undefined,
       createdAt: event.createdAt,
     };
     const replacedSubagentIds = new Set(
@@ -561,6 +570,7 @@ export function reduceComputerStatus(
 ): ComputerStatus | null {
   if (!prev) return prev;
   if (!isComputerStatusEvent(event)) return prev;
+  if (event.botId !== prev.botId) return prev;
   if (event.type === "computer.takeover.requested") {
     const retainedControl = event.payload.retainedControl === true;
     const next = {

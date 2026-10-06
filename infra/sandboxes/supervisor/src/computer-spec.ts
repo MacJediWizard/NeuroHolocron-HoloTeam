@@ -113,19 +113,25 @@ function parsePidsLimit(name: string, raw: string): number {
   return value;
 }
 
+/** An unset variable and one present but blank both mean "use the default". */
+function envOrDefault(name: string, fallback: string): string {
+  const raw = process.env[name];
+  return raw === undefined || raw.trim() === "" ? fallback : raw;
+}
+
 /** The host resource ceilings applied to every bot computer. */
 export function computerResourceLimits() {
   const memoryBytes = parseMemoryBytes(
     "RAKAZO_COMPUTER_MEMORY",
-    process.env.RAKAZO_COMPUTER_MEMORY ?? DEFAULT_COMPUTER_MEMORY,
+    envOrDefault("RAKAZO_COMPUTER_MEMORY", DEFAULT_COMPUTER_MEMORY),
   );
   const nanoCpus = parseNanoCpus(
     "RAKAZO_COMPUTER_CPUS",
-    process.env.RAKAZO_COMPUTER_CPUS ?? DEFAULT_COMPUTER_CPUS,
+    envOrDefault("RAKAZO_COMPUTER_CPUS", DEFAULT_COMPUTER_CPUS),
   );
   const pidsLimit = parsePidsLimit(
     "RAKAZO_COMPUTER_PIDS_LIMIT",
-    process.env.RAKAZO_COMPUTER_PIDS_LIMIT ?? DEFAULT_COMPUTER_PIDS_LIMIT,
+    envOrDefault("RAKAZO_COMPUTER_PIDS_LIMIT", DEFAULT_COMPUTER_PIDS_LIMIT),
   );
   return {
     // Memory and MemorySwap are set together: leaving MemorySwap unset lets the
@@ -141,6 +147,48 @@ export function resolveScreenNetworkMode(value: string | undefined): ScreenNetwo
   if (!value || value === "published") return "published";
   if (value === "internal" || value === "isolated") return value;
   throw new Error(`Unsupported SANDBOX_SCREEN_NETWORK value: ${value}`);
+}
+
+/**
+ * Egress policy for per-bot computer networks. `open` is today's behaviour: full
+ * outbound access, including the host's bridge addresses, the LAN, and link-local
+ * cloud metadata endpoints. `restricted` keeps public internet egress but lets the
+ * operator drop everything else with one host-side iptables rule set — the
+ * supervisor gives each computer network a deterministic bridge interface name so
+ * the rules match by interface (`-i rakazo-c+`) instead of ephemeral subnets.
+ * Enforcement lives on the Docker host (infra/compose/restrict-computer-egress.sh);
+ * the flag only marks the networks. Supervisor capabilities stay unchanged.
+ */
+export type ComputerEgressMode = "open" | "restricted";
+
+export function resolveComputerEgressMode(
+  value = process.env.SANDBOX_COMPUTER_EGRESS,
+): ComputerEgressMode {
+  if (value === undefined || value.trim() === "" || value === "open") return "open";
+  if (value === "restricted") return "restricted";
+  throw new Error(`Unsupported SANDBOX_COMPUTER_EGRESS value: ${value}`);
+}
+
+/**
+ * Host bridge interface name for a computer network. Linux caps interface names
+ * at 15 bytes (IFNAMSIZ), so "rakazo-c" gets a 7-hex-char suffix derived from the
+ * same digest as the network name — deterministic across recreate, unique per bot.
+ */
+export function computerBridgeNameFor(botId: string) {
+  const hash = createHash("sha256").update(botId).digest("hex").slice(0, 7);
+  return `rakazo-c${hash}`;
+}
+
+/** docker.createNetwork payload for a bot's computer network. */
+export function computerNetworkCreateOptions(botId: string, egress: ComputerEgressMode = "open") {
+  return {
+    Name: computerNetworkNameFor(botId),
+    Driver: "bridge",
+    CheckDuplicate: true,
+    ...(egress === "restricted"
+      ? { Options: { "com.docker.network.bridge.name": computerBridgeNameFor(botId) } }
+      : {}),
+  };
 }
 
 export function hostComputerUser(uid = process.getuid?.(), gid = process.getgid?.()): string {

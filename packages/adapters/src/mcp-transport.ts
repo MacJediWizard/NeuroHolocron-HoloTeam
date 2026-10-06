@@ -21,10 +21,13 @@ export type McpRemoteTransport = "streamable-http" | "sse";
 export interface McpUrlPolicy {
   /** Maximum URL length accepted before any network request. */
   maxUrlLength?: number;
-  /** Permit plain HTTP only on the configured loopback resource's exact origin. */
+  /** Permit plain HTTP only on the configured loopback resource's exact origin.
+   * Requests only honour it together with `allowPrivateEndpoint`: loopback is private. */
   allowHttpLocalhost?: boolean;
   /** Permit configured credentials on an explicitly local HTTP endpoint. */
   allowLocalHttpCredentials?: boolean;
+  /** Permit RFC1918 / Docker-network hosts when the deployment owner enabled the escape. */
+  allowPrivateEndpoint?: boolean;
   /** Hosts allowed after redirects (redirects are rejected by default). */
   allowedHosts?: readonly string[];
 }
@@ -82,9 +85,10 @@ function validateUrl(raw: string | URL, policy: McpUrlPolicy = {}): URL {
   const local = isLocalMcpHost(url.hostname);
   if (
     url.protocol !== "https:" &&
-    !(url.protocol === "http:" && policy.allowHttpLocalhost === true && local)
+    !(url.protocol === "http:" && policy.allowHttpLocalhost === true && local) &&
+    !(url.protocol === "http:" && policy.allowPrivateEndpoint === true)
   ) {
-    throw new Error("MCP remote URL must use HTTPS (HTTP is allowed only for localhost)");
+    throw new Error("MCP remote URL must use HTTPS");
   }
   if (policy.allowedHosts && !policy.allowedHosts.includes(url.hostname)) {
     throw new Error(`MCP host is not in the allowlist: ${url.hostname}`);
@@ -98,8 +102,11 @@ export function secureFetch(
   headerPolicy: McpHeaderPolicy = {},
   network: RemoteTransportDependencies = {},
 ): SafeRemoteFetch {
+  // A local hostname is not authorization: the unguarded loopback fetch below
+  // needs the deployment-owner private-endpoint escape as well.
   const localOrigin =
     urlPolicy.allowHttpLocalhost === true &&
+    urlPolicy.allowPrivateEndpoint === true &&
     resourceUrl.protocol === "http:" &&
     isLocalMcpHost(resourceUrl.hostname)
       ? resourceUrl.origin
@@ -125,7 +132,9 @@ export function secureFetch(
     "cookie",
     "proxy-authorization",
   ]);
-  const safeRemoteFetch = createSafeRemoteFetch(network.fetch, network.resolveHostname);
+  const safeRemoteFetch = createSafeRemoteFetch(network.fetch, network.resolveHostname, {
+    allowPrivateEndpoint: urlPolicy.allowPrivateEndpoint,
+  });
   const request = async (input: Request | URL | string, init?: RequestInit): Promise<Response> => {
     const source = new Request(input, init);
     // OAuth challenges and rediscovery can supply new URLs. Only the explicitly
@@ -176,14 +185,13 @@ export function secureFetch(
     // and OAuth error parsing sees the literal string "[object Response]".
     // Re-wrap the body stream in the global realm without buffering it so MCP
     // streaming and OAuth token responses retain their semantics.
-    if (!(response instanceof Response)) {
-      return new Response(response.body as unknown as BodyInit, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: response.headers,
-      });
-    }
-    return response;
+    if (response instanceof Response) return response;
+    const foreign: Response = response;
+    return new Response(foreign.body as unknown as BodyInit, {
+      status: foreign.status,
+      statusText: foreign.statusText,
+      headers: foreign.headers,
+    });
   };
   const result = request as SafeRemoteFetch;
   result.close = () => safeRemoteFetch.close();
@@ -220,11 +228,12 @@ export function withEndpointOriginFallback(
     try {
       // Cap the first attempt: an unroutable host otherwise burns the full
       // connect timeout before the fallback gets a chance.
-      return await fetchImpl(
-        input,
-        init?.signal ? init : { ...init, signal: AbortSignal.timeout(4_000) },
-      );
+      return await fetchImpl(input, {
+        ...init,
+        signal: combineSignals(init?.signal ?? undefined, AbortSignal.timeout(4_000)),
+      });
     } catch {
+      init?.signal?.throwIfAborted();
       return fetchImpl(new URL(url.pathname + url.search, endpointOrigin), sanitizedInit(init));
     }
   };

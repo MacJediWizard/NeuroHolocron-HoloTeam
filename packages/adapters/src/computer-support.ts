@@ -49,6 +49,7 @@ export function applyPlaceholderAction(box: { screen: string }, action: Computer
   if (action.kind === "clipboard") box.screen = action.text;
   else if (action.kind === "open") box.screen = `opened ${action.path}`;
   else if (action.kind === "launch") box.screen = `launched ${action.application}`;
+  else if (action.kind === "focus") box.screen = `focused ${action.application}`;
   else box.screen = action.kind;
 }
 
@@ -100,6 +101,27 @@ export function resolveBotWorkspaceCwd(
   if (!requestedCwd || requestedCwd === ".") return teamBotWorkspaceDirectory(botId);
   if (requestedCwd.startsWith("/")) return requestedCwd;
   return resolveBotWorkspacePath(scope, botId, requestedCwd);
+}
+
+/** Paths a user may write while controlling this bot: its home, or shared/. */
+export function resolveBotUploadPath(
+  scope: ComputerMode,
+  botId: string,
+  requestedPath: string,
+): string {
+  const stored = resolveBotWorkspacePath(scope, botId, requestedPath);
+  if (scope !== "team") return normalizeWorkspacePath(stored);
+  const normalized = normalizeWorkspacePath(stored);
+  const botDirectory = teamBotWorkspaceDirectory(botId);
+  if (
+    normalized === botDirectory ||
+    normalized.startsWith(`${botDirectory}/`) ||
+    normalized === "shared" ||
+    normalized.startsWith("shared/")
+  ) {
+    return normalized;
+  }
+  throw new Error("Path escapes the bot workspace");
 }
 
 export function displayBotWorkspacePath(

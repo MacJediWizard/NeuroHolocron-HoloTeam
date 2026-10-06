@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { PRODUCT_NAME } from "@rakazo/contracts/brand";
 import { describe, expect, it } from "vitest";
 
 const packageJson = JSON.parse(
@@ -11,7 +12,7 @@ const packageJson = JSON.parse(
 
 describe("desktop package metadata", () => {
   it("shares the customer-facing name between Electron and electron-builder", () => {
-    expect(packageJson.productName).toBe("Rakazo");
+    expect(packageJson.productName).toBe(PRODUCT_NAME);
     expect(packageJson.build?.productName).toBeUndefined();
   });
 });

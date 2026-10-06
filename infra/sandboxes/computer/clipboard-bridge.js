@@ -1,9 +1,12 @@
 /**
- * Host → sandbox paste for the chrome-less noVNC embed.
+ * Clipboard bridge for the chrome-less noVNC embed.
  *
- * Debian noVNC 1.3 only syncs clipboard from the full vnc.html panel.
- * Without this bridge, Ctrl/Cmd+V only forwarded keys: on macOS Cmd+V became
- * Super+V (no paste on Linux), and the remote CLIPBOARD stayed empty.
+ * Host → sandbox: Debian noVNC 1.3 only syncs clipboard from the full
+ * vnc.html panel. Without this bridge, Ctrl/Cmd+V only forwarded keys: on
+ * macOS Cmd+V became Super+V (no paste on Linux), and the remote CLIPBOARD
+ * stayed empty.
+ * Sandbox → host: noVNC reports remote CLIPBOARD changes as a "clipboard"
+ * event, but nothing writes them to the host clipboard without a listener.
  */
 
 export const KEYSYM = {
@@ -76,6 +79,94 @@ export function pasteHostText(rfb, text) {
   rfb.clipboardPasteFrom(text);
   sendRemotePaste(sendKey);
   return true;
+}
+
+/**
+ * Read plain text from the host clipboard API.
+ * Returns null when the API is missing or denied so callers can fall back to a
+ * focusable paste target. An empty clipboard is "".
+ * @param {{ readText?: () => Promise<string> } | null | undefined} [clipboard]
+ */
+export async function readHostClipboardText(clipboard = globalThis.navigator?.clipboard) {
+  if (!clipboard || typeof clipboard.readText !== "function") return null;
+  try {
+    return (await clipboard.readText()) || "";
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Focus a paste fallback during the tap and park the caret after any sentinel
+ * so OS paste cannot treat those characters as clipboard text.
+ * @param {{ focus?: () => void, value?: string, setSelectionRange?: (start: number, end: number) => void } | null | undefined} target
+ */
+function focusPasteTarget(target) {
+  if (!target || typeof target.focus !== "function") return;
+  target.focus();
+  if (typeof target.value !== "string") return;
+  const length = target.value.length;
+  target.setSelectionRange?.(length, length);
+}
+
+/**
+ * Touch Paste control: one tap reads the host clipboard and pastes through the
+ * RFB bridge. When the clipboard API is unavailable, focus a paste target so
+ * the existing `paste` listener can fire without a modifier chord.
+ * @param {{ viewOnly?: boolean, clipboardPasteFrom?: (text: string) => void, sendKey?: Function, _rfbConnectionState?: string }} rfb
+ * @param {{ button?: HTMLElement | null, clipboard?: { readText?: () => Promise<string> }, fallbackFocus?: { focus?: () => void, blur?: () => void, value?: string, setSelectionRange?: (start: number, end: number) => void } | null }} [options]
+ * @returns {() => void} detach
+ */
+export function attachMobilePaste(rfb, options = {}) {
+  const button = options.button;
+  if (!button || rfb.viewOnly) return () => {};
+  button.hidden = false;
+  const onClick = async () => {
+    const clipboard = options.clipboard ?? globalThis.navigator?.clipboard;
+    const fallback = options.fallbackFocus;
+    // Focus during the tap, before any await, so a denial still has a software
+    // keyboard and a caret parked after the sentinel.
+    focusPasteTarget(fallback);
+    const text = await readHostClipboardText(clipboard);
+    if (text) {
+      pasteHostText(rfb, text);
+      fallback?.blur?.();
+      return;
+    }
+    if (text === "") fallback?.blur?.();
+  };
+  button.addEventListener("click", onClick);
+  return () => {
+    button.removeEventListener("click", onClick);
+  };
+}
+
+/**
+ * Sandbox → host copy: Debian noVNC 1.3 dispatches a "clipboard" CustomEvent
+ * with detail.text when x11vnc reports a remote CLIPBOARD change
+ * (ServerCutText). navigator.clipboard.writeText needs a secure context and
+ * can be denied without a gesture, so failures are silent.
+ * @param {{ addEventListener?: (type: string, listener: (event: object) => void) => void, removeEventListener?: (type: string, listener: (event: object) => void) => void } | null | undefined} rfb
+ * @param {{ clipboard?: { writeText?: (text: string) => Promise<void> } | null }} [options]
+ * @returns {() => void} detach
+ */
+export function attachRemoteClipboardCopy(rfb, options = {}) {
+  const clipboard = options.clipboard ?? globalThis.navigator?.clipboard;
+  if (typeof rfb?.addEventListener !== "function") return () => {};
+  if (!clipboard || typeof clipboard.writeText !== "function") return () => {};
+  const onClipboard = async (event) => {
+    const text = event?.detail?.text;
+    if (typeof text !== "string") return;
+    try {
+      await clipboard.writeText(text);
+    } catch {
+      // Clipboard writes can be denied without a gesture; stay silent.
+    }
+  };
+  rfb.addEventListener("clipboard", onClipboard);
+  return () => {
+    rfb.removeEventListener?.("clipboard", onClipboard);
+  };
 }
 
 /**

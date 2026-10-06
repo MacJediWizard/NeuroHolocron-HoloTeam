@@ -1,5 +1,5 @@
 import * as z from "zod";
-import { BotSecretDestination } from "./bot-secrets.js";
+import { botSecretDestinationSchema } from "./bot-secrets.js";
 import { Id } from "./ids.js";
 import { McpTransportSchema } from "./mcp.js";
 
@@ -16,6 +16,7 @@ export const ProductEventType = z.enum([
   "thread.computer",
   "thread.subagent",
   "thread.cloud_agent",
+  "thread.call.ended",
   "run.started",
   "run.checkpointed",
   "run.waiting_input",
@@ -26,6 +27,7 @@ export const ProductEventType = z.enum([
   "computer.takeover.requested",
   "computer.takeover.granted",
   "computer.takeover.released",
+  "computer.command",
   "memory.revised",
   "routine.created",
   "routine.updated",
@@ -46,6 +48,8 @@ export const ProductEventType = z.enum([
   "group.created",
   "group.updated",
   "group.handoff",
+  /** Liveness only: never persisted, never applied to a snapshot, always seq 0. */
+  "heartbeat",
 ]);
 export type ProductEventType = z.infer<typeof ProductEventType>;
 
@@ -102,7 +106,10 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     input: z.enum(["text", "secret"]).optional(),
     /** Why the secret is needed; drives field label on the masked card. */
     purpose: SecretAskPurpose.optional(),
-    credential: BotSecretDestination.optional(),
+    // Records what the runtime could produce under either deployment mode, so
+    // an ask persisted before an owner toggles the private-HTTP flag still
+    // validates on replay.
+    credential: botSecretDestinationSchema({ allowPrivateHttpOrigin: true }).optional(),
     status: z.enum(["pending", "answered"]).optional(),
     answer: z.string().optional(),
     actions: z
@@ -145,6 +152,14 @@ export const MessageBlock = z.discriminatedUnion("kind", [
     kind: z.literal("computer"),
     state: z.string(),
     text: z.string(),
+  }),
+  z.object({
+    /** Transcript card left in the thread when the bot hangs up a voice call. */
+    kind: z.literal("voice_call"),
+    /** Absent when the call had no client nonce to derive an id from. */
+    callId: z.string().optional(),
+    title: z.string(),
+    farewell: z.string(),
   }),
   z.object({ kind: z.literal("meta"), text: z.string() }),
   z.object({
@@ -205,13 +220,15 @@ export const MessageBlock = z.discriminatedUnion("kind", [
   ChartBlock,
   z.object({
     /** Approval card for an agent-created MCP server. The user completes the
-        OAuth popup (or confirms no authorization is needed) in the UI. */
+        OAuth popup (or confirms no authorization is needed) in the UI. The
+        status persists so the card renders its decision after a remount. */
     kind: z.literal("mcp_approval"),
     name: z.string(),
     serverId: Id,
     transport: McpTransportSchema,
     endpoint: z.string().nullable(),
     needsOAuth: z.boolean(),
+    status: z.enum(["pending", "connected", "dismissed"]).default("pending"),
   }),
   z.object({
     kind: z.literal("image"),
@@ -269,6 +286,46 @@ export const MessageBlock = z.discriminatedUnion("kind", [
 ]);
 export type MessageBlock = z.infer<typeof MessageBlock>;
 
+/**
+ * Something the bot did on its computer, shown in the terminal's Activity view: a shell
+ * command (with a redacted output tail) or a file/app action, whose `command` is the path or
+ * app name.
+ */
+export const COMPUTER_COMMAND_OUTPUT_MAX_CHARS = 16_000;
+export const ComputerCommandKind = z.enum([
+  "shell",
+  "write_file",
+  "attach_file",
+  "open_path",
+  "launch_app",
+]);
+export type ComputerCommandKind = z.infer<typeof ComputerCommandKind>;
+export const ComputerCommandSchema = z.object({
+  executionId: z.string(),
+  kind: ComputerCommandKind,
+  command: z.string(),
+  cwd: z.string(),
+  status: z.enum(["running", "done"]),
+  exitCode: z.number().int().nullable(),
+  output: z.string(),
+  /** Size written by write_file. */
+  bytes: z.number().int().nonnegative().optional(),
+});
+export type ComputerCommand = z.infer<typeof ComputerCommandSchema>;
+
+/**
+ * Collapse running/done events into one entry per command, in start order. A finished
+ * command stays finished, so history and live events can be merged in either order.
+ */
+export function foldComputerCommands<T extends ComputerCommand>(events: T[]): T[] {
+  const byId = new Map<string, T>();
+  for (const event of events) {
+    if (byId.get(event.executionId)?.status === "done" && event.status === "running") continue;
+    byId.set(event.executionId, event);
+  }
+  return [...byId.values()];
+}
+
 export const ProductEventSchema = z.object({
   id: Id,
   spaceId: Id,
@@ -290,7 +347,10 @@ export const ThreadMessageSchema = z.object({
   blocks: z.array(MessageBlock),
   botId: Id.optional(),
   replyToMessageId: Id.optional(),
+  replyQuote: z.string().optional(),
   runId: Id.optional(),
+  /** Set when the message was sent from a live voice call; groups one call's transcript. */
+  callId: z.string().optional(),
   createdAt: z.string(),
 });
 export type ThreadMessage = z.infer<typeof ThreadMessageSchema>;

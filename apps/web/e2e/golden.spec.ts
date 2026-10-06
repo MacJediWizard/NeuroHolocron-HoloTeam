@@ -66,19 +66,12 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
       message: "the protected-input run must be ready for takeover",
     })
     .toBe("waiting_takeover");
+  const computerCard = page.getByTestId("computer-card");
+  await expect(computerCard).toBeVisible();
+  await expect(computerCard.getByText("Needs you", { exact: true })).toBeVisible();
+  await expect(computerCard.getByTestId("computer-card-open")).toBeVisible();
   await captureScreenshot(page, testInfo, "08-protected-input-request");
-  await page.getByTitle("Agent computer").click();
-  const sidePanel = page.getByTestId("side-panel");
-  await expect(sidePanel).toHaveCSS("width", "384px");
-  const [mainBox, panelBox] = await Promise.all([
-    page.locator("main").boundingBox(),
-    sidePanel.boundingBox(),
-  ]);
-  expect(mainBox).not.toBeNull();
-  expect(panelBox).not.toBeNull();
-  expect((mainBox?.x ?? 0) + (mainBox?.width ?? 0)).toBeLessThanOrEqual(panelBox?.x ?? 0);
-  await sidePanel.getByTestId("computer-preview").hover();
-  await sidePanel.getByTestId("computer-preview-open").click();
+  await computerCard.getByTestId("computer-card-open").click();
   await expect(page.getByRole("button", { name: "Close computer" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Skip", exact: true }).last()).toBeVisible();
   await expect(page.getByRole("button", { name: "I’m done", exact: true }).last()).toBeVisible();
@@ -99,11 +92,20 @@ test("takeover, routine, plugins, and export are reachable", async ({ page }, te
     })
     .toBe("waiting_takeover");
   // Agent computer toggles the panel. Re-open when closed so Open can refresh computer status.
+  const sidePanel = page.getByTestId("side-panel");
   if ((await sidePanel.getAttribute("data-panel")) === "computer") {
     await page.getByTitle("Agent computer").click();
   }
   await page.getByTitle("Agent computer").click();
   await expect(sidePanel).toHaveAttribute("data-panel", "computer");
+  await expect(sidePanel).toHaveCSS("width", "384px");
+  const [mainBox, panelBox] = await Promise.all([
+    page.locator("main").boundingBox(),
+    sidePanel.boundingBox(),
+  ]);
+  expect(mainBox).not.toBeNull();
+  expect(panelBox).not.toBeNull();
+  expect((mainBox?.x ?? 0) + (mainBox?.width ?? 0)).toBeLessThanOrEqual(panelBox?.x ?? 0);
   await sidePanel.getByTestId("computer-preview").hover();
   const openComputer = sidePanel.getByTestId("computer-preview-open");
   await expect(openComputer).toBeVisible({ timeout: 30_000 });
@@ -370,12 +372,13 @@ test("sign-in, spawn, and stop work in the shell", async ({ page }, testInfo) =>
   await expect(page.getByText(/^Steer /)).toHaveCount(0);
   await expect(composer).toHaveAttribute("placeholder", "Message Chief");
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeVisible();
+  const voiceButton = page
+    .getByTestId("composer-bar")
+    .getByRole("button", { name: "Voice", exact: true });
+  await expect(voiceButton).toBeVisible();
   await composer.fill("Use the newer report and keep the answer short.");
-  await page.keyboard.press("Tab");
-  await expect(
-    page.getByTestId("composer-bar").getByRole("button", { name: "Voice", exact: true }),
-  ).toBeFocused();
-  await page.keyboard.press("Tab");
+  await expect(voiceButton).toHaveCount(0);
+  await composer.press("Tab");
   await expect(page.getByRole("button", { name: "Send", exact: true })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(

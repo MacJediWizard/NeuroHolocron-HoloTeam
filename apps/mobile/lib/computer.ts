@@ -2,8 +2,18 @@ import type { ComputerMode, ComputerStatus as ContractComputerStatus } from "@ra
 import { t } from "./i18n";
 
 export const COMPUTER_HEARTBEAT_MS = 60_000;
+/**
+ * Computer lifecycle calls create, start or stop a container (booting, switching between the
+ * Team and a Private computer); give them far more than an ordinary RPC.
+ */
+export const COMPUTER_LIFECYCLE_TIMEOUT_MS = 120_000;
 export const SCREEN_URL_OPEN_ATTEMPTS = 5;
 export const SCREEN_URL_RETRY_DELAY_MS = 400;
+/**
+ * Re-read an unsealed screen this long after the read. A sealed capability renews this long
+ * after it was issued, which is before its own expiry even when a later client received it.
+ */
+export const SCREEN_URL_RENEW_MS = 50 * 60_000;
 
 export type ComputerStatus = ContractComputerStatus;
 
@@ -57,6 +67,75 @@ export function embeddableScreenUrl(url: string | null, apiBase: string): string
   } catch {
     return null;
   }
+}
+
+/**
+ * Identity of a live screen stream, ignoring rotating capability tokens.
+ * View vs control stays in the key so takeover/release still reconnects.
+ */
+export function screenStreamKey(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/novnc\/session\/(view|control)\/[^/]+(\/.*)?$/);
+    if (match) return `${parsed.origin}/novnc/session/${match[1]}${match[2] ?? ""}`;
+    const viewOnly = parsed.searchParams.get("view_only");
+    const policy = viewOnly == null ? "" : `?view_only=${viewOnly}`;
+    return `${parsed.origin}${parsed.pathname}${policy}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
+ * Remaining life at which a same-stream capability is replaced.
+ * Sealed URLs live one hour. The refresher re-reads `SCREEN_URL_RENEW_MS` after the seal
+ * was issued, so a reused seal is refreshed before its original expiry. Slack covers clock
+ * and timer skew so that fetch is applied before expiry.
+ */
+const SCREEN_CAPABILITY_TTL_MS = 60 * 60_000;
+const SCREEN_SOURCE_RENEW_REMAINING_MS =
+  SCREEN_CAPABILITY_TTL_MS - SCREEN_URL_RENEW_MS + 5 * 60_000;
+
+function screenCapabilityExpiresAt(url: string): number | null {
+  try {
+    const match = new URL(url).pathname.match(/^\/novnc\/session\/(?:view|control)\/(\d+)\./);
+    if (!match) return null;
+    const expiresAt = Number(match[1]);
+    return Number.isSafeInteger(expiresAt) ? expiresAt : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Time the screen-URL renew interval is measured from.
+ * A sealed capability keeps the expiry it was issued with, so a later reader renews before
+ * that expiry. URLs without one renew from the read itself.
+ */
+export function screenRenewReadAt(url: string | null, readAt: number): number {
+  const expiresAt = url ? screenCapabilityExpiresAt(url) : null;
+  if (expiresAt == null) return readAt;
+  return expiresAt - SCREEN_CAPABILITY_TTL_MS;
+}
+
+/**
+ * Keep the connected screen URL while only the capability token rotated.
+ * Adopt a newer same-stream URL once the held capability is in the renew window,
+ * so the proxy does not close the live stream when the original token expires.
+ */
+export function retainScreenSource(held: string, next: string, now = Date.now()): string {
+  if (screenStreamKey(held) !== screenStreamKey(next)) return next;
+  const heldExpires = screenCapabilityExpiresAt(held);
+  const nextExpires = screenCapabilityExpiresAt(next);
+  if (
+    heldExpires != null &&
+    nextExpires != null &&
+    nextExpires > heldExpires &&
+    heldExpires - now <= SCREEN_SOURCE_RENEW_REMAINING_MS
+  ) {
+    return next;
+  }
+  return held;
 }
 
 export function previewPlaceholder(

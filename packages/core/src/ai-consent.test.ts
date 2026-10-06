@@ -93,4 +93,90 @@ describe("foreground AI consent", () => {
       aiDataUsesForProcedure("routines/update", { routineId: "routine", active: true }),
     ).toEqual(["model", "memory"]);
   });
+  it("coalesces concurrent prompts and grants for one account-space recipient", async () => {
+    let decide!: (allowed: boolean) => void;
+    const decision = new Promise<boolean>((resolve) => {
+      decide = resolve;
+    });
+    const prompt = vi.fn(() => decision);
+    const allow = vi.fn(async () => undefined);
+    const first = ensureAiDataConsent({
+      uses: ["model"],
+      status: async () => status,
+      prompt,
+      allow,
+    });
+    const second = ensureAiDataConsent({
+      uses: ["model"],
+      status: async () => status,
+      prompt,
+      allow,
+    });
+
+    await Promise.resolve();
+    expect(prompt).toHaveBeenCalledOnce();
+    decide(true);
+    await Promise.all([first, second]);
+    expect(allow).toHaveBeenCalledExactlyOnceWith({
+      scope: status.scope,
+      version: status.version,
+      keys: ["model"],
+    });
+  });
+  it("does not share a pending grant across account-space scopes or recipients", async () => {
+    const prompt = vi.fn(async () => true);
+    const allow = vi.fn(async () => undefined);
+    const statuses = [
+      {
+        ...status,
+        scope: "account-a-space",
+        recipients: [status.recipients[0]!],
+      },
+      {
+        ...status,
+        scope: "account-b-space",
+        recipients: [status.recipients[0]!],
+      },
+      {
+        ...status,
+        scope: "account-a-space",
+        recipients: [status.recipients[1]!],
+      },
+    ];
+
+    await Promise.all(
+      statuses.map((current) =>
+        ensureAiDataConsent({
+          uses: ["model", "voice"],
+          status: async () => current,
+          prompt,
+          allow,
+        }),
+      ),
+    );
+    expect(prompt).toHaveBeenCalledTimes(3);
+    expect(allow).toHaveBeenCalledTimes(3);
+  });
+  it("does not share a grant across independent API contexts", async () => {
+    const prompt = vi.fn(async () => true);
+    const allow = vi.fn(async () => undefined);
+    await Promise.all([
+      ensureAiDataConsent({
+        uses: ["model"],
+        status: async () => status,
+        prompt,
+        allow,
+        coalesceKey: "https://one.example",
+      }),
+      ensureAiDataConsent({
+        uses: ["model"],
+        status: async () => status,
+        prompt,
+        allow,
+        coalesceKey: "https://two.example",
+      }),
+    ]);
+    expect(prompt).toHaveBeenCalledTimes(2);
+    expect(allow).toHaveBeenCalledTimes(2);
+  });
 });

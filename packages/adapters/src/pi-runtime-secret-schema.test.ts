@@ -134,16 +134,19 @@ describe("request_secret parameters", () => {
   it("exposes OpenAI-compatible parameters.type object for local servers", () => {
     // LM Studio and similar validators reject tools[].function.parameters without
     // type === "object" (and often without properties). request_secret is the
-    // builtin that previously serialized as a bare anyOf union.
+    // builtin that previously serialized as a bare anyOf union. Anthropic rejects
+    // a root union outright, so the wire shape is one object with both destinations;
+    // the executor still enforces credential XOR connectionId.
     const wire = JSON.parse(JSON.stringify(parametersFor(toolNamed("request_secret")))) as {
       type?: unknown;
-      properties?: unknown;
+      properties?: Record<string, unknown>;
       anyOf?: unknown[];
       oneOf?: unknown[];
     };
     expect(wire.type).toBe("object");
-    expect(wire.properties).toEqual({});
-    expect((wire.anyOf ?? wire.oneOf ?? []).length).toBe(2);
+    expect(wire.properties).toHaveProperty("credential");
+    expect(wire.properties).toHaveProperty("connectionId");
+    expect(wire.anyOf ?? wire.oneOf).toBeUndefined();
   });
 });
 
@@ -174,12 +177,135 @@ describe("prepareRequestSecretArguments", () => {
     expect(out).toEqual({ label: "c", purpose: "otp", connectionId: "abc" });
   });
 
+  it("folds a top-level credential object and a JSON string into credential", () => {
+    expect(
+      prepareRequestSecretArguments({
+        label: "API key",
+        purpose: "api_key",
+        name: sampleCredential.name,
+        origin: sampleCredential.origin,
+        auth: sampleCredential.auth,
+      }),
+    ).toEqual({ label: "API key", purpose: "api_key", credential: sampleCredential });
+    expect(
+      prepareRequestSecretArguments({
+        label: "API key",
+        purpose: "api_key",
+        credential: JSON.stringify(sampleCredential),
+        connectionId: "  ",
+      }),
+    ).toEqual({ label: "API key", purpose: "api_key", credential: sampleCredential });
+  });
+
+  it("drops planted secret fields before they reach prepared args", () => {
+    const planted = "planted-secret-value";
+    const fromObject = prepareRequestSecretArguments({
+      label: "API key",
+      purpose: "api_key",
+      credential: { ...sampleCredential, value: planted, secret: planted },
+    });
+    expect(fromObject).toEqual({
+      label: "API key",
+      purpose: "api_key",
+      credential: sampleCredential,
+    });
+    expect(JSON.stringify(fromObject)).not.toContain(planted);
+
+    const fromString = prepareRequestSecretArguments({
+      label: "API key",
+      purpose: "api_key",
+      credential: JSON.stringify({
+        ...sampleCredential,
+        value: planted,
+        secret: planted,
+        password: planted,
+      }),
+    });
+    expect(fromString).toEqual({
+      label: "API key",
+      purpose: "api_key",
+      credential: sampleCredential,
+    });
+    expect(JSON.stringify(fromString)).not.toContain(planted);
+  });
+
+  it("drops secrets nested in auth before they reach prepared args", () => {
+    const planted = "planted-auth-secret";
+    const auth = { type: "bearer" as const, token: planted, password: planted };
+    const fromObject = prepareRequestSecretArguments({
+      label: "API key",
+      purpose: "api_key",
+      credential: { ...sampleCredential, auth, value: planted },
+    });
+    expect(fromObject).toEqual({
+      label: "API key",
+      purpose: "api_key",
+      credential: sampleCredential,
+    });
+    expect(JSON.stringify(fromObject)).not.toContain(planted);
+    auth.token = "changed-after-copy";
+    expect(fromObject).toEqual({
+      label: "API key",
+      purpose: "api_key",
+      credential: sampleCredential,
+    });
+
+    const fromString = prepareRequestSecretArguments({
+      label: "Login",
+      purpose: "password",
+      credential: JSON.stringify({
+        name: "example_login",
+        origin: `https://user:${planted}@login.example.test`,
+        auth: { type: "login", password: planted },
+      }),
+    });
+    expect(fromString).toEqual({
+      label: "Login",
+      purpose: "password",
+      credential: {
+        name: "example_login",
+        origin: "https://login.example.test",
+        auth: { type: "login" },
+      },
+    });
+    expect(JSON.stringify(fromString)).not.toContain(planted);
+  });
+
   it("omits credential and connectionId when absent rather than sending empties", () => {
     // The executor rejects a call that carries both, so neither may be faked in.
     expect(prepareRequestSecretArguments({ label: "c", purpose: "otp" })).toEqual({
       label: "c",
       purpose: "otp",
     });
+  });
+
+  it("rejects empty or missing label and purpose instead of inventing placeholders", () => {
+    expect(() => prepareRequestSecretArguments({})).toThrow(
+      "request_secret requires a non-empty label and purpose",
+    );
+    expect(() => prepareRequestSecretArguments({ purpose: "otp" })).toThrow(
+      "request_secret requires a non-empty label and purpose",
+    );
+    expect(() => prepareRequestSecretArguments({ label: "c" })).toThrow(
+      "request_secret requires a non-empty label and purpose",
+    );
+    expect(() => prepareRequestSecretArguments({ label: "", purpose: "otp" })).toThrow(
+      "request_secret requires a non-empty label and purpose",
+    );
+    expect(() => prepareRequestSecretArguments({ label: "c", purpose: "  " })).toThrow(
+      "request_secret requires a non-empty label and purpose",
+    );
+    expect(() =>
+      prepareRequestSecretArguments({
+        label: "c",
+        purpose: "",
+        credential: sampleCredential,
+      }),
+    ).toThrow("request_secret requires a non-empty label and purpose");
+    expect(() => prepareRequestSecretArguments({ credential: sampleCredential })).toThrow(
+      "received: credential",
+    );
+    expect(() => prepareRequestSecretArguments({})).toThrow("received: no arguments");
   });
 });
 

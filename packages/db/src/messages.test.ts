@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
-import type { Prisma } from "./client.js";
-import { createThreadMessageInTransaction } from "./messages.js";
+import type { Prisma, PrismaClient } from "./client.js";
+import {
+  createThreadMessage,
+  createThreadMessageInTransaction,
+  RunHistoryWriteError,
+} from "./messages.js";
 
 function transaction() {
   return {
@@ -32,5 +36,58 @@ describe("createThreadMessageInTransaction", () => {
     expect(visible.thread.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ unread: true }) }),
     );
+  });
+
+  it("rejects a cancelled run unless the terminal echo opts in", async () => {
+    const tx = transaction();
+    tx.run.findUnique.mockResolvedValue({ status: "cancelled", startedAt: new Date() });
+    const input = {
+      threadId: "thread-1",
+      role: "bot" as const,
+      blocks: [{ kind: "text" as const, text: "Stopped. This stayed queued without starting." }],
+      runId: "run-1",
+    };
+    await expect(
+      createThreadMessageInTransaction(tx as unknown as Prisma.TransactionClient, input),
+    ).rejects.toBeInstanceOf(RunHistoryWriteError);
+    await createThreadMessageInTransaction(tx as unknown as Prisma.TransactionClient, {
+      ...input,
+      allowCancelledRun: true,
+    });
+    expect(tx.message.create).toHaveBeenCalledOnce();
+  });
+});
+
+describe("createThreadMessage", () => {
+  it("reruns the whole transaction after a mid-write deadlock", async () => {
+    const deadlock = Object.assign(new Error("write conflict or a deadlock"), { code: "P2034" });
+    const tx = transaction();
+    // The sequence already advanced when the insert deadlocks; Postgres rolls both back.
+    tx.message.create.mockRejectedValueOnce(deadlock);
+    const run = vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx));
+
+    await expect(
+      createThreadMessage({ $transaction: run } as unknown as PrismaClient, {
+        threadId: "thread-1",
+        role: "bot",
+        blocks: [{ kind: "text", text: "Done" }],
+      }),
+    ).resolves.toEqual({ id: "message-1" });
+    expect(run).toHaveBeenCalledTimes(2);
+    expect(tx.thread.update).toHaveBeenCalledTimes(2);
+    expect(tx.message.create).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not retry other errors", async () => {
+    const run = vi.fn().mockRejectedValue(new Error("unique constraint"));
+
+    await expect(
+      createThreadMessage({ $transaction: run } as unknown as PrismaClient, {
+        threadId: "thread-1",
+        role: "user",
+        blocks: [{ kind: "text", text: "hi" }],
+      }),
+    ).rejects.toThrow("unique constraint");
+    expect(run).toHaveBeenCalledTimes(1);
   });
 });

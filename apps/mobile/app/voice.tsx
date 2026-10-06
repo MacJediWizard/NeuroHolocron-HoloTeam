@@ -1,5 +1,5 @@
 import { useFocusEffect } from "expo-router";
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -12,6 +12,7 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { rpc } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
+import { loadDeviceVoiceEnabled, saveDeviceVoiceEnabled } from "../lib/device-voice";
 import { useI18n } from "../lib/i18n";
 import { native, useThemedStyles } from "../lib/native";
 import { speakText } from "../lib/voice";
@@ -26,6 +27,7 @@ type VoiceCredential = {
   id: string;
   provider: string;
   voiceId: string;
+  speechModel?: string;
 };
 type VoiceStatus = {
   configured: boolean;
@@ -45,10 +47,18 @@ export default function VoiceSettings() {
   const [provider, setProvider] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [voiceId, setVoiceId] = useState("");
+  const [speechModel, setSpeechModel] = useState("");
+  const speechModelSave = useRef<string | null>(null);
+  const [deviceVoice, setDeviceVoice] = useState(false);
+  const [deviceVoiceReady, setDeviceVoiceReady] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState(false);
+  const [pending, setPending] = useState<
+    "connect" | "disconnect" | "voice" | "speech" | "test" | "device-voice" | null
+  >(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const deviceVoiceRevision = useRef(0);
+  const deviceVoiceSaveInFlight = useRef(false);
 
   const load = useCallback(async (nextProvider?: string) => {
     const [nextCatalog, nextCredentials, nextStatus] = await Promise.all([
@@ -63,6 +73,7 @@ export default function VoiceSettings() {
     setProvider(selected);
     const cred = nextCredentials.find((entry) => entry.provider === selected);
     setVoiceId(cred?.voiceId ?? "");
+    setSpeechModel(cred?.speechModel ?? "");
     if (cred) {
       setVoices(await rpc<VoiceInfo[]>("voice/voices", { provider: selected }));
     } else {
@@ -73,26 +84,61 @@ export default function VoiceSettings() {
   useFocusEffect(
     useCallback(() => {
       setLoading(true);
+      const revision = ++deviceVoiceRevision.current;
+      void loadDeviceVoiceEnabled()
+        .then((value) => {
+          if (deviceVoiceSaveInFlight.current) return;
+          if (deviceVoiceRevision.current !== revision) return;
+          setDeviceVoice(value);
+          setDeviceVoiceReady(true);
+        })
+        .catch((err: unknown) => {
+          if (deviceVoiceSaveInFlight.current) return;
+          if (deviceVoiceRevision.current !== revision) return;
+          setDeviceVoiceReady(true);
+          setError(err instanceof Error ? err.message : t("Could not load voice settings"));
+        });
       void load()
         .catch((err: unknown) =>
           setError(err instanceof Error ? err.message : t("Could not load voice settings")),
         )
         .finally(() => setLoading(false));
-    }, [load]),
+    }, [load, t]),
   );
+
+  async function toggleDeviceVoice() {
+    if (pending !== null || !deviceVoiceReady) return;
+    const next = !deviceVoice;
+    deviceVoiceSaveInFlight.current = true;
+    deviceVoiceRevision.current++;
+    setDeviceVoice(next);
+    setPending("device-voice");
+    setError(null);
+    try {
+      await saveDeviceVoiceEnabled(next);
+    } catch {
+      setDeviceVoice(!next);
+      setError(t("Could not save that preference"));
+    } finally {
+      deviceVoiceSaveInFlight.current = false;
+      deviceVoiceRevision.current++;
+      setPending(null);
+    }
+  }
 
   const selected = catalog.find((entry) => entry.id === provider);
   const credential = credentials.find((entry) => entry.provider === provider);
 
   async function connect() {
     if (!selected || apiKey.trim().length < 8) return;
-    setPending(true);
+    setPending("connect");
     setError(null);
     try {
       await rpc("voice/connect", {
         provider: selected.id,
         apiKey: apiKey.trim(),
         voiceId: voiceId || undefined,
+        ...(selected.id === "fish-audio" ? { speechModel: speechModel.trim() } : {}),
       });
       setApiKey("");
       await load(selected.id);
@@ -100,25 +146,66 @@ export default function VoiceSettings() {
     } catch (err) {
       setError(err instanceof Error ? err.message : t("Could not connect"));
     } finally {
-      setPending(false);
+      setPending(null);
+    }
+  }
+
+  async function disconnect() {
+    if (!credential) return;
+    setPending("disconnect");
+    setError(null);
+    setNotice(null);
+    try {
+      await rpc("voice/disconnect", { provider: credential.provider });
+      setApiKey("");
+      await load(credential.provider);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("Could not disconnect"));
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function saveSpeechModel() {
+    if (!credential || selected?.id !== "fish-audio" || pending !== null) return;
+    const next = speechModel.trim();
+    if (next === (credential.speechModel ?? "")) return;
+    if (speechModelSave.current === next) return;
+    speechModelSave.current = next;
+    setPending("speech");
+    setError(null);
+    try {
+      const saved = await rpc<VoiceCredential>("voice/setSpeechModel", {
+        provider: selected.id,
+        speechModel: next,
+      });
+      setSpeechModel(saved.speechModel ?? "");
+      setCredentials((current) =>
+        current.map((entry) => (entry.id === saved.id ? { ...entry, ...saved } : entry)),
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("Could not save that speech model"));
+    } finally {
+      speechModelSave.current = null;
+      setPending(null);
     }
   }
 
   async function chooseVoice(nextVoiceId: string) {
     setVoiceId(nextVoiceId);
-    setPending(true);
+    setPending("voice");
     try {
       await rpc("voice/setVoice", { voiceId: nextVoiceId, provider: selected?.id });
       await load(selected?.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : t("Could not save that voice"));
     } finally {
-      setPending(false);
+      setPending(null);
     }
   }
 
   async function testVoice() {
-    setPending(true);
+    setPending("test");
     setError(null);
     try {
       const ready = await speakText(t("Hi, this is how I'll sound when I read replies out loud."));
@@ -128,7 +215,7 @@ export default function VoiceSettings() {
     } catch (err) {
       setError(err instanceof Error ? err.message : t("Could not play a sample"));
     } finally {
-      setPending(false);
+      setPending(null);
     }
   }
 
@@ -138,16 +225,44 @@ export default function VoiceSettings() {
         {loading ? <ActivityIndicator color={native.secondaryLabel} /> : null}
         {error ? <Text style={styles.error}>{error}</Text> : null}
         {notice ? <Text style={styles.notice}>{notice}</Text> : null}
+        <Pressable
+          disabled={pending !== null || !deviceVoiceReady}
+          onPress={() => void toggleDeviceVoice()}
+          style={[
+            styles.card,
+            deviceVoice && styles.cardActive,
+            (pending !== null || !deviceVoiceReady) && styles.disabled,
+          ]}
+        >
+          <Text style={styles.cardTitle}>{t("This device")}</Text>
+          <Text style={styles.cardMeta}>
+            {deviceVoice
+              ? t("On · Free, works offline")
+              : t("Your phone's built-in voice. Free, no account needed")}
+          </Text>
+        </Pressable>
         {catalog.map((entry) => {
           const connected = credentials.some((cred) => cred.provider === entry.id);
           return (
             <Pressable
               key={entry.id}
+              disabled={pending !== null}
               onPress={() => {
                 setProvider(entry.id);
-                void load(entry.id);
+                setPending("voice");
+                void load(entry.id)
+                  .catch((err: unknown) =>
+                    setError(
+                      err instanceof Error ? err.message : t("Could not load voice settings"),
+                    ),
+                  )
+                  .finally(() => setPending(null));
               }}
-              style={[styles.card, provider === entry.id && styles.cardActive]}
+              style={[
+                styles.card,
+                provider === entry.id && styles.cardActive,
+                pending !== null && styles.disabled,
+              ]}
             >
               <Text style={styles.cardTitle}>{entry.name}</Text>
               <Text style={styles.cardMeta}>
@@ -177,19 +292,52 @@ export default function VoiceSettings() {
               textContentType="none"
             />
             <Pressable
-              disabled={pending || apiKey.trim().length < 8}
+              disabled={pending !== null || apiKey.trim().length < 8}
               onPress={() => void connect()}
-              style={[styles.button, (pending || apiKey.trim().length < 8) && styles.disabled]}
+              style={[
+                styles.button,
+                (pending !== null || apiKey.trim().length < 8) && styles.disabled,
+              ]}
             >
               <Text style={styles.buttonLabel}>{credential ? t("Replace key") : t("Connect")}</Text>
             </Pressable>
+            {credential ? (
+              <Pressable
+                disabled={pending !== null}
+                onPress={() => void disconnect()}
+                style={[styles.secondary, pending !== null && styles.disabled]}
+              >
+                <Text style={styles.secondaryLabel}>
+                  {pending === "disconnect" ? t("Disconnecting…") : t("Disconnect")}
+                </Text>
+              </Pressable>
+            ) : null}
+            {credential && selected.id === "fish-audio" ? (
+              <>
+                <Text style={styles.fieldLabel}>{t("Speech model")}</Text>
+                <TextInput
+                  accessibilityLabel={t("Speech model")}
+                  autoCapitalize="none"
+                  autoCorrect={false}
+                  editable={pending === null}
+                  value={speechModel}
+                  onChangeText={setSpeechModel}
+                  onBlur={() => void saveSpeechModel()}
+                  onSubmitEditing={() => void saveSpeechModel()}
+                  placeholder={t("Optional")}
+                  placeholderTextColor={native.tertiaryLabel}
+                  style={styles.input}
+                />
+              </>
+            ) : null}
             {voices.length ? (
               <View style={styles.voices}>
                 {voices.map((voice) => (
                   <Pressable
                     key={voice.id}
+                    disabled={pending !== null}
                     onPress={() => void chooseVoice(voice.id)}
-                    style={styles.voiceRow}
+                    style={[styles.voiceRow, pending !== null && styles.disabled]}
                   >
                     <Text style={styles.voiceLabel}>{voice.label}</Text>
                     {voiceId === voice.id ? <Text style={styles.check}>✓</Text> : null}
@@ -197,16 +345,16 @@ export default function VoiceSettings() {
                 ))}
               </View>
             ) : null}
-            {status?.ready ? (
-              <Pressable
-                disabled={pending}
-                onPress={() => void testVoice()}
-                style={styles.secondary}
-              >
-                <Text style={styles.secondaryLabel}>{t("Hear a sample")}</Text>
-              </Pressable>
-            ) : null}
           </>
+        ) : null}
+        {deviceVoice || status?.ready ? (
+          <Pressable
+            disabled={pending !== null}
+            onPress={() => void testVoice()}
+            style={styles.secondary}
+          >
+            <Text style={styles.secondaryLabel}>{t("Hear a sample")}</Text>
+          </Pressable>
         ) : null}
       </ScrollView>
     </SafeAreaView>
@@ -230,6 +378,7 @@ function createVoiceStyles() {
     cardActive: { borderColor: tokens.ring, backgroundColor: tokens.muted },
     cardTitle: { color: native.label, fontSize: 16 },
     cardMeta: { color: native.tertiaryLabel, marginTop: 4, fontSize: 12 },
+    fieldLabel: { color: native.label, marginTop: 16 },
     input: {
       marginTop: 8,
       borderRadius: 12,

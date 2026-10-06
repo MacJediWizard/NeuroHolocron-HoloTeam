@@ -19,6 +19,7 @@ import {
 } from "@rakazo/adapter-kit";
 import type {
   CloudAgentConnection,
+  CodexLiveCatalog,
   ComposioProvider,
   ComputerExecutionLease,
   ConnectorRegistry,
@@ -30,65 +31,109 @@ import type {
 } from "@rakazo/adapters";
 import {
   acquireComputerExecutionLease,
+  applyCodexLiveCatalog,
   applyTeachingDesktopInput,
   archiveBot,
+  assertSafeRemoteUrl,
   buildMcpCredentialBlob,
   buildModelConnectPlaintext,
+  CHATGPT_OAUTH_PROVIDER,
+  CodexCatalogCache,
   ComputerBusyError,
   cancelComputerRunWork,
   checkpointAndRecordComputerWorkspace,
   clearInactiveUserComputerControl,
+  codexLiveCatalogsForSpace,
+  codexLiveListsModel,
+  computerSupportsTerminal,
   computerSupportsUpdate,
   computerUpdateView,
   createVoiceProvider,
+  defaultCatalogModelId,
   deletePushToken,
   deploymentAutoReviewDefault,
   destroyBot,
   displayBotWorkspacePath,
   enqueueTakeoverContinuation,
   expireComputerControl,
+  forgetBotSecret,
+  getBotSecretMetadata,
   hasActiveComputerControl,
   isAutoReviewCheckerConfigured,
   isComputerScreenUnavailable,
   isSandboxGoneError,
   isScratchpadStatus,
+  kickModelCredentialRefresh,
+  listAvailablePiCatalog,
+  listBotSecretMetadata,
   listPiCatalog,
   listScratchpadItems,
   McpOAuthBroker,
   mapScratchpadItem,
+  modelCredentialAuthKindsForSpace,
   modelCredentialDto,
+  normalizeSecretDestination,
+  parseModelSecret,
+  pickReusableConnection,
   planLiveConnectionSync,
   prepareApiInstall,
   prepareGraphqlInstall,
   probeOpenAiCompatibleModels,
   provisionComputer,
   queueComputerUpdate,
+  readStoredModelAuth,
   releaseComputerExecutionLease,
   replaceComputer,
   resolveAutoReviewChecker,
+  resolveBotUploadPath,
+  resolveBotWorkspaceCwd,
   resolveBotWorkspacePath,
+  revokeScreenControl,
   sanitizeComposioError,
   savePushToken,
   scheduleComputerControlExpiry,
   scheduleComputerSleep,
   screenLeaseIdForRun,
   scriptedCatalogEntry,
+  selectDefaultCredentialId,
   serializeModelSecret,
+  storeBotSecret,
   takeoverLeaseMs,
   toComputerRef,
   touchRunningComputer,
+  UNAVAILABLE_MODEL_FOR_AUTH_MESSAGE,
+  validateModelAuthAvailability,
+  validateStoredModelAuth,
   verifyMcpInstall,
 } from "@rakazo/adapters";
 import type { Auth } from "@rakazo/auth";
-import type { Actor, ComputerStatus, McpServer, Me, SpaceNavigation } from "@rakazo/contracts";
+import type {
+  Actor,
+  Bot,
+  BotSecretMetadata,
+  ComputerReleaseReason,
+  ComputerStatus,
+  McpServer,
+  Me,
+  ProductEvent,
+  SpaceNavigation,
+} from "@rakazo/contracts";
 import {
+  ATTACHMENT_MAX_BYTES,
   appContract,
+  BotSecretAuth,
+  ComputerCommandSchema,
+  foldComputerCommands,
   IntegrationProviderIdSchema,
   OPENAI_COMPATIBLE_PROVIDER_ID,
+  usableModelId,
 } from "@rakazo/contracts";
 import {
   ACTIVE_RUN_STATUSES,
   AttachmentValidationError,
+  CALL_CLIENT_NONCE_PREFIX,
+  callClientNonce,
+  clampCatalogThinkingLevel,
   containsSecret,
   expandSkillReferencesInPrompt,
   hasMixedOneShotSchedule,
@@ -102,12 +147,14 @@ import {
   CannotDeleteDefaultSpaceError,
   CannotDeleteLastSpaceError,
   CannotDeleteSpaceAsNonOwnerError,
+  ComputerLimitError,
   claimEmptySpaceDeletionForMember,
   createExternalConversationRepos,
   createGroupRepos,
   createRepos,
   createSpaceForMember,
   createThreadMessageInTransaction,
+  defaultModelCredentialCandidates,
   deleteEmptySpaceForMember,
   deleteUnreferencedCredentialSecret,
   findDefaultModelCredential,
@@ -125,6 +172,7 @@ import {
   parseComputerMode,
   releaseSpaceDeletionClaim,
   renewSpaceDeletionClaim,
+  restoreBotUnderComputerQuota,
   SPACE_DELETION_CLAIM_TIMEOUT_MS,
   SpaceDeletionInProgressError,
   SpaceLimitError,
@@ -138,7 +186,16 @@ import { getLogger } from "@rakazo/logging";
 import { deleteAgentSecret, listAgentSecrets, putAgentSecret } from "./agent-secrets.js";
 import { createAgentSkillsService } from "./agent-skills.js";
 import { aiConsentStatus, allowAiConsent } from "./ai-consent.js";
-import { createOwnedArtifact, getOwnedArtifact, getSpaceArtifact } from "./artifacts.js";
+import {
+  ArtifactListCursorError,
+  createOwnedArtifact,
+  deleteArtifactFamily,
+  getOwnedArtifact,
+  getSpaceArtifact,
+  getSpaceArtifactById,
+  listArtifactVersions,
+  listSpaceArtifacts,
+} from "./artifacts.js";
 import { botProfileLabelsChanged, commitBotUpdate } from "./bot-update.js";
 import {
   executionBlocksUserTakeover,
@@ -146,6 +203,11 @@ import {
   toComputerStatus,
 } from "./computer-status.js";
 import { searchIntegrationCatalog } from "./integration-catalog.js";
+import {
+  dismissMcpServerApprovals,
+  resolveMcpApprovalCards,
+  revertConnectedMcpApprovals,
+} from "./mcp-approval.js";
 import { buildMcpUpdateMaterial } from "./mcp-material.js";
 import {
   disconnectMemoryProvider,
@@ -160,6 +222,7 @@ import {
   promptFocus,
   startOnboarding,
 } from "./onboarding.js";
+import { listRoutineRuns } from "./routine-runs.js";
 import { listSpaceRuns } from "./runs.js";
 import { addScreenProxyCapability } from "./screen-proxy.js";
 import { querySpaceSearch } from "./search.js";
@@ -188,6 +251,7 @@ import {
   threadSnapshot,
 } from "./thread-target.js";
 import {
+  disconnectVoiceCredential,
   listVoiceCatalog,
   loadDefaultVoiceCredential,
   loadVoiceCredential,
@@ -195,11 +259,16 @@ import {
   prepareVoice,
   toVoiceCredential,
   toVoiceStatus,
+  updateVoiceSpeechModel,
   voiceContext,
 } from "./voice.js";
 
 const MAX_COMPUTER_TEXT_FILE_BYTES = 2 * 1024 * 1024;
+/** Each command writes a running and a done event, so this keeps about 100 commands. */
+const COMPUTER_COMMAND_HISTORY_EVENTS = 200;
 const THREAD_MESSAGE_PAGE_SIZE = 100;
+/** Silence longer than this on a thread stream is indistinguishable from a dead socket. */
+export const HEARTBEAT_MS = 20_000;
 const EXPORT_MESSAGE_PAGE_SIZE = 500;
 
 async function reconcilePendingConnections(
@@ -392,6 +461,28 @@ function connectionContext(
   };
 }
 
+/** Loopback / LAN / Docker-network endpoints: the deployment owner, or everyone under the flag. */
+function mayUsePrivateEndpoint(actor: Actor, deps: Pick<RouterDeps, "env">): boolean {
+  return actor.isDeploymentOwner || deps.env.mcpAllowPrivateEndpoint === true;
+}
+
+async function assertMcpRemoteEndpoint(
+  endpoint: string | null | undefined,
+  actor: Actor,
+  deps: Pick<RouterDeps, "remoteConnectors" | "env">,
+): Promise<void> {
+  if (!endpoint) return;
+  try {
+    await assertSafeRemoteUrl(endpoint, deps.remoteConnectors?.resolveHostname, {
+      allowPrivateEndpoint: mayUsePrivateEndpoint(actor, deps),
+    });
+  } catch (error) {
+    throw new ORPCError("BAD_REQUEST", {
+      message: error instanceof Error ? error.message : "MCP endpoint is invalid",
+    });
+  }
+}
+
 function mcpAssignmentDto(row: {
   id: string;
   botId: string;
@@ -426,6 +517,19 @@ export interface RouterDeps {
   home: AgentHomeStore;
   secrets: EncryptedSecretStore;
   oauthLogins: PiOAuthLogins;
+  /** Live Codex catalog seam; defaults to the shared per-process cache. */
+  codexCatalog?: CodexLiveCatalog;
+  /**
+   * Detached refresh for a stored credential whose bearer expired — the live
+   * catalog path calls it instead of refreshing inline. Defaults to the
+   * runtime's locked `kickModelCredentialRefresh`; injectable for tests so a
+   * catalog read never reaches the real OAuth refresh endpoint.
+   */
+  refreshExpiredModelCredential?: (
+    scope: { userId: string; spaceId: string },
+    secretId: string,
+    provider: string,
+  ) => void;
   integrationSettings?: IntegrationProviderSettings;
   composio?: ComposioProvider;
   mcpOAuth?: McpOAuthBroker;
@@ -451,6 +555,7 @@ export interface RouterDeps {
     updaterToken?: string;
     imageTag?: string;
     integrationsCatalogUrl?: string;
+    mcpAllowPrivateEndpoint?: boolean;
   };
 }
 
@@ -458,6 +563,17 @@ export interface RouterDeps {
  * ignore the request abort signal, so without a deadline a hung destroy would
  * keep the deletion claim renewed forever and block stale-claim recovery. */
 const SPACE_TEARDOWN_TIMEOUT_MS = 120_000;
+
+/** The card is closed by a marker; the run that follows finishes whatever the call left open. */
+/** Deterministic nonce for a call's marker message. The unique (threadId, clientNonce)
+ * index makes it the hang-up idempotency key, and the "call:" prefix lets clients derive
+ * the marker's callId. User turns carry a uuid suffix, so they never collide. */
+export function callMarkerClientNonce(callId: string): string {
+  return `${CALL_CLIENT_NONCE_PREFIX}${callId}:marker`;
+}
+
+const HANG_UP_PROMPT =
+  "The voice call just ended because the user hung up. First call end_call with a short title for the call (leave farewell empty). Then, if anything the user asked for during the call is still unfinished, complete it now as a normal chat reply with full formatting. If nothing is pending, reply with one short sentence.";
 
 function spaceTeardownTimeoutMs(): number {
   const override = Number(process.env.SPACE_TEARDOWN_TIMEOUT_MS ?? "");
@@ -469,7 +585,112 @@ function mapSpaceLifecycleError(error: unknown): unknown {
   if (error instanceof SpaceDeletionInProgressError) {
     return new ORPCError("CONFLICT", { message: error.message });
   }
+  if (error instanceof ComputerLimitError) {
+    return new ORPCError("BAD_REQUEST", { message: error.message });
+  }
   return error;
+}
+
+const BOT_SECRET_INPUT_ERRORS = [
+  "Invalid credential destination",
+  "Invalid credential length",
+  "Credential cannot be used with this authentication method",
+  "Remove the existing credential before changing its destination",
+  "Credential limit reached",
+];
+
+/** Map credential validation failures to a bad request without echoing the submitted value. */
+function mapBotSecretStoreError(error: unknown): unknown {
+  if (error instanceof ORPCError) return error;
+  if (
+    error instanceof Error &&
+    BOT_SECRET_INPUT_ERRORS.some((prefix) => error.message.startsWith(prefix))
+  ) {
+    return new ORPCError("BAD_REQUEST", { message: error.message });
+  }
+  // Login decoding failures: a JSON parse message can quote the submitted value, so never forward it.
+  if (error instanceof SyntaxError || (error instanceof Error && error.name === "ZodError")) {
+    return new ORPCError("BAD_REQUEST", {
+      message: "A website login needs a username and password",
+    });
+  }
+  return error;
+}
+
+function botSecretScope(actor: Actor, botId: string) {
+  return { userId: actor.userId, spaceId: actor.spaceId, botId };
+}
+
+function botSecretMetadataDto(row: {
+  name: string;
+  origin: string;
+  auth: unknown;
+  createdAt: Date;
+  updatedAt: Date;
+}): BotSecretMetadata {
+  // Unreadable or no-longer-storable destinations become auth:null so the owner UI stays remove-only.
+  const parsed = BotSecretAuth.safeParse(row.auth);
+  let auth: BotSecretMetadata["auth"] = null;
+  if (parsed.success) {
+    try {
+      normalizeSecretDestination({ name: row.name, origin: row.origin, auth: parsed.data });
+      auth = parsed.data;
+    } catch {
+      auth = null;
+    }
+  }
+  return {
+    name: row.name,
+    origin: row.origin,
+    auth,
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+  };
+}
+
+const BOT_INTRO_PROMPT =
+  "You were just created. In one reply, say what you understood your role to be from your title, description and instructions, and ask for anything you need to get started.";
+
+/**
+ * A freshly created bot otherwise sits silent until someone hands it real work,
+ * so a misunderstood role goes unnoticed until it costs a run. Queue one
+ * invisible-prompt turn (like a routine or skill test run) so its first
+ * message states how it read its own instructions. The executor gives the
+ * "created" trigger no tools (see executor.ts), so this turn can only speak.
+ */
+export async function enqueueBotIntroRun(deps: RouterDeps, actor: Actor, bot: Bot): Promise<void> {
+  const threadId = bot.threadId;
+  if (!threadId) return;
+  // Scripted is the deterministic test/eval runtime, not a real deployment: an
+  // extra automatic run there competes with whatever response a test or eval
+  // harness queued next, for a bot it doesn't otherwise get to opt out of.
+  if (deps.env.agentRuntime === "scripted") return;
+  if ((await modelSetup(deps, actor)).needsModel) return;
+  const run = await deps.prisma.$transaction(async (tx) => {
+    const task = await tx.task.create({
+      data: {
+        spaceId: actor.spaceId,
+        botId: bot.id,
+        threadId,
+        userId: actor.userId,
+        prompt: BOT_INTRO_PROMPT,
+        status: "queued",
+      },
+    });
+    return tx.run.create({
+      data: {
+        spaceId: actor.spaceId,
+        botId: bot.id,
+        threadId,
+        taskId: task.id,
+        userId: actor.userId,
+        status: "queued",
+        trigger: "created",
+      },
+      select: { id: true },
+    });
+  });
+  await deps.jobs.enqueue(runContinueJob(run.id));
 }
 
 export function createRouter(deps: RouterDeps) {
@@ -477,6 +698,11 @@ export function createRouter(deps: RouterDeps) {
   const repos = createRepos(deps.prisma);
   const onboardingDeps = { prisma: deps.prisma, events: deps.events, connectors: deps.connectors };
   const mcpOAuth = deps.mcpOAuth ?? new McpOAuthBroker(deps.prisma, deps.secrets);
+  const codexCatalog = deps.codexCatalog ?? new CodexCatalogCache();
+  const refreshExpiredCredential =
+    deps.refreshExpiredModelCredential ??
+    ((scope: { userId: string; spaceId: string }, secretId: string, provider: string) =>
+      kickModelCredentialRefresh(deps.prisma, deps.secrets, scope, secretId, provider));
   const groupRepos = createGroupRepos(deps.prisma);
   const taughtSkills = createTaughtSkillsService({
     prisma: deps.prisma,
@@ -766,7 +992,31 @@ export function createRouter(deps: RouterDeps) {
       }),
     },
     models: {
-      list: authed.models.list.handler(async () => [...listPiCatalog(), scriptedCatalogEntry]),
+      list: authed.models.list.handler(async ({ context }) => {
+        const auth = await modelCredentialAuthKindsForSpace(
+          deps.prisma,
+          deps.secrets,
+          context.actor,
+        );
+        const available = listAvailablePiCatalog(auth.byProvider, auth.byModel);
+        const live = await codexLiveCatalogsForSpace(
+          deps.prisma,
+          deps.secrets,
+          context.actor,
+          auth,
+          codexCatalog,
+          {
+            // An expired bearer yields no catalog this round; kick the runtime's
+            // locked refresh so the next read can see the account's real list.
+            onExpiredToken: (secretId) =>
+              refreshExpiredCredential(context.actor, secretId, CHATGPT_OAUTH_PROVIDER),
+          },
+        );
+        const catalog = live.size > 0 ? applyCodexLiveCatalog(available, auth, live) : available;
+        // The scripted fixture only exists to drive the scripted runtime; a real
+        // runtime cannot execute it, so it stays out of the user-facing catalog.
+        return deps.env.agentRuntime === "scripted" ? [...catalog, scriptedCatalogEntry] : catalog;
+      }),
       credentials: authed.models.credentials.handler(async ({ context }) => {
         const rows = await deps.prisma.userModelCredential.findMany({
           where: { userId: context.actor.userId },
@@ -777,11 +1027,10 @@ export function createRouter(deps: RouterDeps) {
           },
           orderBy: newestModelCredentialOrder,
         });
-        const compatibleRows = rows.filter((row) => row.provider === OPENAI_COMPATIBLE_PROVIDER_ID);
-        const secrets = compatibleRows.length
+        const secrets = rows.length
           ? await deps.prisma.secret.findMany({
               where: {
-                id: { in: compatibleRows.map((row) => row.secretId) },
+                id: { in: rows.map((row) => row.secretId) },
                 userId: context.actor.userId,
                 spaceId: null,
               },
@@ -795,6 +1044,7 @@ export function createRouter(deps: RouterDeps) {
             ...row,
             isDefault: preference?.isDefault ?? false,
             defaultModel: preference?.modelId ?? null,
+            thinkingLevel: preference?.thinkingLevel ?? null,
           };
           const ciphertext = ciphertextById.get(row.secretId);
           if (!ciphertext) return modelCredentialDto(selected);
@@ -810,26 +1060,23 @@ export function createRouter(deps: RouterDeps) {
         try {
           let previousPlaintext: string | undefined;
           let omitVisionModelIds = false;
-          if (input.provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
-            const credential = await findModelCredential(
-              deps.prisma,
-              context.actor,
-              input.provider,
-            );
-            if (credential) {
-              const secret = await deps.prisma.secret.findFirst({
-                where: { id: credential.secretId, userId: context.actor.userId, spaceId: null },
-                select: { ciphertext: true },
-              });
-              if (secret) {
-                try {
-                  previousPlaintext = deps.secrets.load(secret.ciphertext, credential.secretId);
-                } catch (error) {
-                  // Explicit key replacement must still succeed when the prior
-                  // ciphertext is unreadable. Omit visionModelIds so a partial
-                  // one-model list does not wipe other enabled models; DB
-                  // supportsImages + defaultModel remain the legacy fallback.
-                  if (input.apiKey === undefined) throw error;
+          const credential = await findModelCredential(deps.prisma, context.actor, input.provider);
+          if (credential) {
+            const secret = await deps.prisma.secret.findFirst({
+              where: { id: credential.secretId, userId: context.actor.userId, spaceId: null },
+              select: { ciphertext: true },
+            });
+            if (secret) {
+              try {
+                previousPlaintext = deps.secrets.load(secret.ciphertext, credential.secretId);
+              } catch (error) {
+                // Explicit key replacement must still succeed when the prior
+                // ciphertext is unreadable. For OpenAI-compatible connections,
+                // omit visionModelIds so a partial one-model list does not wipe
+                // other enabled models; DB supportsImages + defaultModel remain
+                // the legacy fallback.
+                if (input.apiKey === undefined) throw error;
+                if (input.provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
                   omitVisionModelIds = true;
                 }
               }
@@ -843,14 +1090,23 @@ export function createRouter(deps: RouterDeps) {
             message: error instanceof Error ? error.message : "Invalid model connection",
           });
         }
-        return persistModelCredential(deps, context.actor, {
-          provider: input.provider,
-          plaintext,
-          label: input.label,
-          modelId: input.modelId,
-          supportsImages: input.supportsImages,
-          signal: context.signal,
-        });
+        return persistModelCredential(
+          deps,
+          context.actor,
+          {
+            provider: input.provider,
+            plaintext,
+            label: input.label,
+            modelId: input.modelId,
+            // openai-compatible keeps its effort inside the stored endpoint
+            // secret; catalog providers store it on the space preference.
+            thinkingLevel:
+              input.provider === OPENAI_COMPATIBLE_PROVIDER_ID ? undefined : input.thinkingLevel,
+            supportsImages: input.supportsImages,
+            signal: context.signal,
+          },
+          codexCatalog,
+        );
       }),
       probeOpenAiCompatible: authed.models.probeOpenAiCompatible.handler(
         async ({ context, input }) => {
@@ -870,6 +1126,7 @@ export function createRouter(deps: RouterDeps) {
           spaceId: context.actor.spaceId,
           provider: input.provider,
           modelId: input.modelId,
+          thinkingLevel: input.thinkingLevel,
           label: input.label,
           signal: context.signal,
         });
@@ -890,13 +1147,21 @@ export function createRouter(deps: RouterDeps) {
           input.loginId,
           context.actor,
           async (login) => {
-            return persistModelCredential(deps, context.actor, {
-              provider: login.provider,
-              plaintext: serializeModelSecret({ kind: "oauth", credential: login.credential }),
-              label: login.label ?? "ChatGPT Plus/Pro",
-              modelId: login.modelId,
-              signal: login.signal,
-            });
+            return persistModelCredential(
+              deps,
+              context.actor,
+              {
+                provider: login.provider,
+                plaintext: serializeModelSecret({ kind: "oauth", credential: login.credential }),
+                label:
+                  login.label ??
+                  listPiCatalog().find((entry) => entry.provider === login.provider)?.providerName,
+                modelId: login.modelId,
+                thinkingLevel: login.thinkingLevel,
+                signal: login.signal,
+              },
+              codexCatalog,
+            );
           },
         );
         if (result.status === "pending") {
@@ -911,66 +1176,173 @@ export function createRouter(deps: RouterDeps) {
         await deps.oauthLogins.cancel(input.loginId, context.actor);
         return { ok: true as const };
       }),
-      disconnect: authed.models.disconnect.handler(async ({ context, input }) => {
-        const credential = await deps.prisma.userModelCredential.findFirst({
-          where: { userId: context.actor.userId, provider: input.provider },
-          orderBy: newestModelCredentialOrder,
-        });
-        if (!credential) return { ok: true as const };
-
-        const [defaultPreference, assignedBot] = await Promise.all([
-          deps.prisma.spaceModelPreference.findFirst({
-            where: {
-              userId: context.actor.userId,
-              credentialId: credential.id,
-              isDefault: true,
-            },
-            select: { id: true },
-          }),
-          deps.prisma.bot.findFirst({
-            where: {
-              userId: context.actor.userId,
-              modelProvider: input.provider,
-              archivedAt: null,
-            },
-            select: { name: true },
-          }),
-        ]);
-        if (defaultPreference) {
-          throw new ORPCError("CONFLICT", {
-            message: "Choose another default model before disconnecting this provider.",
-          });
-        }
-        if (assignedBot) {
-          throw new ORPCError("CONFLICT", {
-            message: `${assignedBot.name} still uses this provider. Assign that employee another model first.`,
-          });
-        }
-
-        await deps.prisma.$transaction(async (tx) => {
-          await tx.userModelCredential.delete({ where: { id: credential.id } });
-          await deleteUnreferencedCredentialSecret(tx, {
-            credentialKind: "model",
-            credentialId: credential.id,
-            secretId: credential.secretId,
-          });
-        });
-        return { ok: true as const };
-      }),
       setDefault: authed.models.setDefault.handler(async ({ context, input }) => {
-        await withSerializableRetry(() =>
-          deps.prisma.$transaction(
+        const loadSpaceModelState = async (
+          client: Pick<PrismaClient, "spaceModelPreference" | "userModelCredential">,
+        ) => {
+          const [preferences, credentials] = await Promise.all([
+            client.spaceModelPreference.findMany({
+              where: {
+                spaceId: context.actor.spaceId,
+                userId: context.actor.userId,
+                credential: { provider: input.provider },
+              },
+              include: { credential: true },
+            }),
+            client.userModelCredential.findMany({
+              where: { userId: context.actor.userId, provider: input.provider },
+            }),
+          ]);
+          return {
+            preferences,
+            candidates: defaultModelCredentialCandidates({
+              provider: input.provider,
+              modelId: input.modelId,
+              preferences,
+              credentials,
+            }),
+          };
+        };
+        await withSerializableRetry(async () => {
+          // Warm each candidate's live catalog before opening the serializable
+          // transaction — the in-transaction reads use waitMs 0 so the tx never
+          // waits on network. The warm also kicks a detached credential refresh
+          // for expired bearers so a retried call sees the rotated token.
+          const warm = await loadSpaceModelState(deps.prisma).catch(() => undefined);
+          await Promise.all(
+            (warm?.candidates ?? []).map((candidate) =>
+              readStoredModelAuth(
+                deps.prisma,
+                deps.secrets,
+                context.actor.userId,
+                candidate.secretId,
+                input.provider,
+                input.modelId,
+                codexCatalog,
+                {
+                  onExpiredToken: () =>
+                    refreshExpiredCredential(context.actor, candidate.secretId, input.provider),
+                },
+              ).catch(() => undefined),
+            ),
+          );
+          return deps.prisma.$transaction(
             async (tx) => {
-              const credential = await tx.userModelCredential.findFirst({
-                where: { userId: context.actor.userId, provider: input.provider },
-                orderBy: newestModelCredentialOrder,
-              });
-              if (!credential) {
+              const { preferences, candidates } = await loadSpaceModelState(tx);
+              if (candidates.length === 0) {
                 throw new ORPCError("NOT_FOUND", {
                   message: `No model credential is connected for ${input.provider}.`,
                 });
               }
-              await selectSpaceModelPreference(tx, context.actor, credential.id, input.modelId);
+              const savedModelId = new Map(
+                preferences.map((preference) => [preference.credential.id, preference.modelId]),
+              );
+              const readyIds: string[] = [];
+              let authFailure: string | undefined;
+              let sawReadable = false;
+              for (const candidate of candidates) {
+                const auth = await readStoredModelAuth(
+                  tx,
+                  deps.secrets,
+                  context.actor.userId,
+                  candidate.secretId,
+                  input.provider,
+                  input.modelId,
+                  codexCatalog,
+                  {
+                    waitMs: 0,
+                    onExpiredToken: () =>
+                      refreshExpiredCredential(context.actor, candidate.secretId, input.provider),
+                  },
+                );
+                if (auth.status === "unreadable") continue;
+                sawReadable = true;
+                if (auth.status === "rejected") {
+                  authFailure ??= auth.message;
+                  continue;
+                }
+                readyIds.push(candidate.id);
+              }
+              const chosenId = selectDefaultCredentialId({
+                provider: input.provider,
+                modelId: input.modelId,
+                orderedIds: candidates.map((candidate) => candidate.id),
+                readyIds,
+                savedModelId: (credentialId) => savedModelId.get(credentialId),
+              });
+              const fallbackId = !sawReadable ? candidates[0]?.id : undefined;
+              const credentialId = chosenId ?? fallbackId;
+              if (!credentialId) {
+                throw new ORPCError("BAD_REQUEST", {
+                  message: authFailure ?? UNAVAILABLE_MODEL_FOR_AUTH_MESSAGE,
+                });
+              }
+              let thinkingLevel: string | null | undefined = input.thinkingLevel;
+              if (thinkingLevel === undefined) {
+                // The level belongs to the preference's modelId — keep it only when the
+                // stored choice already names this model.
+                const existing = preferences.find(
+                  (preference) => preference.credential.id === credentialId,
+                );
+                thinkingLevel =
+                  existing?.modelId === usableModelId(input.modelId)
+                    ? existing.thinkingLevel
+                    : null;
+              }
+              if (thinkingLevel) {
+                const allowed = await allowedThinkingLevels(
+                  deps,
+                  context.actor,
+                  input.provider,
+                  input.modelId,
+                );
+                thinkingLevel = clampCatalogThinkingLevel(thinkingLevel, allowed);
+              }
+              await selectSpaceModelPreference(
+                tx,
+                context.actor,
+                credentialId,
+                input.modelId,
+                thinkingLevel,
+              );
+            },
+            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          );
+        });
+        return { ok: true as const };
+      }),
+      disconnect: authed.models.disconnect.handler(async ({ context, input }) => {
+        // Retire pending sign-ins in every space first — the credentials are
+        // account-wide, so a finishing OAuth session anywhere could otherwise
+        // re-persist a credential the delete below just removed.
+        await deps.oauthLogins.cancelProvider({
+          userId: context.actor.userId,
+          provider: input.provider,
+        });
+        await withSerializableRetry(() =>
+          deps.prisma.$transaction(
+            async (tx) => {
+              const existing = await tx.userModelCredential.findMany({
+                where: { userId: context.actor.userId, provider: input.provider },
+              });
+              if (existing.length === 0) return;
+              const ids = existing.map((row) => row.id);
+              // Credentials belong to the account, not the space — disconnecting
+              // removes them everywhere, matching voice.disconnect. Linked
+              // preferences in other spaces go with their credential.
+              await tx.spaceModelPreference.deleteMany({
+                where: { userId: context.actor.userId, credentialId: { in: ids } },
+              });
+              await tx.userModelCredential.deleteMany({
+                where: { userId: context.actor.userId, id: { in: ids } },
+              });
+              for (const row of existing) {
+                await deleteUnreferencedCredentialSecret(tx, {
+                  credentialKind: "model",
+                  credentialId: row.id,
+                  secretId: row.secretId,
+                });
+              }
             },
             { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
           ),
@@ -989,11 +1361,16 @@ export function createRouter(deps: RouterDeps) {
         return found;
       }),
       create: authed.bots.create.handler(async ({ context, input }) => {
+        let bot: Bot;
         try {
-          return await repos.createBot(context.actor, input);
+          bot = await repos.createBot(context.actor, input);
         } catch (error) {
           throw mapSpaceLifecycleError(error);
         }
+        await enqueueBotIntroRun(deps, context.actor, bot).catch((error) => {
+          getLogger().error("bot intro run enqueue", error);
+        });
+        return bot;
       }),
       duplicate: authed.bots.duplicate.handler(async ({ context, input }) => {
         const source = await repos.getBot(context.actor, input.botId);
@@ -1051,11 +1428,19 @@ export function createRouter(deps: RouterDeps) {
           });
           if (!section) throw new IsolationError();
         }
-        if (input.modelProvider && input.modelId) {
+        // Web settings resend the saved model on every save. Reject an
+        // incompatible override only when this request is changing it; a run
+        // still rejects a Spark model the subscription sign-in cannot call.
+        const settingModel =
+          input.modelProvider !== undefined &&
+          input.modelId !== undefined &&
+          (input.modelProvider !== existing.modelProvider || input.modelId !== existing.modelId);
+        if (settingModel && input.modelProvider && input.modelId) {
           const credential = await findModelCredential(
             deps.prisma,
             context.actor,
             input.modelProvider,
+            input.modelId,
           );
           if (!credential) {
             throw new ORPCError("BAD_REQUEST", { message: "Connect that model provider first" });
@@ -1066,6 +1451,26 @@ export function createRouter(deps: RouterDeps) {
           );
           if (!inCatalog && credential.defaultModel !== input.modelId) {
             throw new ORPCError("BAD_REQUEST", { message: "Unknown model for that provider" });
+          }
+          if (inCatalog) {
+            const authError = await validateStoredModelAuth(
+              deps.prisma,
+              deps.secrets,
+              context.actor.userId,
+              credential.secretId,
+              input.modelProvider,
+              input.modelId,
+              codexCatalog,
+              {
+                onExpiredToken: () =>
+                  refreshExpiredCredential(
+                    context.actor,
+                    credential.secretId,
+                    input.modelProvider!,
+                  ),
+              },
+            );
+            if (authError) throw new ORPCError("BAD_REQUEST", { message: authError });
           }
         }
         const thinkingLevel = input.thinkingLevel;
@@ -1153,7 +1558,11 @@ export function createRouter(deps: RouterDeps) {
         if (!bot.computer) throw new IsolationError();
         const currentMode = bot.computer.scope === "dedicated" ? "dedicated" : "team";
         if (currentMode === input.mode) {
-          return repos.setBotComputer(context.actor, bot.id, input.mode);
+          try {
+            return await repos.setBotComputer(context.actor, bot.id, input.mode);
+          } catch (error) {
+            throw mapSpaceLifecycleError(error);
+          }
         }
         const claimed = await deps.prisma.$transaction(async (tx) => {
           await tx.$queryRaw`SELECT id FROM computers WHERE id = ${bot.computerId} FOR UPDATE`;
@@ -1200,6 +1609,8 @@ export function createRouter(deps: RouterDeps) {
             });
           }
           return await repos.setBotComputer(context.actor, bot.id, input.mode);
+        } catch (error) {
+          throw mapSpaceLifecycleError(error);
         } finally {
           await deps.prisma.bot.updateMany({
             where: { id: bot.id },
@@ -1226,7 +1637,19 @@ export function createRouter(deps: RouterDeps) {
       restore: authed.bots.restore.handler(async ({ context, input }) => {
         const bot = await repos.getBot(context.actor, input.botId, { includeArchived: true });
         if (!bot.archivedAt) return { ok: true as const };
-        await deps.prisma.bot.update({ where: { id: bot.id }, data: { archivedAt: null } });
+        try {
+          if (bot.computer) {
+            await restoreBotUnderComputerQuota(deps.prisma, {
+              userId: context.actor.userId,
+              botId: bot.id,
+              computerId: bot.computer.id,
+            });
+          } else {
+            await deps.prisma.bot.update({ where: { id: bot.id }, data: { archivedAt: null } });
+          }
+        } catch (error) {
+          throw mapSpaceLifecycleError(error);
+        }
         return { ok: true as const };
       }),
       remove: authed.bots.remove.handler(async ({ context, input }) => {
@@ -1246,6 +1669,7 @@ export function createRouter(deps: RouterDeps) {
             traceId: "destroy",
             spaceId: context.actor.spaceId,
             userId: context.actor.userId,
+            botId: bot.id,
             signal: new AbortController().signal,
           },
           { deleteMemories: input.deleteMemories },
@@ -1361,19 +1785,17 @@ export function createRouter(deps: RouterDeps) {
         );
         await Promise.all(
           archived.computers.map(async (computer) => {
-            if (!computer.providerRef || !computer.executionBotId || !computer.executionRunId) {
-              return;
-            }
+            if (!computer.providerRef) return;
             const adapterContext = {
               operationId: "stop",
               traceId: "stop",
               spaceId: context.actor.spaceId,
               userId: context.actor.userId,
-              botId: computer.executionBotId,
-              runId: computer.executionRunId,
+              botId: computer.botId,
+              runId: computer.runId,
               screenLeaseId: screenLeaseIdForRun(
-                { runId: computer.executionRunId, fence: computer.executionFence },
-                computer.executionRunId,
+                { runId: computer.runId, fence: computer.fence },
+                computer.runId,
               ),
               cancelRunWork: true,
               signal: new AbortController().signal,
@@ -1383,12 +1805,15 @@ export function createRouter(deps: RouterDeps) {
               deps.sandbox,
               ref,
               computer.id,
-              computer.executionRunId,
+              computer.runId,
               adapterContext,
             );
             await deps.sandbox.releaseScreen?.(ref, adapterContext).catch(() => undefined);
           }),
         );
+        // Expire the leases only after teardown: while they were live, no other run could claim
+        // these screens.
+        await groupRepos.releaseArchivedRunLeases(archived.cancelledRunIds);
         return { ok: true as const };
       }),
       restore: authed.groups.restore.handler(async ({ context, input }) => {
@@ -1454,15 +1879,46 @@ export function createRouter(deps: RouterDeps) {
       subscribe: authed.threads.subscribe.handler(async function* ({ context, input }) {
         const target = await resolveThreadTarget(deps.prisma, context.actor, input);
         const peerRunCache = new Map<string, Promise<boolean>>();
-        for await (const event of deps.events.follow(
-          target.threadId,
-          input.cursor,
-          context.signal,
-        )) {
-          if (await isPeerRun(deps.prisma, event.runId, peerRunCache)) {
-            if (!shouldForwardPeerThreadEvent(event)) continue;
+        const follow = deps.events.follow(target.threadId, input.cursor, context.signal);
+        // A half-open stream looks identical to an idle one, so punctuate silence:
+        // the client treats any frame as liveness and reconnects once they stop.
+        let pending: Promise<IteratorResult<ProductEvent>> | undefined;
+        try {
+          while (!context.signal?.aborted) {
+            pending ??= follow.next();
+            let timer: ReturnType<typeof setTimeout> | undefined;
+            const next = await Promise.race([
+              pending,
+              new Promise<"silent">((resolve) => {
+                timer = setTimeout(() => resolve("silent"), HEARTBEAT_MS);
+              }),
+            ]).finally(() => clearTimeout(timer));
+            if (next === "silent") {
+              // Keep `pending` so the in-flight read stays the next event in order.
+              yield {
+                id: "heartbeat",
+                spaceId: context.actor.spaceId,
+                threadId: target.threadId,
+                // A bot thread's id is not the bot. Groups have no single bot, so the thread id stands in.
+                botId: target.kind === "bot" ? target.botId : target.threadId,
+                seq: 0,
+                type: "heartbeat",
+                createdAt: new Date().toISOString(),
+                payload: {},
+              };
+              continue;
+            }
+            pending = undefined;
+            if (next.done) return;
+            const event = next.value;
+            if (await isPeerRun(deps.prisma, event.runId, peerRunCache)) {
+              if (!shouldForwardPeerThreadEvent(event)) continue;
+            }
+            yield event;
           }
-          yield event;
+        } finally {
+          // Not awaited: closing can queue behind a read that the abort has not landed on yet.
+          void follow.return(undefined).catch(() => {});
         }
       }),
       send: authed.threads.send.handler(async ({ context, input }) => {
@@ -1551,6 +2007,7 @@ export function createRouter(deps: RouterDeps) {
             blocks: [{ kind: "text", text: input.text }],
             prompt: input.text,
             trigger: "follow_up",
+            clientNonce: input.clientNonce,
           });
           if (sent.taskId && sent.runId) {
             await deps.jobs.enqueue(runContinueJob(sent.runId)).catch((error) => {
@@ -1560,6 +2017,14 @@ export function createRouter(deps: RouterDeps) {
           return { ok: true as const };
         }
         const committed = await deps.prisma.$transaction(async (tx) => {
+          if (input.clientNonce) {
+            const existing = await tx.message.findUnique({
+              where: {
+                threadId_clientNonce: { threadId: target.threadId, clientNonce: input.clientNonce },
+              },
+            });
+            if (existing) return null;
+          }
           await lockOwnedGroup(tx, context.actor, target.groupId);
           const group = await tx.chatGroup.findFirst({
             where: {
@@ -1576,6 +2041,7 @@ export function createRouter(deps: RouterDeps) {
             threadId: target.threadId,
             role: "user",
             blocks,
+            clientNonce: input.clientNonce,
           });
           const active = await tx.run.findFirst({
             where: {
@@ -1633,14 +2099,96 @@ export function createRouter(deps: RouterDeps) {
           await touchGroupUpdatedAt(tx, target.groupId);
           return { runId: run?.id, eventSeq: event.seq };
         });
-        await deps.events.notify(target.threadId, committed.eventSeq).catch((error) => {
-          getLogger().error("group follow-up realtime notification", error);
-        });
-        if (committed.runId) {
-          await deps.jobs.enqueue(runContinueJob(committed.runId)).catch((error) => {
-            getLogger().error("group follow-up enqueue", error);
+        if (committed) {
+          await deps.events.notify(target.threadId, committed.eventSeq).catch((error) => {
+            getLogger().error("group follow-up realtime notification", error);
           });
+          if (committed.runId) {
+            await deps.jobs.enqueue(runContinueJob(committed.runId)).catch((error) => {
+              getLogger().error("group follow-up enqueue", error);
+            });
+          }
         }
+        return { ok: true as const };
+      }),
+      endCall: authed.threads.endCall.handler(async ({ context, input }) => {
+        const target = await resolveThreadTarget(deps.prisma, context.actor, input);
+        if (target.kind !== "bot") throw new IsolationError();
+        await assertTeachingSendAllowed(deps.prisma, context.actor.spaceId, target.botId);
+        const { botId, threadId } = target;
+        const blocks = [
+          { kind: "voice_call" as const, callId: input.callId, title: "", farewell: "" },
+        ];
+        const committed = await deps.prisma
+          .$transaction(async (tx) => {
+            // The marker's deterministic nonce is the idempotency key: the unique
+            // (threadId, clientNonce) index rejects a second hang-up, concurrent or not.
+            const message = await createThreadMessageInTransaction(tx, {
+              threadId,
+              role: "bot",
+              botId,
+              blocks,
+              clientNonce: callMarkerClientNonce(input.callId),
+            });
+            await appendEventInTransaction(tx, {
+              spaceId: context.actor.spaceId,
+              threadId,
+              botId,
+              type: "thread.message.created",
+              payload: { messageId: message.id, role: "bot", blocks, callId: input.callId },
+            });
+            const task = await tx.task.create({
+              data: {
+                spaceId: context.actor.spaceId,
+                botId,
+                threadId,
+                userId: context.actor.userId,
+                prompt: HANG_UP_PROMPT,
+                status: "queued",
+              },
+            });
+            const run = await tx.run.create({
+              data: {
+                spaceId: context.actor.spaceId,
+                botId,
+                threadId,
+                taskId: task.id,
+                userId: context.actor.userId,
+                status: "queued",
+                trigger: "call_end",
+                clientNonce: callClientNonce(input.callId),
+              },
+              select: { id: true },
+            });
+            const ended = await appendEventInTransaction(tx, {
+              spaceId: context.actor.spaceId,
+              threadId,
+              botId,
+              type: "thread.call.ended",
+              runId: run.id,
+              payload: {
+                botId,
+                threadId,
+                callId: input.callId,
+                title: "",
+                farewell: "",
+                messageId: message.id,
+              },
+            });
+            return { runId: run.id, eventSeq: ended.seq };
+          })
+          .catch((error) => {
+            if (!isUniqueViolation(error)) throw error;
+            return null;
+          });
+        if (!committed) return { ok: true as const };
+        await deps.events.notify(threadId, committed.eventSeq).catch((error) => {
+          getLogger().error("call end realtime notification", error);
+        });
+        // The queued run is durable; a missed wake is repaired by the reconciler.
+        await deps.jobs.enqueue(runContinueJob(committed.runId)).catch((error) => {
+          getLogger().error("call end enqueue", error);
+        });
         return { ok: true as const };
       }),
       answer: authed.threads.answer.handler(async ({ context, input }) => {
@@ -1652,6 +2200,7 @@ export function createRouter(deps: RouterDeps) {
           messageId: input.messageId,
           answeredByUserId: context.actor.userId,
           answer: input.answer,
+          username: input.username,
         });
         if (!answered) {
           throw new ORPCError("CONFLICT", {
@@ -1762,8 +2311,13 @@ export function createRouter(deps: RouterDeps) {
           if (bot.computer.providerRef) {
             const ctx = computerContext(context.actor, bot.id, "stop");
             const ref = toComputerRef(bot.computer);
-            await checkpointAndRecordComputerWorkspace(deps, bot.computer, ref, ctx);
-            await deps.sandbox.stop(ref, ctx);
+            try {
+              await checkpointAndRecordComputerWorkspace(deps, bot.computer, ref, ctx);
+              await deps.sandbox.stop(ref, ctx);
+            } catch (error) {
+              // The sandbox is already gone: nothing left to checkpoint or stop.
+              if (!isSandboxGoneError(error)) throw error;
+            }
           }
           await deps.prisma.computer.update({
             where: { id: bot.computer.id },
@@ -1912,9 +2466,9 @@ export function createRouter(deps: RouterDeps) {
         }
         if (hasActiveComputerControl(bot.computer) && bot.computer.controlBotId !== bot.id) {
           const previousBotId = bot.computer.controlBotId!;
-          await deps.sandbox.setScreenControl?.(
-            toComputerRef(bot.computer),
-            false,
+          await revokeScreenControl(
+            deps,
+            bot.computer,
             computerContext(context.actor, previousBotId, "screen.release"),
             bot.computer.controlLeaseId ?? undefined,
           );
@@ -1936,6 +2490,11 @@ export function createRouter(deps: RouterDeps) {
           bot = await repos.getBot(context.actor, input.botId);
         }
         if (!bot.computer) throw new IsolationError();
+        // Gone-sandbox revoke may have marked the row stopped; do not fall through to the
+        // running-state grant and return a confusing "control changed" conflict.
+        if (!bot.computer.providerRef || bot.computer.state !== "running") {
+          throw new ORPCError("BAD_REQUEST", { message: "computer must be running" });
+        }
 
         const executionLease = await deps.prisma.computerExecutionLease.findUnique({
           where: { computerId_botId: { computerId: bot.computer.id, botId: bot.id } },
@@ -1947,12 +2506,15 @@ export function createRouter(deps: RouterDeps) {
             })
           : null;
         const waitingForTakeover =
-          executionRun?.botId === bot.id && executionRun.status === "waiting_takeover";
+          executionRun?.botId === bot.id &&
+          (executionRun.status === "waiting_takeover" ||
+            bot.computer.controlRunId === executionLease?.runId);
         if (
           executionBlocksUserTakeover({
             hasLease: Boolean(executionLease),
             leaseExpiresAt: executionLease?.expiresAt,
             runStatus: executionRun?.status,
+            takeoverRequested: waitingForTakeover,
           })
         ) {
           throw new ORPCError("CONFLICT", { message: "Stop the bot first" });
@@ -2033,55 +2595,7 @@ export function createRouter(deps: RouterDeps) {
         return { leaseId, expiresAt: expiresAt.toISOString() };
       }),
       release: authed.computer.release.handler(async ({ context, input }) => {
-        const bot = await repos.getBot(context.actor, input.botId);
-        if (!bot.computer) throw new IsolationError();
-        const controlBotId = bot.computer.controlBotId;
-        const controlLeaseId = bot.computer.controlLeaseId;
-        if (bot.computer.controlHolder !== "user" || !controlBotId || controlBotId !== bot.id) {
-          return { ok: true as const };
-        }
-        if (!hasActiveComputerControl(bot.computer) || !controlLeaseId) {
-          // Stale controlHolder=user. Prefer expiry (revokes provider control). If a lease id
-          // remains after a failed revoke, keep it so reconciliation can retry.
-          if (controlLeaseId) {
-            await expireComputerControl(deps, bot.computer.id, controlLeaseId).catch(
-              () => undefined,
-            );
-          } else {
-            await clearInactiveUserComputerControl(deps.prisma, bot.computer.id);
-          }
-          return { ok: true as const };
-        }
-        if (bot.computer.providerRef) {
-          await deps.sandbox.setScreenControl?.(
-            toComputerRef(bot.computer),
-            false,
-            computerContext(context.actor, controlBotId, "screen.release"),
-            controlLeaseId,
-          );
-        }
-
-        const released = await deps.events.finalizeComputerControlRelease({
-          spaceId: context.actor.spaceId,
-          computerId: bot.computer.id,
-          botId: controlBotId,
-          runId: bot.computer.controlRunId,
-          leaseId: controlLeaseId,
-          holder: "bot",
-          reason: input.reason ?? "released",
-        });
-        if (!released) return { ok: true as const };
-        // The lease-specific key makes this cancellation safe after a replacement takeover.
-        await deps.jobs
-          .cancel(computerControlExpireJobKey(bot.computer.id, controlLeaseId))
-          .catch((error) => {
-            // The expired job is harmless after the lease is cleared, so do not report a
-            // failed release after the transaction has committed.
-            getLogger().error("computer control expiry cancellation", error);
-          });
-
-        await enqueueTakeoverContinuation(deps.jobs, released.runId);
-        scheduleComputerSleep(deps.jobs, bot.computer.id);
+        await releaseComputerControl(deps, context.actor, input.botId, input.reason);
         return { ok: true as const };
       }),
       input: authed.computer.input.handler(async ({ context, input }) => {
@@ -2092,17 +2606,27 @@ export function createRouter(deps: RouterDeps) {
           throw new ORPCError("FORBIDDEN");
         }
         if (!computer.providerRef) return { ok: true as const };
-        const mapped =
-          input.kind === "key"
-            ? { kind: "key" as const, key: String(input.payload.key ?? "") }
+        const sensitive = input.payload.sensitive === true;
+        const skillId =
+          sensitive && typeof input.payload.skillId === "string" && input.payload.skillId
+            ? input.payload.skillId
+            : undefined;
+        const mapped = {
+          ...(input.kind === "key"
+            ? { kind: "key" as const, key: String(input.payload.key ?? ""), sensitive }
             : input.kind === "clipboard"
-              ? { kind: "clipboard" as const, text: String(input.payload.text ?? "") }
+              ? {
+                  kind: "clipboard" as const,
+                  text: String(input.payload.text ?? ""),
+                  sensitive,
+                }
               : input.kind === "scroll"
                 ? {
                     kind: "scroll" as const,
                     direction:
                       input.payload.direction === "up" ? ("up" as const) : ("down" as const),
                     amount: Number(input.payload.amount ?? 3),
+                    sensitive,
                   }
                 : {
                     kind: "pointer" as const,
@@ -2112,7 +2636,10 @@ export function createRouter(deps: RouterDeps) {
                     type:
                       (input.payload.type as "move" | "down" | "up" | "click" | undefined) ??
                       "click",
-                  };
+                    sensitive,
+                  }),
+          ...(skillId ? { skillId } : {}),
+        };
         const outcome = await taughtSkills.recordInput(context.actor, bot.id, mapped);
         if (outcome === "stale") return { ok: true as const };
         if (outcome !== "recorded") {
@@ -2184,6 +2711,141 @@ export function createRouter(deps: RouterDeps) {
         }
         return { path: input.path, content };
       }),
+      downloadFile: authed.computer.downloadFile.handler(async ({ context, input }) => {
+        const bot = await repos.getBot(context.actor, input.botId);
+        const computer = bot.computer;
+        if (!computer) throw new IsolationError();
+        // The stopped-computer home store is text-only; binary transfer needs the live machine.
+        if (computer.state !== "running" || !computer.providerRef) {
+          throw new ORPCError("CONFLICT", { message: "Start the computer first." });
+        }
+        await keepComputerAwake(deps, computer.id);
+        const storedPath = resolveBotWorkspacePath(
+          parseComputerMode(computer.scope),
+          bot.id,
+          input.path,
+        );
+        const bytes = await deps.sandbox
+          .readFile(
+            toComputerRef(computer),
+            storedPath,
+            computerContext(context.actor, bot.id, "download"),
+            { maxBytes: ATTACHMENT_MAX_BYTES },
+          )
+          .catch((error: unknown) => {
+            if (error instanceof Error && /exceeds|too large/i.test(error.message)) {
+              throw new ORPCError("BAD_REQUEST", { message: "File is too large to download." });
+            }
+            throw error;
+          });
+        return { path: input.path, contentBase64: Buffer.from(bytes).toString("base64") };
+      }),
+      uploadFile: authed.computer.uploadFile.handler(async ({ context, input }) => {
+        let bot = await repos.getBot(context.actor, input.botId);
+        if (await expireStaleComputerControl(deps, bot.computer)) {
+          bot = await repos.getBot(context.actor, input.botId);
+        }
+        const computer = bot.computer;
+        if (!computer) throw new IsolationError();
+        if (computer.state !== "running" || !computer.providerRef) {
+          throw new ORPCError("CONFLICT", { message: "Start the computer first." });
+        }
+        if (!hasActiveComputerControl(computer) || computer.controlBotId !== bot.id) {
+          throw new ORPCError("FORBIDDEN", { message: "Take control first." });
+        }
+        const content = Buffer.from(input.contentBase64, "base64");
+        if (content.byteLength > ATTACHMENT_MAX_BYTES) {
+          throw new ORPCError("BAD_REQUEST", { message: "File is too large to upload." });
+        }
+        await keepComputerAwake(deps, computer.id);
+        let storedPath: string;
+        try {
+          storedPath = resolveBotUploadPath(parseComputerMode(computer.scope), bot.id, input.path);
+        } catch (error) {
+          if (error instanceof Error && /escapes/i.test(error.message)) {
+            throw new ORPCError("BAD_REQUEST", { message: error.message });
+          }
+          throw error;
+        }
+        await deps.sandbox.writeFile(
+          toComputerRef(computer),
+          { path: storedPath, content },
+          computerContext(context.actor, bot.id, "upload"),
+        );
+        return { ok: true as const };
+      }),
+      commands: authed.computer.commands.handler(async ({ context, input }) => {
+        const bot = await repos.getBot(context.actor, input.botId);
+        const events = await deps.prisma.event.findMany({
+          where: { spaceId: context.actor.spaceId, botId: bot.id, type: "computer.command" },
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: COMPUTER_COMMAND_HISTORY_EVENTS,
+          select: { payload: true, createdAt: true },
+        });
+        return foldComputerCommands(
+          events.reverse().flatMap((event) => {
+            const parsed = ComputerCommandSchema.safeParse(event.payload);
+            return parsed.success
+              ? [{ ...parsed.data, createdAt: event.createdAt.toISOString() }]
+              : [];
+          }),
+        );
+      }),
+      terminalUrl: authed.computer.terminalUrl.handler(async ({ context, input }) => {
+        let bot = await repos.getBot(context.actor, input.botId);
+        if (await expireStaleComputerControl(deps, bot.computer)) {
+          bot = await repos.getBot(context.actor, input.botId);
+        }
+        const computer = bot.computer;
+        if (
+          !computer?.providerRef ||
+          computer.state !== "running" ||
+          !deps.sandbox.connectTerminal ||
+          !computerSupportsTerminal(computer.kind)
+        ) {
+          return { url: null };
+        }
+        // Same rule as the interactive screen: only the user holding this bot's control lease.
+        if (
+          !hasActiveComputerControl(computer) ||
+          computer.controlBotId !== bot.id ||
+          !computer.controlLeaseId
+        ) {
+          throw new ORPCError("FORBIDDEN", { message: "Take control first." });
+        }
+        const session = await deps.sandbox
+          .connectTerminal(
+            toComputerRef(computer),
+            {
+              controlToken: computer.controlLeaseId,
+              cwd: resolveBotWorkspaceCwd(parseComputerMode(computer.scope), bot.id, undefined),
+            },
+            await computerScreenContext(
+              deps.prisma,
+              context.actor,
+              computer.id,
+              bot.id,
+              "terminal",
+            ),
+          )
+          .catch((error: unknown) => clearGoneSandbox(deps, computer, error));
+        if (!session) return { url: null };
+        await keepComputerAwake(deps, computer.id);
+        return {
+          url: addScreenProxyCapability(
+            withViewOnly(session.url, false),
+            deps.env.screenProxySecret,
+            deps.env.webOrigin,
+            {
+              botId: bot.id,
+              computerId: computer.id,
+              botGeneration: bot.screenGeneration,
+              computerGeneration: computer.screenGeneration,
+              controlLeaseId: computer.controlLeaseId,
+            },
+          ),
+        };
+      }),
       screenUrl: authed.computer.screenUrl.handler(async ({ context, input }) => {
         let bot = await repos.getBot(context.actor, input.botId);
         if (await expireStaleComputerControl(deps, bot.computer)) {
@@ -2213,20 +2875,7 @@ export function createRouter(deps: RouterDeps) {
             if (isComputerScreenUnavailable(error)) {
               throw new ORPCError("CONFLICT", { message: error.message });
             }
-            if (!isSandboxGoneError(error)) throw error;
-            // The provider killed this sandbox (idle timeout) while the row still says
-            // running. Clear the dead ref so the UI offers a boot instead of 500ing.
-            // Leave any active control lease alone — expireComputerControl owns that
-            // release (provider screen-control, events, takeover continuation).
-            getLogger().error(
-              `computer ${computer.id} sandbox ${computer.providerRef} is gone`,
-              error,
-            );
-            await deps.prisma.computer.updateMany({
-              where: { id: computer.id, providerRef: computer.providerRef },
-              data: { state: "stopped", providerRef: null },
-            });
-            return null;
+            return clearGoneSandbox(deps, computer, error);
           });
         if (!session?.url) return { url: null };
         scheduleComputerSleep(deps.jobs, bot.computer.id);
@@ -2343,6 +2992,9 @@ export function createRouter(deps: RouterDeps) {
       ),
     },
     routines: {
+      history: authed.routines.history.handler(async ({ context, input }) =>
+        listRoutineRuns(deps.prisma, context.actor, input.routineId, input.before),
+      ),
       list: authed.routines.list.handler(async ({ context, input }) => {
         await repos.getBot(context.actor, input.botId);
         return listRoutinesDto(deps, context.actor, input.botId);
@@ -2397,14 +3049,17 @@ export function createRouter(deps: RouterDeps) {
         return mapRoutine(row);
       }),
       update: authed.routines.update.handler(async ({ context, input }) => {
+        // Archived bots keep their routines paused, so resolve an active parent before any write.
         const existing = await deps.prisma.routine.findFirst({
           where: {
             id: input.routineId,
             spaceId: context.actor.spaceId,
             userId: context.actor.userId,
+            bot: { archivedAt: null },
           },
         });
-        if (!existing) throw new IsolationError();
+        if (!existing) throw new ORPCError("NOT_FOUND");
+        const bot = await repos.getBot(context.actor, existing.botId);
         const active = input.active ?? existing.active;
         const crons = input.crons ?? existing.crons;
         const timezone = input.timezone ?? existing.timezone;
@@ -2471,22 +3126,27 @@ export function createRouter(deps: RouterDeps) {
             : isOneShotRoutineCrons(crons)
               ? (armedOneShotAt ?? existing.nextRunAt)
               : (recalculatedNextRunAt ?? existing.nextRunAt);
-        const row = await deps.prisma.routine.update({
-          where: { id: existing.id },
-          data: {
-            name: input.name,
-            prompt: input.prompt,
-            crons: input.crons,
-            timezone: input.timezone,
-            active: input.active,
-            notify: input.notify,
-            webhookEnabled: input.webhookEnabled,
-            githubEnabled: input.githubEnabled,
-            messageProvider: input.messageProvider,
-            nextRunAt,
-          },
-        });
-        const bot = await repos.getBot(context.actor, row.botId);
+        // Re-check the parent in the write itself so an archive that lands after the read wins.
+        const row = await deps.prisma.routine
+          .update({
+            where: { id: existing.id, bot: { archivedAt: null } },
+            data: {
+              name: input.name,
+              prompt: input.prompt,
+              crons: input.crons,
+              timezone: input.timezone,
+              active: input.active,
+              notify: input.notify,
+              webhookEnabled: input.webhookEnabled,
+              githubEnabled: input.githubEnabled,
+              messageProvider: input.messageProvider,
+              nextRunAt,
+            },
+          })
+          .catch((error: unknown) => {
+            if (isRecordNotFound(error)) throw new ORPCError("NOT_FOUND");
+            throw error;
+          });
         if (bot.thread) {
           await deps.events.append({
             spaceId: context.actor.spaceId,
@@ -2782,6 +3442,7 @@ export function createRouter(deps: RouterDeps) {
               credential,
               signal: context.signal,
               remote: deps.remoteConnectors,
+              allowPrivateEndpoint: mayUsePrivateEndpoint(context.actor, deps),
             });
             config = verified.config;
           }
@@ -2792,6 +3453,7 @@ export function createRouter(deps: RouterDeps) {
               credential,
               signal: context.signal,
               remote: deps.remoteConnectors,
+              allowPrivateEndpoint: mayUsePrivateEndpoint(context.actor, deps),
             });
             source = prepared.source;
             config = prepared.config;
@@ -2803,6 +3465,7 @@ export function createRouter(deps: RouterDeps) {
               credential,
               signal: context.signal,
               remote: deps.remoteConnectors,
+              allowPrivateEndpoint: mayUsePrivateEndpoint(context.actor, deps),
             });
             source = prepared.source;
             config = prepared.config;
@@ -2922,6 +3585,11 @@ export function createRouter(deps: RouterDeps) {
           );
         }),
         create: authed.mcp.servers.create.handler(async ({ context, input }) => {
+          await assertMcpRemoteEndpoint(
+            "endpoint" in input ? input.endpoint : null,
+            context.actor,
+            deps,
+          );
           const secretPayload = buildMcpCredentialBlob(input);
           const stored = secretPayload
             ? await deps.secrets.put(
@@ -3016,6 +3684,9 @@ export function createRouter(deps: RouterDeps) {
               throw new ORPCError("BAD_REQUEST", { message: "A remote MCP server is required" });
             }
             const nextEndpoint = "endpoint" in config ? config.endpoint : null;
+            if (existing.endpoint !== nextEndpoint) {
+              await assertMcpRemoteEndpoint(nextEndpoint, context.actor, deps);
+            }
             const update = buildMcpUpdateMaterial(existingMaterial, config, {
               clearOAuth: existing.endpoint !== nextEndpoint,
             });
@@ -3092,20 +3763,27 @@ export function createRouter(deps: RouterDeps) {
           });
           if (!server) throw new IsolationError();
           // Assignments cascade; the encrypted credential must go with the server.
-          await deps.prisma.$transaction([
-            deps.prisma.mcpServer.delete({ where: { id: server.id } }),
-            ...(server.secretId
-              ? [
-                  deps.prisma.secret.deleteMany({
-                    where: {
-                      id: server.secretId,
-                      spaceId: context.actor.spaceId,
-                      userId: context.actor.userId,
-                    },
-                  }),
-                ]
-              : []),
-          ]);
+          // Cards are closed first, including ones that were never assigned.
+          const seqs = await deps.prisma.$transaction(async (tx) => {
+            const painted = await dismissMcpServerApprovals(
+              onboardingDeps,
+              context.actor,
+              server.id,
+              tx,
+            );
+            await tx.mcpServer.delete({ where: { id: server.id } });
+            if (server.secretId) {
+              await tx.secret.deleteMany({
+                where: {
+                  id: server.secretId,
+                  spaceId: context.actor.spaceId,
+                  userId: context.actor.userId,
+                },
+              });
+            }
+            return painted;
+          });
+          for (const event of seqs) await deps.events.notify(event.threadId, event.seq);
           return { ok: true as const };
         }),
       },
@@ -3142,44 +3820,68 @@ export function createRouter(deps: RouterDeps) {
           return rows.map(mcpAssignmentDto);
         }),
         approve: authed.mcp.assignments.approve.handler(async ({ context, input }) => {
-          const row = await deps.prisma.$transaction(async (tx) => {
-            const [bot, server] = await Promise.all([
-              tx.bot.findFirst({
-                where: {
-                  id: input.botId,
+          const row = await resolveMcpApprovalCards(
+            onboardingDeps,
+            context.actor,
+            {
+              botId: input.botId,
+              serverId: input.serverId,
+              status: "connected",
+              threadId: input.threadId,
+            },
+            async (tx, decision) => {
+              if (!decision.assign) throw new IsolationError();
+              const [bot, server] = await Promise.all([
+                tx.bot.findFirst({
+                  where: {
+                    id: input.botId,
+                    spaceId: context.actor.spaceId,
+                    userId: context.actor.userId,
+                  },
+                  select: { id: true },
+                }),
+                tx.mcpServer.findFirst({
+                  where: {
+                    id: input.serverId,
+                    spaceId: context.actor.spaceId,
+                    userId: context.actor.userId,
+                    enabled: true,
+                  },
+                  select: { id: true },
+                }),
+              ]);
+              if (!bot || !server) throw new IsolationError();
+              return tx.botMcpServer.upsert({
+                where: { botId_serverId: { botId: bot.id, serverId: server.id } },
+                create: {
                   spaceId: context.actor.spaceId,
                   userId: context.actor.userId,
+                  botId: bot.id,
+                  serverId: server.id,
+                  allowAllTools: true,
+                  allowedTools: [],
                 },
-                select: { id: true },
-              }),
-              tx.mcpServer.findFirst({
-                where: {
-                  id: input.serverId,
-                  spaceId: context.actor.spaceId,
-                  userId: context.actor.userId,
-                  enabled: true,
-                },
-                select: { id: true },
-              }),
-            ]);
-            if (!bot || !server) throw new IsolationError();
-            return tx.botMcpServer.upsert({
-              where: { botId_serverId: { botId: bot.id, serverId: server.id } },
-              create: {
-                spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
-                botId: bot.id,
-                serverId: server.id,
-                allowAllTools: true,
-                allowedTools: [],
-              },
-              update: {},
-            });
-          });
+                update: {},
+              });
+            },
+          );
+          if (!row) throw new IsolationError();
           return mcpAssignmentDto(row);
         }),
+        dismiss: authed.mcp.assignments.dismiss.handler(async ({ context, input }) => {
+          // Not now resolves the card only. Assignments are never touched
+          // here: a stale card must not delete a live connection, and server
+          // removal belongs to the MCP settings surface.
+          await resolveMcpApprovalCards(onboardingDeps, context.actor, {
+            botId: input.botId,
+            serverId: input.serverId,
+            status: "dismissed",
+            threadId: input.threadId,
+          });
+          return { ok: true as const };
+        }),
         replace: authed.mcp.assignments.replace.handler(async ({ context, input }) => {
-          const result = await deps.prisma.$transaction(async (tx) => {
+          const { rows, seqs } = await deps.prisma.$transaction(async (tx) => {
             const bot = await tx.bot.findFirst({
               where: {
                 id: input.botId,
@@ -3198,6 +3900,18 @@ export function createRouter(deps: RouterDeps) {
               select: { id: true },
             });
             if (servers.length !== input.assignments.length) throw new IsolationError();
+            const previous = await tx.botMcpServer.findMany({
+              where: {
+                botId: bot.id,
+                spaceId: context.actor.spaceId,
+                userId: context.actor.userId,
+              },
+              select: { serverId: true },
+            });
+            const nextIds = new Set(input.assignments.map((assignment) => assignment.serverId));
+            const removed = previous
+              .map((row) => row.serverId)
+              .filter((serverId) => !nextIds.has(serverId));
             await tx.botMcpServer.deleteMany({
               where: {
                 botId: bot.id,
@@ -3216,7 +3930,19 @@ export function createRouter(deps: RouterDeps) {
                   allowedTools: assignment.allowedTools as Prisma.InputJsonValue,
                 })),
               });
-            return tx.botMcpServer.findMany({
+            const seqs = (
+              await Promise.all(
+                removed.map((serverId) =>
+                  revertConnectedMcpApprovals(
+                    onboardingDeps,
+                    context.actor,
+                    { botId: bot.id, serverId, status: "pending" },
+                    tx,
+                  ),
+                ),
+              )
+            ).flat();
+            const rows = await tx.botMcpServer.findMany({
               where: {
                 botId: bot.id,
                 spaceId: context.actor.spaceId,
@@ -3224,8 +3950,10 @@ export function createRouter(deps: RouterDeps) {
               },
               orderBy: { createdAt: "asc" },
             });
+            return { rows, seqs };
           });
-          return result.map(mcpAssignmentDto);
+          for (const event of seqs) await deps.events.notify(event.threadId, event.seq);
+          return rows.map(mcpAssignmentDto);
         }),
       },
       oauth: {
@@ -3401,6 +4129,28 @@ export function createRouter(deps: RouterDeps) {
         // row that is inserted after SELECT FOR UPDATE and before remote revoke.
         const row = await deps.prisma.$transaction(async (tx) => {
           await lockProviderConnectionScope(tx, context.actor, input.connectorId, input.provider);
+          const existing = await tx.connection.findMany({
+            where: {
+              spaceId: context.actor.spaceId,
+              userId: context.actor.userId,
+              connectorId: input.connectorId,
+              provider: input.provider,
+            },
+            select: { id: true, status: true },
+            orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
+          });
+          const reusable = pickReusableConnection(existing);
+          if (reusable) {
+            return tx.connection.update({
+              where: { id: reusable.id },
+              data: {
+                displayName: input.displayName,
+                status: "pending",
+                providerRef: null,
+                metadata: {},
+              },
+            });
+          }
           return tx.connection.create({
             data: {
               spaceId: context.actor.spaceId,
@@ -4378,6 +5128,42 @@ export function createRouter(deps: RouterDeps) {
         deleteAgentSecret({ prisma: deps.prisma, secrets: deps.secrets }, context.actor, input.id),
       ),
     },
+    botSecrets: {
+      list: authed.botSecrets.list.handler(async ({ context, input }) => {
+        const bot = await repos.getBot(context.actor, input.botId);
+        const rows = await listBotSecretMetadata(
+          deps.prisma,
+          botSecretScope(context.actor, bot.id),
+        );
+        return rows.map(botSecretMetadataDto);
+      }),
+      put: authed.botSecrets.put.handler(async ({ context, input }) => {
+        const bot = await repos.getBot(context.actor, input.botId);
+        const scope = botSecretScope(context.actor, bot.id);
+        let row: Awaited<ReturnType<typeof getBotSecretMetadata>>;
+        try {
+          row = await deps.prisma.$transaction(async (tx) => {
+            await storeBotSecret({
+              tx,
+              secretStore: deps.secrets,
+              scope,
+              destination: input.destination,
+              plaintext: input.value,
+            });
+            return getBotSecretMetadata(tx, scope, input.destination.name);
+          });
+        } catch (error) {
+          throw mapBotSecretStoreError(error);
+        }
+        if (!row) throw new ORPCError("CONFLICT", { message: "Credential was not saved" });
+        return botSecretMetadataDto(row);
+      }),
+      remove: authed.botSecrets.remove.handler(async ({ context, input }) => {
+        const bot = await repos.getBot(context.actor, input.botId);
+        await forgetBotSecret(deps.prisma, botSecretScope(context.actor, bot.id), input.name);
+        return { ok: true as const };
+      }),
+    },
     approvalRules: {
       list: authed.approvalRules.list.handler(async ({ context }) => {
         const rows = await deps.prisma.actionApprovalRule.findMany({
@@ -4473,10 +5259,26 @@ export function createRouter(deps: RouterDeps) {
           groupId: row.groupId,
           runId: row.runId,
           name: row.name,
+          description: row.description,
           mimeType: row.mimeType,
           size: row.size,
+          version: row.version,
           createdAt: row.createdAt.toISOString(),
         }));
+      }),
+      listSpace: authed.artifacts.listSpace.handler(async ({ context, input }) => {
+        if (input.botId) await repos.getBot(context.actor, input.botId);
+        try {
+          return await listSpaceArtifacts(deps, context.actor, input);
+        } catch (error) {
+          if (error instanceof ArtifactListCursorError) {
+            throw new ORPCError("BAD_REQUEST", { message: error.message });
+          }
+          throw error;
+        }
+      }),
+      listVersions: authed.artifacts.listVersions.handler(async ({ context, input }) => {
+        return listArtifactVersions(deps, context.actor, input);
       }),
       create: authed.artifacts.create.handler(async ({ context, input }) => {
         const botId = input.botId
@@ -4513,6 +5315,12 @@ export function createRouter(deps: RouterDeps) {
           if (error instanceof IsolationError) throw error;
           throw error;
         }
+      }),
+      getById: authed.artifacts.getById.handler(async ({ context, input }) => {
+        return getSpaceArtifactById(deps, context.actor, input);
+      }),
+      remove: authed.artifacts.remove.handler(async ({ context, input }) => {
+        return deleteArtifactFamily(deps, context.actor, { familyId: input.artifactId });
       }),
     },
     usage: {
@@ -4640,6 +5448,7 @@ export function createRouter(deps: RouterDeps) {
             ...row,
             isDefault: preference?.isDefault ?? false,
             voiceId: preference?.voiceId ?? "",
+            speechModel: preference?.speechModel ?? "",
           });
         });
       }),
@@ -4648,8 +5457,12 @@ export function createRouter(deps: RouterDeps) {
           provider: input.provider,
           plaintext: input.apiKey,
           voiceId: input.voiceId,
+          speechModel: input.speechModel,
           signal: context.signal,
         }),
+      ),
+      disconnect: authed.voice.disconnect.handler(async ({ context, input }) =>
+        disconnectVoiceCredential(deps, context.actor, { provider: input.provider }),
       ),
       setVoice: authed.voice.setVoice.handler(async ({ context, input }) => {
         const cred = await withSerializableRetry(() =>
@@ -4683,6 +5496,9 @@ export function createRouter(deps: RouterDeps) {
         );
         return toVoiceStatus(cred);
       }),
+      setSpeechModel: authed.voice.setSpeechModel.handler(async ({ context, input }) =>
+        updateVoiceSpeechModel(deps, context.actor, input),
+      ),
       voices: authed.voice.voices.handler(async ({ context, input }) => {
         const loaded = await loadDefaultVoiceCredential(deps, context.actor);
         if (!loaded) return [];
@@ -4821,6 +5637,7 @@ async function spaceNavigationDto(
           (membership.space.deletingAt === null || membership.space.deletingAt < staleClaimBefore),
         bots: spaceBots.map((bot) => ({
           id: bot.id,
+          parentBotId: bot.parentBotId,
           spaceId: bot.spaceId,
           name: bot.name,
           title: bot.title,
@@ -4927,6 +5744,41 @@ async function modelSetup(deps: RouterDeps, actor: Actor) {
   };
 }
 
+/**
+ * Thinking levels a caller may set for a provider/model. Catalog models answer from
+ * `thinkingLevels`; unknown catalog ids return undefined (no check). OpenAI-compatible
+ * connections only advertise levels when the stored endpoint's saved model matches.
+ */
+async function allowedThinkingLevels(
+  deps: RouterDeps,
+  actor: Actor,
+  provider: string,
+  modelId: string,
+): Promise<string[] | undefined> {
+  if (provider !== OPENAI_COMPATIBLE_PROVIDER_ID) {
+    return listPiCatalog().find((item) => item.provider === provider && item.id === modelId)
+      ?.thinkingLevels;
+  }
+  let allowed: string[] | undefined = ["off"];
+  const credential = await findModelCredential(deps.prisma, actor, provider);
+  if (credential && credential.defaultModel === modelId) {
+    const secret = await deps.prisma.secret.findFirst({
+      where: { id: credential.secretId, userId: actor.userId, spaceId: null },
+      select: { ciphertext: true },
+    });
+    if (secret) {
+      try {
+        allowed =
+          modelCredentialDto(credential, deps.secrets.load(secret.ciphertext, credential.secretId))
+            .thinkingLevels ?? allowed;
+      } catch {
+        // Unreadable connections must not advertise reasoning support.
+      }
+    }
+  }
+  return allowed;
+}
+
 async function computerStatus(
   deps: RouterDeps,
   actor: Actor,
@@ -4943,6 +5795,58 @@ async function computerStatus(
     botName: bot.name,
   });
   return toComputerStatus(botId, bot.computer, busyBotName);
+}
+
+/** Hand the user's screen control for this bot back, continuing any run waiting on it. */
+async function releaseComputerControl(
+  deps: RouterDeps,
+  actor: Actor,
+  botId: string,
+  reason?: ComputerReleaseReason,
+): Promise<void> {
+  const bot = await createRepos(deps.prisma).getBot(actor, botId);
+  if (!bot.computer) throw new IsolationError();
+  const controlBotId = bot.computer.controlBotId;
+  const controlLeaseId = bot.computer.controlLeaseId;
+  if (bot.computer.controlHolder !== "user" || !controlBotId || controlBotId !== bot.id) return;
+  if (!hasActiveComputerControl(bot.computer) || !controlLeaseId) {
+    // Stale controlHolder=user. Prefer expiry (revokes provider control). If a lease id
+    // remains after a failed revoke, keep it so reconciliation can retry.
+    if (controlLeaseId) {
+      await expireComputerControl(deps, bot.computer.id, controlLeaseId).catch(() => undefined);
+    } else {
+      await clearInactiveUserComputerControl(deps.prisma, bot.computer.id);
+    }
+    return;
+  }
+  await revokeScreenControl(
+    deps,
+    bot.computer,
+    computerContext(actor, controlBotId, "screen.release"),
+    controlLeaseId,
+  );
+
+  const released = await deps.events.finalizeComputerControlRelease({
+    spaceId: actor.spaceId,
+    computerId: bot.computer.id,
+    botId: controlBotId,
+    runId: bot.computer.controlRunId,
+    leaseId: controlLeaseId,
+    holder: "bot",
+    reason: reason ?? "released",
+  });
+  if (!released) return;
+  // The lease-specific key makes this cancellation safe after a replacement takeover.
+  await deps.jobs
+    .cancel(computerControlExpireJobKey(bot.computer.id, controlLeaseId))
+    .catch((error) => {
+      // The expired job is harmless after the lease is cleared, so do not report a
+      // failed release after the transaction has committed.
+      getLogger().error("computer control expiry cancellation", error);
+    });
+
+  await enqueueTakeoverContinuation(deps.jobs, released.runId);
+  scheduleComputerSleep(deps.jobs, bot.computer.id);
 }
 
 async function runComputerReplace(
@@ -4975,10 +5879,18 @@ async function runComputerReplace(
     throw error;
   }
   try {
-    await replaceComputer(deps, bot.computer.id, mode, {
-      ...computerContext(context.actor, bot.id, operationId),
-      screenLeaseId: screenLeaseIdForRun(lease, manualRunId),
-    });
+    await replaceComputer(
+      deps,
+      bot.computer.id,
+      mode,
+      {
+        ...computerContext(context.actor, bot.id, operationId),
+        screenLeaseId: screenLeaseIdForRun(lease, manualRunId),
+      },
+      "none",
+      undefined,
+      { handBackIdleTakeover: true },
+    );
     scheduleComputerSleep(deps.jobs, bot.computer.id);
   } catch (error) {
     if (error instanceof ComputerBusyError) {
@@ -5002,7 +5914,17 @@ async function expireStaleComputerControl(
     | undefined,
 ): Promise<boolean> {
   if (!computer || hasActiveComputerControl(computer)) return false;
-  if (computer.controlHolder !== "user") return false;
+  if (computer.controlHolder !== "user") {
+    // Holder "none" with a surviving lease id is a revoke that failed mid-expiry;
+    // retry it so the row does not sit busy forever.
+    if (computer.controlLeaseId) {
+      await expireComputerControl(deps, computer.id, computer.controlLeaseId).catch(
+        () => undefined,
+      );
+      return true;
+    }
+    return false;
+  }
   const leaseId = computer.controlLeaseId;
   // Keep a failed revoke's lease id so reconciliation can retry provider shutdown.
   if (leaseId) {
@@ -5125,11 +6047,38 @@ async function persistModelCredential(
     plaintext: string;
     label?: string;
     modelId?: string;
+    thinkingLevel?: string | null;
     supportsImages?: boolean;
     signal?: AbortSignal;
   },
+  codexCatalog: CodexLiveCatalog,
 ) {
   throwIfAborted(input.signal);
+  const requestedModelId = usableModelId(input.modelId);
+  const authError = requestedModelId
+    ? validateModelAuthAvailability(input.provider, requestedModelId, input.plaintext)
+    : undefined;
+  // The backend's live catalog can clear a static OAuth exclusion for the
+  // account this credential signs into (e.g. Codex Spark on ChatGPT plans).
+  if (
+    authError &&
+    requestedModelId &&
+    !(await codexLiveListsModel(
+      codexCatalog,
+      actor.userId,
+      parseModelSecret(input.plaintext),
+      requestedModelId,
+    ))
+  ) {
+    throw new ORPCError("BAD_REQUEST", { message: authError });
+  }
+  const defaultModel =
+    requestedModelId ??
+    defaultCatalogModelId(input.provider, input.plaintext) ??
+    usableModelId(deps.env.defaultModel);
+  const allowedThinking = defaultModel
+    ? await allowedThinkingLevels(deps, actor, input.provider, defaultModel)
+    : undefined;
   const stored = await deps.secrets.put(input.plaintext, {
     operationId: "cred",
     traceId: "cred",
@@ -5178,8 +6127,26 @@ async function persistModelCredential(
               },
             });
         throwIfAborted(input.signal);
-        const defaultModel = input.modelId ?? deps.env.defaultModel;
-        await selectSpaceModelPreference(tx, actor, credential.id, defaultModel);
+        let thinkingLevel = input.thinkingLevel;
+        if (thinkingLevel === undefined) {
+          // A stored effort only carries over while it still names this model.
+          const previous = await tx.spaceModelPreference.findFirst({
+            where: {
+              spaceId: actor.spaceId,
+              userId: actor.userId,
+              credentialId: credential.id,
+            },
+            select: { modelId: true, thinkingLevel: true },
+          });
+          thinkingLevel =
+            previous?.modelId === usableModelId(defaultModel) ? previous.thinkingLevel : null;
+        }
+        // Connect and limit saves can still carry an effort chosen for the previous
+        // model. Keep it only when this model supports it; otherwise clamp or clear.
+        thinkingLevel = defaultModel
+          ? clampCatalogThinkingLevel(thinkingLevel, allowedThinking)
+          : null;
+        await selectSpaceModelPreference(tx, actor, credential.id, defaultModel, thinkingLevel);
         throwIfAborted(input.signal);
         if (existing) {
           await deleteUnreferencedCredentialSecret(tx, {
@@ -5253,6 +6220,34 @@ async function listRoutinesDto(deps: RouterDeps, actor: Actor, botId: string) {
   return rows.map(mapRoutine);
 }
 
+/**
+ * The provider killed this sandbox (idle timeout) while the row still says running. Clear the
+ * dead ref so the UI offers a boot instead of 500ing, and rethrow anything else. Leave any
+ * active control lease alone: expireComputerControl owns that release (provider screen-control,
+ * events, takeover continuation).
+ */
+async function clearGoneSandbox(
+  deps: RouterDeps,
+  computer: { id: string; providerRef: string | null },
+  error: unknown,
+): Promise<null> {
+  if (!isSandboxGoneError(error)) throw error;
+  getLogger().error(`computer ${computer.id} sandbox ${computer.providerRef} is gone`, error);
+  await deps.prisma.computer.updateMany({
+    where: { id: computer.id, providerRef: computer.providerRef },
+    data: { state: "stopped", providerRef: null },
+  });
+  return null;
+}
+
+async function keepComputerAwake(deps: RouterDeps, computerId: string) {
+  await deps.prisma.computer.updateMany({
+    where: { id: computerId, state: "running" },
+    data: { updatedAt: new Date() },
+  });
+  scheduleComputerSleep(deps.jobs, computerId);
+}
+
 function withViewOnly(url: string, viewOnly: boolean) {
   try {
     const parsed = new URL(url);
@@ -5309,6 +6304,10 @@ async function messagingIdentityDto(
 
 function isUniqueViolation(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "P2002");
+}
+
+function isRecordNotFound(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "P2025");
 }
 
 function messagingChannelDto(membership: {

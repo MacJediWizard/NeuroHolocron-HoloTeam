@@ -1,6 +1,6 @@
-# Contributing to Rakazo
+# Contributing to Legiara
 
-Thanks for helping improve Rakazo. Keep changes focused and testable.
+Thanks for helping improve Legiara. Keep changes focused and testable.
 
 ## Run locally
 
@@ -24,6 +24,10 @@ required secrets, and startup commands.
 | `pnpm lint` | Biome lint and format check. |
 
 CI runs `pnpm lint`, `pnpm check`, production builds (including Electron preload smoke), `pnpm test`, `pnpm test:integration`, and `pnpm test:e2e` on every PR.
+
+Ordinary test processes (`NODE_ENV=test`) do not load the checkout's `.env`.
+Verification CLIs load configuration before starting isolated test processes;
+live canaries explicitly enabled with `VERIFY_PROVIDERS` also opt into loading it.
 
 ## Adding a UI language
 
@@ -84,6 +88,5 @@ capability config, fixtures, logs, or snapshots; use the encrypted secret store 
 
 | Address | Use for |
 | --- | --- |
-| [security@rakazo.com](mailto:security@rakazo.com) | Vulnerabilities only — see [SECURITY.md](SECURITY.md) |
-| [support@rakazo.com](mailto:support@rakazo.com) | User and support questions |
-| [elie@rakazo.com](mailto:elie@rakazo.com) | Maintainer |
+| [security@legiara.com](mailto:security@legiara.com) | Vulnerabilities only — see [SECURITY.md](SECURITY.md) |
+| [hello@legiara.com](mailto:hello@legiara.com) | User and support questions |

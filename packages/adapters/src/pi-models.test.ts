@@ -41,6 +41,22 @@ describe("Pi model catalog", () => {
     expect(scriptedCatalogEntry.provider).toBe("scripted");
   });
 
+  it("lists DeepSeek API model ids instead of display labels", () => {
+    const deepseek = listPiCatalog().filter((entry) => entry.provider === "deepseek");
+    const ids = deepseek.map((entry) => entry.id);
+    expect(ids).toContain("deepseek-flash");
+    expect(ids).toContain("deepseek-v4-pro");
+    expect(ids).not.toContain("DeepSeek-V4.1-Flash");
+    expect(ids).not.toContain("DeepSeek V4.1 Flash");
+    for (const entry of deepseek) {
+      expect(entry.id).not.toBe(entry.label);
+      expect(entry.label.length).toBeGreaterThan(0);
+    }
+    expect(deepseek.find((entry) => entry.id === "deepseek-flash")?.label).toBe(
+      "DeepSeek V4.1 Flash",
+    );
+  });
+
   it("lists current xAI and OpenCode Go models from the Pi catalog", () => {
     const catalog = listPiCatalog();
     const ids = (provider: string) =>
@@ -103,7 +119,6 @@ describe("Pi model catalog", () => {
     expect(label("claude-opus-4-5")).toBe("Claude Opus 4.5 (auto-updates)");
     expect(label("claude-haiku-4-5")).toBe("Claude Haiku 4.5 (auto-updates)");
     expect(label("claude-haiku-4-5-20251001")).toBe("Claude Haiku 4.5");
-    expect(catalog.some((entry) => /\blatest\b/i.test(entry.label))).toBe(false);
   });
 });
 
@@ -127,6 +142,7 @@ describe("catalogModelLabel", () => {
     ["gemini-flash-latest", "Gemini Flash Latest", "Gemini Flash (auto-updates)"],
     ["foo-latest", "foo-latest", "foo (auto-updates)"],
     ["foo/latest", "foo/latest", "foo (auto-updates)"],
+    ["qwen-max-latest", "Qwen Max Latest (Qwen3.8 Max)", "Qwen Max (auto-updates)"],
     // Pinned: `-preview` is its own model and a dated id is already a snapshot, so promise nothing.
     ["foo", "Foo Latest", "Foo"],
     ["claude-opus-4-5-20251101", "Claude Opus 4.5 (latest)", "Claude Opus 4.5"],

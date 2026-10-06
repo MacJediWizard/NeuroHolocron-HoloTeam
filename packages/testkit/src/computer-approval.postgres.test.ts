@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { ComposioEmulator, FakeSandboxProvider } from "@rakazo/adapters";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { discardBotIntroRun } from "./discard-bot-intro.js";
 import { sessionCookieHeader } from "./index.js";
 import { type ModelEmulatorStep, startModelEmulator } from "./model-emulator.js";
 
@@ -81,21 +82,10 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
                   : approvedArgs,
             },
           },
-          ...(answer === "allow"
-            ? [
-                {
-                  expect: resultStep("resumed-action"),
-                  response: {
-                    type: "tool" as const,
-                    id: "duplicate-action",
-                    name: "computer_act",
-                    arguments: approvedArgs,
-                  },
-                },
-              ]
-            : []),
           {
-            expect: resultStep(answer === "allow" ? "duplicate-action" : "resumed-action"),
+            // A later identical computer_act in this same resume is a new occurrence,
+            // not a replay. This fixture only checks the approved request is restored.
+            expect: resultStep("resumed-action"),
             response: { type: "text", text: "Finished the approval fixture." },
           },
         ],
@@ -147,6 +137,7 @@ describe.skipIf(!databaseAvailable)("offline Pi computer approval", () => {
           instructions: "Complete the computer task.",
           notifyOnFinish: false,
         });
+        await discardBotIntroRun(handles, cookie, bot.id);
         await rpc(handles.app, cookie, "bots/update", {
           botId: bot.id,
           modelProvider: model.model.provider,

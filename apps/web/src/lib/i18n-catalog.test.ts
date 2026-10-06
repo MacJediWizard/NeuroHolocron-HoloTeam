@@ -212,6 +212,36 @@ describe("lingui catalogs", () => {
     expect(i18n._({ id: "Cancel", message: "Cancel" })).toBe("Cancelar");
   });
 
+  it("ships Simplified Chinese translations for the Chief onboarding focus card", () => {
+    const catalog = readFileSync(
+      fileURLToPath(new URL("../locales/zh-CN/messages.po", import.meta.url)),
+      "utf8",
+    );
+
+    expect(catalog).toContain('msgid "What do you want me on first?"\nmsgstr "你想让我先做什么？"');
+    expect(catalog).toContain('msgid "Day-to-day work"\nmsgstr "日常工作"');
+    expect(catalog).toContain('msgid "Inbox & email"\nmsgstr "收件箱和邮件"');
+    expect(catalog).toContain('msgid "Research & writing"\nmsgstr "调研和写作"');
+    expect(catalog).toContain('msgid "A bit of everything"\nmsgstr "什么都做一点"');
+
+    i18n.load("zh-CN", {
+      "What do you want me on first?": "你想让我先做什么？",
+      "Day-to-day work": "日常工作",
+      "Inbox & email": "收件箱和邮件",
+      "Research & writing": "调研和写作",
+      "A bit of everything": "什么都做一点",
+    });
+    i18n.activate("zh-CN");
+    expect(
+      i18n._({
+        id: "What do you want me on first?",
+        message: "What do you want me on first?",
+      }),
+    ).toBe("你想让我先做什么？");
+    expect(i18n._({ id: "Day-to-day work", message: "Day-to-day work" })).toBe("日常工作");
+    expect(i18n._({ id: "Inbox & email", message: "Inbox & email" })).toBe("收件箱和邮件");
+  });
+
   it("ships the Russian runtime catalog with translated chrome and Russian plurals", () => {
     const catalog = readFileSync(
       fileURLToPath(new URL("../locales/ru/messages.po", import.meta.url)),
@@ -227,5 +257,44 @@ describe("lingui catalogs", () => {
     expect(catalog).toContain(
       'msgstr "{0, plural, one {# модель} few {# модели} many {# моделей} other {# модели}}"',
     );
+  });
+
+  it("ships the French runtime catalog with translated chrome and French plurals", () => {
+    const catalog = readFileSync(
+      fileURLToPath(new URL("../locales/fr/messages.po", import.meta.url)),
+      "utf8",
+    );
+
+    expect(catalog).toContain('msgid "Settings"\nmsgstr "Paramètres"');
+    expect(catalog).toContain('msgid "Language"\nmsgstr "Langue"');
+    expect(catalog).toContain('msgid "Cancel"\nmsgstr "Annuler"');
+    expect(catalog).toContain(
+      'msgid "{0} runs · {1} tokens"\nmsgstr "{0} exécutions · {1} jetons"',
+    );
+    expect(catalog).toContain('msgstr "{0, plural, one {# modèle} other {# modèles}}"');
+    expect(catalog).toContain(
+      'msgid "Configure a plugin catalog on the server to connect apps."\nmsgstr "Configurez un catalogue de plugins sur le serveur pour connecter des applications."',
+    );
+  });
+
+  it("translates the terminal empty state in every non-English catalog", () => {
+    const translations: Record<string, string> = {
+      de: "Noch keine Bot-Aktivität.",
+      es: "Aún no hay actividad del bot.",
+      fr: "Aucune activité du bot pour le moment.",
+      hi: "अभी तक कोई बॉट गतिविधि नहीं।",
+      ko: "아직 봇 활동이 없습니다.",
+      "pt-BR": "Ainda não há atividade do bot.",
+      ru: "Активности бота пока нет.",
+      tr: "Henüz bot etkinliği yok.",
+      "zh-CN": "还没有机器人活动。",
+    };
+    for (const [locale, msgstr] of Object.entries(translations)) {
+      const catalog = readFileSync(
+        fileURLToPath(new URL(`../locales/${locale}/messages.po`, import.meta.url)),
+        "utf8",
+      );
+      expect(catalog).toContain(`msgid "No bot activity yet."\nmsgstr "${msgstr}"`);
+    }
   });
 });

@@ -2,7 +2,10 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { SCRIPTED_MPEG, SCRIPTED_TRANSCRIPT, SCRIPTED_VOICE_ID } from "@rakazo/adapters";
+import type { PrismaClient } from "@rakazo/db";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import type { BotIntroHarness } from "./discard-bot-intro.js";
+import { discardBotIntroFromCreate } from "./discard-bot-intro.js";
 import { sessionCookieHeader } from "./index.js";
 
 type App = { request: (input: string, init?: RequestInit) => Promise<Response> };
@@ -13,9 +16,11 @@ process.env.AGENT_RUNTIME = "scripted";
 
 const hasDb = process.env.VERIFY_DATABASE === "1" && Boolean(process.env.DATABASE_URL);
 const describeVoice = hasDb ? describe : describe.skip;
+let botIntroHarness: BotIntroHarness | undefined;
 
 describeVoice("voice credentials and speech HTTP", () => {
   let app: App;
+  let prisma: PrismaClient;
   let stop: () => Promise<void>;
   const stamp = Date.now();
   const dataDir = mkdtempSync(path.join(tmpdir(), "rakazo-voice-"));
@@ -29,7 +34,9 @@ describeVoice("voice credentials and speech HTTP", () => {
       agentRuntime: "scripted",
     });
     app = handles.app;
+    prisma = handles.prisma;
     stop = handles.stop;
+    botIntroHarness = handles;
   });
 
   afterAll(async () => {
@@ -129,6 +136,57 @@ describeVoice("voice credentials and speech HTTP", () => {
     });
     expect(unauth.status).toBe(401);
   });
+
+  it("disconnects the actor credential and leaves another user's key in place", async () => {
+    const cookie = await signup(app, `voice-disconnect-${stamp}@rakazo.test`, "Voice Disconnect");
+    const other = await signup(
+      app,
+      `voice-disconnect-other-${stamp}@rakazo.test`,
+      "Other Voice Disconnect",
+    );
+    const me = await rpc<{ userId: string }>(app, cookie, "me");
+
+    await rpc(app, cookie, "voice/connect", {
+      provider: "scripted",
+      apiKey: "fake-scripted-voice-key",
+    });
+    const stored = await prisma.userVoiceCredential.findFirstOrThrow({
+      where: { userId: me.userId, provider: "scripted" },
+    });
+
+    await expect(rpc(app, other, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
+      ok: true,
+    });
+    await expect(
+      prisma.userVoiceCredential.findUnique({ where: { id: stored.id } }),
+    ).resolves.toMatchObject({ id: stored.id });
+    await expect(
+      prisma.secret.findUnique({ where: { id: stored.secretId } }),
+    ).resolves.toMatchObject({ id: stored.secretId });
+
+    await expect(rpc(app, cookie, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
+      ok: true,
+    });
+    await expect(
+      rpc<Array<{ provider: string }>>(app, cookie, "voice/credentials"),
+    ).resolves.toEqual([]);
+    await expect(
+      prisma.userVoiceCredential.findUnique({ where: { id: stored.id } }),
+    ).resolves.toBeNull();
+    await expect(
+      prisma.spaceVoicePreference.count({ where: { credentialId: stored.id } }),
+    ).resolves.toBe(0);
+    await expect(prisma.secret.findUnique({ where: { id: stored.secretId } })).resolves.toBeNull();
+
+    const prepared = await rpc<{ ready: boolean }>(app, cookie, "voice/prepare", {
+      text: "Hello there.",
+    });
+    expect(prepared.ready).toBe(false);
+
+    await expect(rpc(app, cookie, "voice/disconnect", { provider: "scripted" })).resolves.toEqual({
+      ok: true,
+    });
+  });
 });
 
 async function signup(app: App, email: string, name: string) {
@@ -148,7 +206,7 @@ async function rpc<T>(app: App, cookie: string, proc: string, body: unknown = {}
   if (res.status >= 400 || parsed.error) {
     throw new Error(`${proc} ${res.status}: ${parsed.error?.message ?? text}`);
   }
-  return parsed.json as T;
+  return discardBotIntroFromCreate(botIntroHarness, cookie, proc, parsed.json as T);
 }
 
 async function raw(app: App, cookie: string, proc: string, body: unknown) {

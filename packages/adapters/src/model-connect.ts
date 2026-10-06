@@ -2,7 +2,12 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type { ModelConnectInput, ModelCredential, ThinkingLevel } from "@rakazo/contracts";
 import { OPENAI_COMPATIBLE_PROVIDER_ID as CONTRACT_OPENAI_COMPAT } from "@rakazo/contracts";
 import { modelIdSupportsImages, updateModelImageCapabilities } from "./model-vision.js";
-import { parseModelSecret, type StoredModelSecret, serializeModelSecret } from "./pi-oauth.js";
+import {
+  CHATGPT_OAUTH_PROVIDER,
+  parseModelSecret,
+  type StoredModelSecret,
+  serializeModelSecret,
+} from "./pi-oauth.js";
 import {
   OPENAI_COMPATIBLE_PROVIDER_ID,
   openAiCompatibleModel,
@@ -21,7 +26,7 @@ export function buildModelConnectPlaintext(
 ): string {
   if (input.provider === OPENAI_COMPATIBLE_PROVIDER_ID) {
     const prepared = prepareOpenAiCompatibleConnect(input);
-    const previous = previousPlaintext ? parseModelSecret(previousPlaintext) : undefined;
+    const previous = tryParseModelSecret(previousPlaintext);
     const sameEndpoint =
       previous?.kind === "openai_compatible" && previous.baseUrl === prepared.baseUrl;
     if (input.apiKey === undefined && sameEndpoint) {
@@ -42,12 +47,10 @@ export function buildModelConnectPlaintext(
         : sameEndpoint
           ? previous.thinkingLevel
           : undefined;
-    const maxTokens =
-      input.maxTokens !== undefined
-        ? input.maxTokens
-        : sameEndpoint
-          ? previous.maxTokens
-          : undefined;
+    const maxTokens = connectMaxTokens(
+      input.maxTokens,
+      sameEndpoint ? previous.maxTokens : undefined,
+    );
     const contextWindow =
       input.contextWindow !== undefined
         ? input.contextWindow
@@ -76,10 +79,80 @@ export function buildModelConnectPlaintext(
     return serializeModelSecret(secret);
   }
   const apiKey = input.apiKey?.trim();
-  if (!apiKey || apiKey.length < 8) {
-    throw new Error("API key must contain at least 8 characters");
+  // The Codex transport authenticates with the OAuth JWT from ChatGPT sign-in,
+  // which carries the chatgpt account id it requires. A plain API key can never
+  // work there, so reject it instead of persisting a credential that only fails
+  // at request time.
+  if (input.provider === CHATGPT_OAUTH_PROVIDER && apiKey) {
+    throw new Error(CHATGPT_SUBSCRIPTION_REQUIRED_MESSAGE);
   }
-  return apiKey;
+  const previous = tryParseModelSecret(previousPlaintext);
+  const maxTokens = connectMaxTokens(input.maxTokens, previous?.maxTokens);
+  if (apiKey) {
+    if (apiKey.length < 8) throw new Error("API key must contain at least 8 characters");
+    return serializeModelSecret({
+      kind: "api_key",
+      key: apiKey,
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+    });
+  }
+  if (previous?.kind === "api_key" && previous.key.trim().length >= 8) {
+    if (input.provider === CHATGPT_OAUTH_PROVIDER) {
+      throw new Error(CHATGPT_SUBSCRIPTION_REQUIRED_MESSAGE);
+    }
+    return serializeModelSecret({
+      kind: "api_key",
+      key: previous.key,
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+    });
+  }
+  if (previous?.kind === "oauth") {
+    return serializeModelSecret({
+      kind: "oauth",
+      credential: previous.credential,
+      ...(maxTokens !== undefined ? { maxTokens } : {}),
+    });
+  }
+  if (input.provider === CHATGPT_OAUTH_PROVIDER) {
+    throw new Error(CHATGPT_SUBSCRIPTION_REQUIRED_MESSAGE);
+  }
+  throw new Error("API key must contain at least 8 characters");
+}
+
+const CHATGPT_SUBSCRIPTION_REQUIRED_MESSAGE =
+  "ChatGPT subscription sign-in is required for this provider.";
+
+/** Inherited fields come from the previous secret; a corrupt one counts as absent. */
+function tryParseModelSecret(plaintext?: string): StoredModelSecret | undefined {
+  if (!plaintext) return undefined;
+  try {
+    return parseModelSecret(plaintext);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether the stored secret contains an API key. OAuth sign-in and a keyless
+ * OpenAI-compatible server are connections without one. An unreadable secret
+ * is not reported as a key — the client must not invent a stored-key state.
+ */
+function storedModelSecretHasApiKey(plaintext: string | undefined): boolean {
+  if (!plaintext) return false;
+  const parsed = parseModelSecret(plaintext);
+  if (parsed.kind === "api_key") return parsed.key.trim().length > 0;
+  if (parsed.kind === "openai_compatible") return Boolean(parsed.apiKey?.trim());
+  return false;
+}
+
+/** `null` clears a saved limit. Omitting it keeps the previous connection's limit. */
+function connectMaxTokens(
+  input: number | null | undefined,
+  previous: number | undefined,
+): number | undefined {
+  if (input === null) return undefined;
+  if (input !== undefined) return input;
+  return previous;
 }
 
 export function modelCredentialDto(
@@ -89,6 +162,7 @@ export function modelCredentialDto(
     label: string;
     isDefault: boolean;
     defaultModel?: string | null;
+    thinkingLevel?: string | null;
     supportsImages?: boolean;
   },
   plaintext?: string,
@@ -97,11 +171,20 @@ export function modelCredentialDto(
     id: row.id,
     provider: row.provider,
     label: row.label,
-    hasKey: true,
+    hasKey: storedModelSecretHasApiKey(plaintext),
     isDefault: row.isDefault,
     ...(row.defaultModel ? { modelId: row.defaultModel } : {}),
+    // Space-scoped effort stored beside the preference's modelId; the
+    // openai-compatible secret may still contribute below when unset.
+    ...(row.thinkingLevel ? { thinkingLevel: row.thinkingLevel as ThinkingLevel } : {}),
   };
-  if (row.provider !== CONTRACT_OPENAI_COMPAT) return credential;
+  if (row.provider !== CONTRACT_OPENAI_COMPAT) {
+    if (!plaintext) return credential;
+    const parsed = parseModelSecret(plaintext);
+    return parsed.maxTokens !== undefined
+      ? { ...credential, maxTokens: parsed.maxTokens }
+      : credential;
+  }
   const compatibleCredential = {
     ...credential,
     supportsImages: row.supportsImages ?? false,
@@ -117,7 +200,9 @@ export function modelCredentialDto(
         : compatibleCredential.supportsImages,
     baseUrl: parsed.baseUrl,
     reasoning: parsed.reasoning ?? false,
-    ...(parsed.thinkingLevel !== undefined ? { thinkingLevel: parsed.thinkingLevel } : {}),
+    ...(credential.thinkingLevel !== undefined || parsed.thinkingLevel !== undefined
+      ? { thinkingLevel: credential.thinkingLevel ?? parsed.thinkingLevel }
+      : {}),
     ...(parsed.maxTokens !== undefined ? { maxTokens: parsed.maxTokens } : {}),
     ...(parsed.contextWindow !== undefined ? { contextWindow: parsed.contextWindow } : {}),
     ...(parsed.maxImagesPerPrompt !== undefined
