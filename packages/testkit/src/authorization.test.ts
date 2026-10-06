@@ -849,34 +849,25 @@ describeWithDatabase("API authorization and resource isolation", () => {
     expect(await missing.text()).toMatch(/credential/i);
   });
 
-  it("disconnects an unused model credential and removes its encrypted secret", async () => {
+  it("disconnects the default model credential and removes its encrypted secret", async () => {
     const cookie = await signup(app, `model-disconnect-${stamp}@rakazo.test`, "Disconnect Model");
     const connected = await rpc<ModelCredential>(app, cookie, "models/connect", {
-      provider: "provider-unused",
-      apiKey: "fake-unused-provider-key",
-      label: "Unused provider",
-      modelId: "unused/one",
+      provider: "provider-default",
+      apiKey: "fake-default-provider-key",
+      label: "Default provider",
+      modelId: "default/one",
     });
     const credential = await handles.prisma.userModelCredential.findUniqueOrThrow({
       where: { id: connected.id },
     });
 
-    const active = await raw(app, cookie, "models/disconnect", {
-      provider: "provider-unused",
-    });
-    expect(active.status).toBeGreaterThanOrEqual(400);
-    expect(await active.text()).toMatch(/default model/i);
-
-    await rpc(app, cookie, "models/connect", {
-      provider: "provider-current",
-      apiKey: "fake-current-provider-key",
-      label: "Current provider",
-      modelId: "current/one",
-    });
-    await rpc(app, cookie, "models/disconnect", { provider: "provider-unused" });
+    await rpc(app, cookie, "models/disconnect", { provider: "provider-default" });
 
     await expect(
       handles.prisma.userModelCredential.findUnique({ where: { id: connected.id } }),
+    ).resolves.toBeNull();
+    await expect(
+      handles.prisma.spaceModelPreference.findFirst({ where: { credentialId: connected.id } }),
     ).resolves.toBeNull();
     await expect(
       handles.prisma.secret.findUnique({ where: { id: credential.secretId } }),

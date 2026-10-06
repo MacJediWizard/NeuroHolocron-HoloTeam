@@ -1312,34 +1312,6 @@ export function createRouter(deps: RouterDeps) {
         return { ok: true as const };
       }),
       disconnect: authed.models.disconnect.handler(async ({ context, input }) => {
-        const [defaultPreference, assignedBot] = await Promise.all([
-          deps.prisma.spaceModelPreference.findFirst({
-            where: {
-              userId: context.actor.userId,
-              isDefault: true,
-              credential: { provider: input.provider },
-            },
-            select: { id: true },
-          }),
-          deps.prisma.bot.findFirst({
-            where: {
-              userId: context.actor.userId,
-              modelProvider: input.provider,
-              archivedAt: null,
-            },
-            select: { name: true },
-          }),
-        ]);
-        if (defaultPreference) {
-          throw new ORPCError("CONFLICT", {
-            message: "Choose another default model before disconnecting this provider.",
-          });
-        }
-        if (assignedBot) {
-          throw new ORPCError("CONFLICT", {
-            message: `${assignedBot.name} still uses this provider. Assign that employee another model first.`,
-          });
-        }
         // Retire pending sign-ins in every space first — the credentials are
         // account-wide, so a finishing OAuth session anywhere could otherwise
         // re-persist a credential the delete below just removed.
