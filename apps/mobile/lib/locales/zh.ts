@@ -412,6 +412,8 @@ export const ZH_MESSAGES: Record<string, string> = {
   Reset: "重置",
   "This server signs in with {provider}, which the app does not support yet.":
     "此服务器使用 {provider} 登录，应用暂不支持。",
+  "Could not load sign-in options": "无法加载登录选项",
+  "Try again": "重试",
   "single sign-on": "单点登录",
   "Reset your password": "重置密码",
   "Reset computer": "重置电脑",

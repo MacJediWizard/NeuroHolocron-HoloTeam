@@ -304,6 +304,20 @@ describe("InfisicalSecretStore", () => {
     expect(store.keys()).toEqual([]);
   });
 
+  it("forgets revisions for keys that are gone", async () => {
+    const fake = new FakeInfisical();
+    const store = await started(fake);
+    const tracked = () => (store as unknown as { revisions: Map<string, number> }).revisions.size;
+    const removed = await store.put("one", context, "rec1");
+    const deletedElsewhere = await store.put("two", context, "rec2");
+    expect(tracked()).toBe(2);
+    await store.remove(keyOf(removed));
+    expect(tracked()).toBe(1);
+    fake.secrets.delete(keyOf(deletedElsewhere));
+    await store.refresh();
+    expect(tracked()).toBe(0);
+  });
+
   it("sweeps only unreferenced app keys past the grace period", async () => {
     const fake = new FakeInfisical();
     fake.secrets.set("SECRET_legacy", { value: "x" });

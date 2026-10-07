@@ -44,6 +44,7 @@ test("a failed capabilities request offers a retry that restores SSO", async ({
   await page.goto("/sign-in");
   const alert = page.getByRole("alert").filter({ hasText: "Could not load sign-in options" });
   await expect(alert).toBeVisible();
+  await expect(page.getByLabel("Email")).toHaveCount(0);
   await captureScreenshot(page, testInfo, "sign-in-options-retry");
   available = true;
   await alert.getByRole("button", { name: "Try again" }).click();

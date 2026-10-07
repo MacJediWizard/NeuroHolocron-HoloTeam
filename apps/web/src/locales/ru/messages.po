@@ -4100,7 +4100,7 @@ msgstr ""
 #: src/pages/Auth.tsx
 #: src/pages/Onboarding.tsx
 msgid "Try again"
-msgstr ""
+msgstr "Повторить"
 
 #: src/pages/shell/bot-credentials.tsx
 msgid "Type"
