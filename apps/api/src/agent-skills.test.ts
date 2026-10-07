@@ -26,7 +26,7 @@ function savedSkill(name: string, source = "user") {
 }
 
 function setup(rows: ReturnType<typeof savedSkill>[] = []) {
-  type Where = { id?: string; spaceId: string; userId: string; source?: string };
+  type Where = { id?: string; spaceId: string; userId?: string; source?: string };
   const matches = (row: ReturnType<typeof savedSkill>, where: Where) =>
     Object.entries(where).every(([key, value]) => row[key as keyof typeof row] === value);
   const agentSkill = {
@@ -97,7 +97,7 @@ describe("built-in skill precedence in the API", () => {
     expect(agentSkill.deleteMany).not.toHaveBeenCalled();
   });
 
-  it.each([{ spaceId: "other-space" }, { userId: "other-user" }])(
+  it.each([{ spaceId: "other-space" }])(
     "does not let foreign skills shadow the builtin: %j",
     async (foreignOwner) => {
       const { service } = setup([{ ...savedSkill(" Interrogate "), ...foreignOwner }]);
@@ -111,4 +111,12 @@ describe("built-in skill precedence in the API", () => {
       await expect(service.get(actor, { skillId: "saved-1" })).rejects.toThrow();
     },
   );
+
+  it("shows a skill another member of the Space saved", async () => {
+    const { service } = setup([{ ...savedSkill("Triage"), userId: "other-member" }]);
+    await expect(service.get(actor, { skillId: "saved-1" })).resolves.toMatchObject({
+      id: "saved-1",
+      name: "Triage",
+    });
+  });
 });

@@ -16,8 +16,9 @@ import type { EncryptedSecretStore } from "./secrets.js";
 import { readBodyCapped, withAbort } from "./web-ssrf.js";
 
 export type BotSecretScope = { userId: string; spaceId: string; botId: string };
-function scopeFields({ userId, spaceId, botId }: BotSecretScope): BotSecretScope {
-  return { userId, spaceId, botId };
+/** A bot's credentials are shared by every member of its Space; userId only records the author. */
+function scopeFields({ spaceId, botId }: BotSecretScope): { spaceId: string; botId: string } {
+  return { spaceId, botId };
 }
 
 const metadata = { name: true, origin: true, auth: true } as const;
@@ -273,7 +274,13 @@ export async function storeBotSecret(input: {
     await tx.botSecret.update({ where: { id }, data: { ciphertext: encrypted.ciphertext } });
   } else {
     await tx.botSecret.create({
-      data: { id, ...scopeFields(scope), ...destination, ciphertext: encrypted.ciphertext },
+      data: {
+        id,
+        userId: scope.userId,
+        ...scopeFields(scope),
+        ...destination,
+        ciphertext: encrypted.ciphertext,
+      },
     });
   }
 }

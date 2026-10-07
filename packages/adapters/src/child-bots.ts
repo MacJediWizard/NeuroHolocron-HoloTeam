@@ -231,7 +231,6 @@ export async function archiveSpawnedBot(
   const spawned = await deps.prisma.bot.findMany({
     where: {
       parentBotId: input.spawnedByBotId,
-      userId: input.userId,
       spaceId: input.spaceId,
     },
   });
@@ -368,7 +367,7 @@ export async function destroyBot(
     await deps.sandbox.destroy(toComputerRef(dedicated), context).catch(() => undefined);
   }
   // Keep the bot deletion transaction from committing if raw transcript cleanup fails.
-  await removePiBotSessions(deps.dataDir, bot.userId, bot.id);
+  await removePiBotSessions(deps.dataDir, bot.id);
   const deletion = await withTransactionRetry(() =>
     deps.prisma.$transaction(async (tx) => {
       const locked = await tx.$queryRaw<Array<{ id: string; webhookSecretId: string | null }>>`

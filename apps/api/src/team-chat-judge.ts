@@ -229,7 +229,7 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
     }
 
     const secret = await this.deps.prisma.secret.findFirst({
-      where: { id: credential.secretId, userId: bot.userId, spaceId: null },
+      where: { id: credential.secretId, userId: credential.userId, spaceId: null },
     });
     if (!secret) return null;
     const persist = async (plaintext: string) => {
@@ -258,7 +258,7 @@ export class ModelTeamChatEngagementJudge implements TeamChatEngagementJudge {
       failed?: ModelCredentialFailedState,
     ) =>
       retireModelCredential(this.deps.prisma, {
-        userId: bot.userId,
+        userId: credential.userId,
         credentialId: credential.id,
         secretId: credential.secretId,
         matchesFailedSecret: failed

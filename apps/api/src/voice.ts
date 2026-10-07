@@ -22,11 +22,13 @@ import {
   Prisma,
   type PrismaClient,
   selectSpaceVoicePreference,
+  spaceOwnerUserId,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import type { Context, Hono } from "hono";
 import { readBoundedBody } from "./http-body.js";
 import { withSerializableRetry } from "./serializable-retry.js";
+import { requireSpaceOwner } from "./space-owner.js";
 
 export interface VoiceDeps {
   prisma: PrismaClient;
@@ -104,7 +106,7 @@ export async function loadVoiceCredential(deps: VoiceDeps, actor: Actor, provide
     : await findDefaultVoiceCredential(deps.prisma, actor);
   if (!cred) return null;
   const secret = await deps.prisma.secret.findFirst({
-    where: { id: cred.secretId, userId: actor.userId, spaceId: null },
+    where: { id: cred.secretId, userId: cred.userId, spaceId: null },
   });
   if (!secret) return null;
   return { cred, apiKey: deps.secrets.load(secret.ciphertext, secret.id) };
@@ -118,7 +120,7 @@ export async function resolveVoiceTarget(
   let botVoiceId: string | null = null;
   if (input.botId) {
     const bot = await deps.prisma.bot.findFirst({
-      where: { id: input.botId, spaceId: actor.spaceId, userId: actor.userId },
+      where: { id: input.botId, spaceId: actor.spaceId },
       select: { voiceId: true },
     });
     if (!bot) throw new IsolationError();
@@ -145,6 +147,7 @@ export async function persistVoiceCredential(
   if (!isVoiceProviderId(input.provider)) {
     throw new ORPCError("BAD_REQUEST", { message: "Unknown voice provider." });
   }
+  await requireSpaceOwner(deps.prisma, actor);
   const requestedSpeechModel =
     input.provider === FISH_AUDIO_PROVIDER && input.speechModel !== undefined
       ? fishSpeechModelValue(input.speechModel)
@@ -234,6 +237,7 @@ export async function disconnectVoiceCredential(
   if (!provider) {
     throw new ORPCError("BAD_REQUEST", { message: "Unknown voice provider." });
   }
+  await requireSpaceOwner(deps.prisma, actor);
   await withSerializableRetry(() =>
     deps.prisma.$transaction(
       async (tx) => {
@@ -274,8 +278,10 @@ export async function updateVoiceSpeechModel(
   return withSerializableRetry(() =>
     deps.prisma.$transaction(
       async (tx) => {
+        // A Space setting any member may change, kept on the owner's voice credential.
+        const owner = await spaceOwnerUserId(tx, actor.spaceId);
         const found = await tx.userVoiceCredential.findFirst({
-          where: { userId: actor.userId, provider: input.provider },
+          where: { userId: owner, provider: input.provider },
           orderBy: newestVoiceCredentialOrder,
         });
         if (!found) {
@@ -284,7 +290,7 @@ export async function updateVoiceSpeechModel(
         const where = {
           spaceId_userId_credentialId: {
             spaceId: actor.spaceId,
-            userId: actor.userId,
+            userId: owner,
             credentialId: found.id,
           },
         };
@@ -298,7 +304,7 @@ export async function updateVoiceSpeechModel(
           const created = await tx.spaceVoicePreference.create({
             data: {
               spaceId: actor.spaceId,
-              userId: actor.userId,
+              userId: owner,
               credentialId: found.id,
               speechModel,
             },

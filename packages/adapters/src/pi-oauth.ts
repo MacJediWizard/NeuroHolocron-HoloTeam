@@ -16,7 +16,7 @@ import {
   type ThinkingLevel,
   ThinkingLevelSchema,
 } from "@rakazo/contracts";
-import type { PrismaClient } from "@rakazo/db";
+import { ownerScope, type PrismaClient } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
 import { createManualAnthropicOAuthLogin } from "./pi-anthropic-oauth.js";
 import type { EncryptedSecretStore } from "./secrets.js";
@@ -708,13 +708,15 @@ export function persistStoredModelSecret(
  * The catalog itself never writes credentials — this is the run path's writer.
  */
 export async function refreshExpiredModelCredential(
-  prisma: Pick<PrismaClient, "secret">,
+  prisma: Pick<PrismaClient, "secret" | "spaceMember">,
   secretStore: Pick<EncryptedSecretStore, "load" | "put">,
-  scope: { userId: string; spaceId: string },
+  actorScope: { userId: string; spaceId: string },
   secretId: string,
   provider: string,
   opts?: Pick<ResolveModelOpts, "oauth" | "signal" | "now">,
 ): Promise<void> {
+  // Model secrets are the Space owner's, whichever member's read noticed the expiry.
+  const scope = await ownerScope(prisma, actorScope);
   await withModelCredentialLock(secretId, async () => {
     const row = await prisma.secret.findFirst({
       where: { id: secretId, userId: scope.userId, spaceId: null },
@@ -744,7 +746,7 @@ const credentialRefreshKicks = new Map<string, Promise<void>>();
  * kick frees the slot so the next expired read can retry.
  */
 export function kickModelCredentialRefresh(
-  prisma: Pick<PrismaClient, "secret">,
+  prisma: Pick<PrismaClient, "secret" | "spaceMember">,
   secretStore: Pick<EncryptedSecretStore, "load" | "put">,
   scope: { userId: string; spaceId: string },
   secretId: string,

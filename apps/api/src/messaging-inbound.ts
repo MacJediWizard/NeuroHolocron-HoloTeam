@@ -145,6 +145,7 @@ async function handleDirectEvent(
     threadId: ids.threadId,
     botId: ids.botId,
     userId: ids.userId,
+    authorUserId: ids.userId,
     blocks: [{ kind: "text", text }],
     prompt: text,
     trigger: "messaging",

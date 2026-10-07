@@ -13,6 +13,7 @@ import {
   findDefaultModelCredential,
   findDefaultVoiceCredential,
   findModelCredential,
+  spaceOwnerUserId,
 } from "@rakazo/db";
 import type { RouterDeps } from "./router.js";
 import { resolveThreadTarget } from "./thread-target.js";
@@ -31,11 +32,13 @@ export async function aiConsentStatus(
       ? [target.botId]
       : target.memberBotIds
     : undefined;
+  // Models and voices run on the owner's credentials; consent stays per member.
+  const ownerId = await spaceOwnerUserId(deps.prisma, actor.spaceId);
   const [preferences, defaultCredential, bots, voices, memory, settings, consents] =
     await Promise.all([
       modelsEnabled
         ? deps.prisma.spaceModelPreference.findMany({
-            where: { userId: actor.userId, spaceId: actor.spaceId },
+            where: { userId: ownerId, spaceId: actor.spaceId },
             include: { credential: true },
           })
         : [],
@@ -43,7 +46,6 @@ export async function aiConsentStatus(
       modelsEnabled
         ? deps.prisma.bot.findMany({
             where: {
-              userId: actor.userId,
               spaceId: actor.spaceId,
               archivedAt: null,
               ...(botIds ? { id: { in: botIds } } : {}),
@@ -57,7 +59,7 @@ export async function aiConsentStatus(
               credential ? [{ credential }] : [],
             )
           : deps.prisma.spaceVoicePreference.findMany({
-              where: { userId: actor.userId, spaceId: actor.spaceId },
+              where: { userId: ownerId, spaceId: actor.spaceId },
               include: { credential: true },
             })
         : [],
@@ -135,7 +137,7 @@ export async function aiConsentStatus(
     const secrets = models.length
       ? await deps.prisma.secret.findMany({
           where: {
-            userId: actor.userId,
+            userId: ownerId,
             spaceId: null,
             id: {
               in: models.flatMap((model) => (model.credential ? [model.credential.secretId] : [])),

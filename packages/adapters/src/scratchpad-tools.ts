@@ -125,7 +125,6 @@ export async function updateScratchpadItemFromTool(
       id: itemId,
       spaceId: input.spaceId,
       botId: input.botId,
-      userId: input.userId,
     },
   });
   if (!existing) return { error: "Scratchpad item not found." };
@@ -193,7 +192,6 @@ export async function removeScratchpadItemFromTool(
       id: itemId,
       spaceId: input.spaceId,
       botId: input.botId,
-      userId: input.userId,
     },
   });
   if (!existing) return { error: "Scratchpad item not found." };

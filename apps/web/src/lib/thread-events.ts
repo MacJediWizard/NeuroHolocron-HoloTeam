@@ -497,6 +497,7 @@ export function reduceThreadSnapshot(
           : undefined,
       replyQuote:
         typeof event.payload.replyQuote === "string" ? event.payload.replyQuote : undefined,
+      author: messageAuthor(event.payload.author) ?? known?.author,
       createdAt: event.createdAt,
     };
     const replacedSubagentIds = new Set(
@@ -508,6 +509,12 @@ export function reduceThreadSnapshot(
     return { ...prev, cursor: event.seq, messages: upsertMessageById(without, next) };
   }
   return prev;
+}
+
+function messageAuthor(value: unknown): ThreadMessage["author"] {
+  if (!value || typeof value !== "object") return undefined;
+  const { id, name } = value as { id?: unknown; name?: unknown };
+  return typeof id === "string" && typeof name === "string" ? { id, name } : undefined;
 }
 
 function updateMemberStatus(

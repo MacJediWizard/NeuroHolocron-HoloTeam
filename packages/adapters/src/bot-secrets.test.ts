@@ -92,7 +92,15 @@ describe("authenticated secret requests", () => {
     },
   );
 
-  it.each(["userId", "spaceId", "botId"] as const)(
+  it("lets another member of the Space use the bot's credential", async () => {
+    const { input, fetch } = await fixture();
+    expect(
+      await requestWithBotSecret({ ...input, scope: { ...scope, userId: "member-2" } }),
+    ).toMatchObject({ status: 200 });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it.each(["spaceId", "botId"] as const)(
     "denies a different %s before decrypting or sending",
     async (key) => {
       const { input, fetch } = await fixture();

@@ -200,13 +200,19 @@ async function remindStuckRun(
   // A skipped push (notices off, no provider, or no push token yet) stays unmarked
   // so a later sweep can still remind during this same wait.
   if (!deps.notifications || !noticesEnabled(run)) return;
-  if (!(await pushCanDeliver(deps.notifications, run.userId))) return;
+  const notifications = deps.notifications;
+  const members = await spaceMemberUserIds(deps.prisma, run.spaceId);
+  const deliverable = await Promise.all(
+    members.map((userId) => pushCanDeliver(notifications, userId)),
+  );
+  const recipients = members.filter((_, index) => deliverable[index]);
+  if (recipients.length === 0) return;
   const claimId = await withTransactionRetry(() =>
     deps.prisma.$transaction((tx) => claimStuckReminder(tx, run, deps.now)),
   );
   if (!claimId) return;
   const reminder = stuckWorkReminder(run.status, run.bot.name);
-  const delivery = await sendStuckNotice(deps.notifications, run, {
+  const delivery = await sendStuckNotice(deps.notifications, run, recipients, {
     kind: reminder.kind,
     title: reminder.title,
     body: reminder.body,
@@ -220,6 +226,16 @@ async function remindStuckRun(
     return;
   }
   await withTransactionRetry(() => deps.prisma.$transaction((tx) => clearStuckNotice(tx, claimId)));
+}
+
+/** Every member of a shared Space works on its bots, so each one is told. */
+async function spaceMemberUserIds(prisma: PrismaClient, spaceId: string): Promise<string[]> {
+  const members = await prisma.spaceMember.findMany({
+    where: { spaceId },
+    select: { userId: true },
+    orderBy: { createdAt: "asc" },
+  });
+  return members.map((member) => member.userId);
 }
 
 async function pushCanDeliver(
@@ -334,7 +350,8 @@ async function expireOne(
   }
   if (!deps.notifications || !noticesEnabled(run)) return;
   const stopped = stuckWorkStoppedNotification(run.status, run.bot.name);
-  await sendStuckNotice(deps.notifications, run, {
+  const recipients = await spaceMemberUserIds(deps.prisma, run.spaceId);
+  await sendStuckNotice(deps.notifications, run, recipients, {
     kind: stopped.kind,
     title: stopped.title,
     body: stopped.body,
@@ -345,28 +362,36 @@ async function expireOne(
 
 type StuckNoticeDelivery = "delivered" | "undeliverable" | "failed";
 
+/** Delivered when any recipient accepted it; failed when a send broke and none did. */
 async function sendStuckNotice(
   notifications: NotificationProvider,
   run: StuckCandidate,
+  recipients: string[],
   message: NotificationMessage,
 ): Promise<StuckNoticeDelivery> {
-  const context = {
-    operationId: "notify",
-    traceId: run.botId,
-    spaceId: run.spaceId,
-    userId: run.userId,
-    botId: run.botId,
-    signal: new AbortController().signal,
-  };
   const notice = run.thread.groupId ? { ...message, groupId: run.thread.groupId } : message;
-  try {
-    if (notifications instanceof ExpoPushProvider) {
-      return await notifications.deliver(notice, context);
-    }
-    await notifications.send(notice, context);
-    return "delivered";
-  } catch (error) {
-    getLogger().error("stuck work notification", error);
-    return "failed";
-  }
+  const outcomes = await Promise.all(
+    recipients.map(async (userId): Promise<StuckNoticeDelivery> => {
+      const context = {
+        operationId: "notify",
+        traceId: run.botId,
+        spaceId: run.spaceId,
+        userId,
+        botId: run.botId,
+        signal: new AbortController().signal,
+      };
+      try {
+        if (notifications instanceof ExpoPushProvider) {
+          return await notifications.deliver(notice, context);
+        }
+        await notifications.send(notice, context);
+        return "delivered";
+      } catch (error) {
+        getLogger().error("stuck work notification", error);
+        return "failed";
+      }
+    }),
+  );
+  if (outcomes.includes("delivered")) return "delivered";
+  return outcomes.includes("failed") ? "failed" : "undeliverable";
 }

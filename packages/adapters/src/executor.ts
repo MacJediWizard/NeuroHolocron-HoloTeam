@@ -110,6 +110,7 @@ import {
   parseComputerMode,
   retireModelCredential,
   SpaceLimitError,
+  spaceOwnerUserId,
   type ThreadEvents,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -2784,7 +2785,7 @@ async function loadLivePluginSlugs(
 
 export async function persistLivePluginConnections(
   prisma: PrismaClient,
-  owner: { userId: string; spaceId: string },
+  owner: { spaceId: string },
   rows: PluginConnectionRow[],
   liveSlugs: string[],
 ): Promise<void> {
@@ -2793,7 +2794,6 @@ export async function persistLivePluginConnections(
     await prisma.connection.updateMany({
       where: {
         id: { in: sync.connectIds },
-        userId: owner.userId,
         spaceId: owner.spaceId,
       },
       data: { status: "connected" },
@@ -2806,7 +2806,6 @@ export async function persistLivePluginConnections(
     await prisma.connection.updateMany({
       where: {
         id: { in: sync.revokeIds },
-        userId: owner.userId,
         spaceId: owner.spaceId,
       },
       data: { status: "revoked" },
@@ -2932,7 +2931,6 @@ export function createRunExecutor(deps: ExecutorDeps) {
     }
     const resolved = await resolveModelKey(
       deps,
-      scope.userId,
       scope.spaceId,
       credential,
       provider,
@@ -2976,7 +2974,6 @@ export function createRunExecutor(deps: ExecutorDeps) {
         ? await deps.prisma.bot.findFirst({
             where: {
               id: scope.botId,
-              userId: scope.userId,
               spaceId: scope.spaceId,
             },
             select: { modelProvider: true, modelId: true, thinkingLevel: true },
@@ -3006,14 +3003,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
       }
       if (!provider || !id) throw new Error(MISSING_MODEL_MESSAGE);
       // The key is resolved for the provider that won above, not before it is known.
-      const resolved = await resolveModelKey(
-        deps,
-        scope.userId,
-        scope.spaceId,
-        credential,
-        provider,
-        id,
-      );
+      const resolved = await resolveModelKey(deps, scope.spaceId, credential, provider, id);
       return {
         provider,
         id,
@@ -3303,6 +3293,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
           savedSkills,
           agentSkills,
           agentSecretRows,
+          ownerUserId,
         ] = await Promise.all([
           deps.prisma.bot.findUniqueOrThrow({
             where: { id: run.botId },
@@ -3315,7 +3306,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
             : Promise.resolve(undefined),
           deps.prisma.task.findUniqueOrThrow({ where: { id: run.taskId } }),
           deps.prisma.connection.findMany({
-            where: { userId: run.userId, spaceId: run.spaceId },
+            where: { spaceId: run.spaceId },
             select: {
               id: true,
               connectorId: true,
@@ -3342,6 +3333,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
               secret: { select: { id: true, ciphertext: true } },
             },
           }),
+          spaceOwnerUserId(deps.prisma, run.spaceId),
         ]);
         const agentEnvironment = decryptAgentEnvironment(agentSecretRows, deps.secretStore);
         runSecrets.push(...Object.values(agentEnvironment));
@@ -3362,7 +3354,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
         );
         let liveSlugs: string[] = [];
         if (needsLivePluginSync(composioRows)) {
-          const listing = await loadLivePluginSlugs(deps.listConnectedPluginSlugs, run.userId);
+          const listing = await loadLivePluginSlugs(deps.listConnectedPluginSlugs, ownerUserId);
           if (listing.ok) {
             liveSlugs = listing.slugs;
             await persistLivePluginConnections(deps.prisma, run, composioRows, listing.slugs).catch(
@@ -3393,6 +3385,9 @@ export function createRunExecutor(deps: ExecutorDeps) {
           })),
           connectedProviders: connectedComposio.map((row) => row.provider),
         };
+        // Connected apps (Composio, Pipedream) live under the Space owner's external
+        // identity, so every member's run reaches the same accounts.
+        const connectorContext = { ...context, userId: ownerUserId };
         const memoryScope = configuredMemory
           ? effectiveMemoryScope(bot.memoryScope, configuredMemory.defaultScope)
           : null;
@@ -3408,7 +3403,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
         });
 
         const discoveredPromise = deps.connector
-          ? deps.connector.discoverTools(context)
+          ? deps.connector.discoverTools(connectorContext)
           : Promise.resolve([]);
         const threadContext = threadContextForRun(
           run.trigger,
@@ -3575,7 +3570,6 @@ export function createRunExecutor(deps: ExecutorDeps) {
         try {
           resolved = await resolveModelKey(
             deps,
-            run.userId,
             run.spaceId,
             credential,
             runModelProvider,
@@ -3700,7 +3694,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
         const loadApprovalRules = () => {
           approvalRulesPromise ??= deps.prisma.actionApprovalRule
             .findMany({
-              where: { spaceId: run.spaceId, createdByUserId: run.userId },
+              where: { spaceId: run.spaceId },
               select: { effect: true, matchKind: true, matchValue: true },
             })
             .then((rules) => rules as ActionApprovalRule[]);
@@ -3943,7 +3937,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
           let effectRequest: unknown = args;
           if (connectorCall.route && deps.connector?.resolveCall) {
             try {
-              const resolved = await deps.connector.resolveCall(connectorCall, context);
+              const resolved = await deps.connector.resolveCall(connectorCall, connectorContext);
               if (resolved) {
                 if (BUILTIN_AGENT_TOOL_NAMES.has(resolved.tool.name)) {
                   return { error: "Connector tool name conflicts with a built-in tool" };
@@ -4218,7 +4212,6 @@ export function createRunExecutor(deps: ExecutorDeps) {
                   );
                   const judgeKey = await resolveModelKey(
                     deps,
-                    run.userId,
                     run.spaceId,
                     reviewCredential,
                     checker!.provider,
@@ -5563,7 +5556,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                       deps.prisma,
                       deps.connectors,
                       run,
-                      context,
+                      connectorContext,
                       connectionId,
                       plaintext,
                     );
@@ -5606,7 +5599,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 deps.prisma,
                 deps.connectors,
                 run,
-                context,
+                connectorContext,
                 connectionId,
               );
               if (connectionStatus === "connected") {
@@ -5780,7 +5773,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
               loadArtifact: async (id) => {
                 if (!deps.artifacts) return null;
                 const row = await deps.prisma.artifact.findFirst({
-                  where: { id, spaceId: run.spaceId, userId: run.userId },
+                  where: { id, spaceId: run.spaceId },
                   select: { mimeType: true, storageKey: true },
                 });
                 if (!row || !isAttachmentImageMimeType(row.mimeType)) return null;
@@ -5977,7 +5970,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
             let result: unknown = { error: `unknown tool ${name}` };
             for await (const event of deps.connector.execute(
               { ...connectorCall, tool: name, args, executionId: effectKey },
-              context,
+              connectorContext,
             )) {
               if (event.type === "result") {
                 result = event.data;
@@ -6102,7 +6095,6 @@ export function createRunExecutor(deps: ExecutorDeps) {
                 await deps.prisma.bot.findMany({
                   where: {
                     spaceId: run.spaceId,
-                    userId: run.userId,
                     archivedAt: null,
                     id: { not: bot.id },
                     thread: { isNot: null },
@@ -6982,7 +6974,6 @@ async function runNotice(
       botId: run.botId,
       threadId: run.threadId,
       spaceId: run.spaceId,
-      userId: run.userId,
     },
     select: {
       bot: { select: { notifyOnFinish: true } },
@@ -7007,18 +6998,31 @@ async function notifyRun(
     return null;
   });
   if (!notice?.enabled) return;
-  await deps.notifications
-    .send(notice.groupId ? { ...message, groupId: notice.groupId } : message, {
-      operationId: "notify",
-      traceId: run.botId,
-      spaceId: run.spaceId,
-      userId: run.userId,
-      botId: run.botId,
-      signal: new AbortController().signal,
-    })
+  const notifications = deps.notifications;
+  // Every member of a shared Space works on its bots, so each one is told.
+  const members = await deps.prisma.spaceMember
+    .findMany({ where: { spaceId: run.spaceId }, select: { userId: true } })
     .catch((error) => {
-      getLogger().error("run notification", error);
+      getLogger().error("notification recipients lookup", error);
+      return [];
     });
+  const sent = notice.groupId ? { ...message, groupId: notice.groupId } : message;
+  await Promise.all(
+    members.map((member) =>
+      notifications
+        .send(sent, {
+          operationId: "notify",
+          traceId: run.botId,
+          spaceId: run.spaceId,
+          userId: member.userId,
+          botId: run.botId,
+          signal: new AbortController().signal,
+        })
+        .catch((error) => {
+          getLogger().error("run notification", error);
+        }),
+    ),
+  );
 }
 
 async function renewRunLease(
@@ -7637,7 +7641,6 @@ const CODEX_LIVE_RUN_WAIT_MS = 8_000;
 
 async function resolveModelKey(
   deps: ExecutorDeps,
-  userId: string,
   spaceId: string,
   credential: {
     id: string;
@@ -7670,6 +7673,9 @@ async function resolveModelKey(
   redact: string[];
 }> {
   if (credential) {
+    // Model secrets, their refresh writes and the Codex catalog key belong to the
+    // Space owner; members run on the owner's credentials.
+    const userId = await spaceOwnerUserId(deps.prisma, spaceId);
     return withModelCredentialLock(credential.secretId, async () => {
       const row = await deps.prisma.secret.findFirst({
         where: { id: credential.secretId, userId, spaceId: null },
@@ -7862,7 +7868,6 @@ export async function loadCurrentTurnImages(
     where: {
       id: { in: imageBlocks.map((block) => block.artifactId) },
       spaceId: context.spaceId,
-      userId: context.userId,
     },
   });
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -7943,7 +7948,6 @@ async function loadTurnImagesWithinBudget(
     where: {
       id: { in: imageBlocks.map((block) => block.artifactId) },
       spaceId: context.spaceId,
-      userId: context.userId,
     },
     select: { id: true, storageKey: true, size: true },
   });

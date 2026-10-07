@@ -86,7 +86,6 @@ export async function reconcileManagedConnection(
     where: {
       id: connectionId,
       spaceId: run.spaceId,
-      userId: run.userId,
     },
   });
   if (!row) return "missing";
@@ -160,7 +159,6 @@ export async function tryCompleteConnectionWithCode(
     where: {
       id: connectionId,
       spaceId: run.spaceId,
-      userId: run.userId,
       status: { in: ["pending", "connected"] },
     },
   });

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "./client.js";
-import { parseGroupSpaces, syncGroupSpaces } from "./group-spaces.js";
+import { handOverSharedRows, parseGroupSpaces, syncGroupSpaces } from "./group-spaces.js";
 
 function makePrisma(options: {
   spaces: Array<{ id: string; organizationId: string }>;
@@ -145,5 +145,96 @@ describe("syncGroupSpaces", () => {
       syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", ["orca"], mapping),
     ).resolves.toEqual({ missingSpaceIds: ["space-1"] });
     expect(prisma.member.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("handOverSharedRows", () => {
+  const models = [
+    "bot",
+    "botSection",
+    "chatGroup",
+    "thread",
+    "routine",
+    "artifact",
+    "mcpServer",
+    "botSecret",
+    "secret",
+    "connection",
+    "agentSkill",
+    "taughtSkill",
+    "scratchpadItem",
+    "capabilityInstall",
+    "memoryDocument",
+    "actionApprovalRule",
+    "agentSecret",
+    "computer",
+    "browserProfile",
+    "cloudAgent",
+  ] as const;
+
+  function handOverPrisma(memberships: Array<{ spaceId: string; userId: string; role: string }>) {
+    const tx = Object.fromEntries(
+      models.map((model) => [model, { updateMany: vi.fn(async () => ({ count: 1 })) }]),
+    ) as Record<(typeof models)[number], { updateMany: ReturnType<typeof vi.fn> }>;
+    const prisma = {
+      spaceMember: {
+        findMany: vi.fn(async (input: { where: { userId?: string; spaceId?: string } }) =>
+          memberships.filter(
+            (row) =>
+              (!input.where.userId || row.userId === input.where.userId) &&
+              (!input.where.spaceId ||
+                (row.spaceId === input.where.spaceId && row.role.includes("owner"))),
+          ),
+        ),
+        findUnique: vi.fn(
+          async (input: { where: { spaceId_userId: { spaceId: string; userId: string } } }) =>
+            memberships.find(
+              (row) =>
+                row.spaceId === input.where.spaceId_userId.spaceId &&
+                row.userId === input.where.spaceId_userId.userId,
+            ) ?? null,
+        ),
+      },
+      $transaction: vi.fn(async (run: (client: unknown) => Promise<unknown>) => run(tx)),
+    };
+    return { prisma: prisma as unknown as PrismaClient, tx };
+  }
+
+  it("gives the owner the leaving member's shared rows in Spaces they do not own", async () => {
+    const { prisma, tx } = handOverPrisma([
+      { spaceId: "shared", userId: "member", role: "member" },
+      { spaceId: "shared", userId: "owner", role: "owner" },
+    ]);
+
+    await handOverSharedRows(prisma, "member");
+
+    const where = { spaceId: "shared", userId: "member" };
+    const data = { userId: "owner" };
+    for (const model of ["bot", "thread", "secret", "computer", "cloudAgent"] as const) {
+      expect(tx[model].updateMany).toHaveBeenCalledWith({ where, data });
+    }
+    expect(tx.memoryDocument.updateMany).toHaveBeenCalledWith({
+      where: { ...where, scope: { not: "user" } },
+      data,
+    });
+    expect(tx.actionApprovalRule.updateMany).toHaveBeenCalledWith({
+      where: { spaceId: "shared", createdByUserId: "member" },
+      data: { createdByUserId: "owner" },
+    });
+    expect(tx.agentSecret.updateMany).toHaveBeenCalledWith({
+      where: { spaceId: "shared", createdByUserId: "member" },
+      data: { createdByUserId: "owner" },
+    });
+  });
+
+  it("leaves Spaces the user owns alone, so their rows are deleted with the account", async () => {
+    const { prisma, tx } = handOverPrisma([
+      { spaceId: "own", userId: "owner", role: "owner" },
+      { spaceId: "own", userId: "member", role: "member" },
+    ]);
+
+    await handOverSharedRows(prisma, "owner");
+
+    for (const model of models) expect(tx[model].updateMany).not.toHaveBeenCalled();
   });
 });

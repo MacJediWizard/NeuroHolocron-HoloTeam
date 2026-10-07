@@ -660,8 +660,9 @@ describe("private installed connectors", () => {
     ).resolves.toMatchObject({ source: LOCAL_API, operationCount: 1 });
   });
 
-  it("checks the install owner's current standing on every call", async () => {
+  it("checks the installer's current standing on every call, whoever runs it", async () => {
     const install = {
+      userId: "owner-1",
       id: "api-local",
       kind: "api",
       name: "Local API",
@@ -676,7 +677,8 @@ describe("private installed connectors", () => {
       deploymentSettings: { findUnique: vi.fn(async () => deployment) },
     };
     const fetch = vi.fn(async () => Response.json({ items: [] }));
-    const execute = async (userId: string, instanceFlag = false) => {
+    const execute = async (installerId: string, instanceFlag = false) => {
+      install.userId = installerId;
       const provider = new InstalledConnectorProvider(
         prisma as never,
         {} as never,
@@ -691,7 +693,7 @@ describe("private installed connectors", () => {
           executionId: "call-1",
           route: { connectorId: "installed", resourceId: install.id, toolName: "list_items" },
         },
-        { spaceId: "space-1", userId, signal: new AbortController().signal } as never,
+        { spaceId: "space-1", userId: "member-2", signal: new AbortController().signal } as never,
       )) {
         events.push(event);
       }

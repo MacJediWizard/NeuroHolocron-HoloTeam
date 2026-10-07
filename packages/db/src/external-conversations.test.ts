@@ -49,7 +49,6 @@ describe("createExternalConversationRepos", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           spaceId: { in: ["space-1"] },
-          userId: "user-1",
         }),
       }),
     );
@@ -74,7 +73,7 @@ describe("createExternalConversationRepos", () => {
     };
     await expect(repos.updatePolicy(actor, "ext-1", policy)).resolves.toEqual(policy);
     expect(updateMany).toHaveBeenCalledWith({
-      where: { id: "ext-1", spaceId: "space-1", userId: "user-1" },
+      where: { id: "ext-1", spaceId: "space-1" },
       data: policy,
     });
   });

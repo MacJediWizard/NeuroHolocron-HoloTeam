@@ -8,10 +8,15 @@ import {
   restoreBotUnderComputerQuota,
 } from "./computers.js";
 
+const owners = {
+  findMany: vi.fn(async () => [{ userId: "owner-1", role: "owner" }]),
+};
+
 function fakePrisma(count = 0, existing = false) {
   return {
     // Looks like a TransactionClient: $queryRaw present, no $transaction.
     $queryRaw: vi.fn(async () => [{ lock: "1" }]),
+    spaceMember: owners,
     computer: {
       findUnique: vi.fn(async () => (existing ? { id: "existing" } : null)),
       count: vi.fn(async () => count),
@@ -25,7 +30,8 @@ function fakeRestorePrisma(results: { alreadyLive: number; inUse: number }) {
     args.where.id ? results.alreadyLive : results.inUse,
   );
   return {
-    computer: { count },
+    spaceMember: owners,
+    computer: { count, findUniqueOrThrow: vi.fn(async () => ({ spaceId: "space-1" })) },
   } as unknown as PrismaClient;
 }
 
@@ -95,6 +101,7 @@ function fakeSerializingPrisma(initialInUse = 0) {
           }
           return [{ lock: "1" }];
         }),
+        spaceMember: owners,
         computer: {
           findUnique: vi.fn(async (args: { where: { scopeKey: string } }) => {
             const row = rows.get(args.where.scopeKey);
@@ -206,7 +213,9 @@ function fakeSerializingRestorePrisma(
           }
           return [{ lock: "1" }];
         }),
+        spaceMember: owners,
         computer: {
+          findUniqueOrThrow: vi.fn(async () => ({ spaceId: "space-1" })),
           count: vi.fn(async (args: { where: { id?: string } }) => {
             if (args.where.id) return (live.get(args.where.id)?.size ?? 0) > 0 ? 1 : 0;
             return inUse();
@@ -274,6 +283,22 @@ describe("ensureComputerRecord", () => {
     );
     expect(prisma.computer.upsert).not.toHaveBeenCalled();
     expect(prisma.$queryRaw).toHaveBeenCalledOnce();
+  });
+
+  it("charges the Space owner, not the member creating the computer", async () => {
+    process.env.SANDBOX_MAX_COMPUTERS_PER_USER = "2";
+    const prisma = fakePrisma(0, false);
+    await ensureComputerRecord(prisma, { ...baseInput, userId: "member-2" });
+    const lock = vi.mocked(prisma.$queryRaw).mock.calls[0]?.[0] as unknown as { values: unknown[] };
+    expect(lock.values).toEqual(["owner-1"]);
+    expect(prisma.computer.count).toHaveBeenCalledWith({
+      where: expect.objectContaining({
+        space: { memberships: { some: { userId: "owner-1", role: { contains: "owner" } } } },
+      }),
+    });
+    expect(prisma.computer.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ create: expect.objectContaining({ userId: "member-2" }) }),
+    );
   });
 
   it("does not count archived-bot computers against the cap", async () => {

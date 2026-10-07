@@ -41,17 +41,28 @@ export function resolvePiSessionRoot(
   return isPiSessionRecordingEnabled(source) ? piSessionsRoot(dataDir) : undefined;
 }
 
+/** Any member of a shared Space can run the bot, so its transcripts sit under several user roots. */
 export async function removePiBotSessions(
   dataDir: string | undefined,
-  userId: string | undefined,
   botId: string,
 ): Promise<void> {
   if (!dataDir) return;
-  if (!userId) throw new Error("userId is required to remove Pi bot sessions");
-  await rm(piSessionBotRoot(piSessionsRoot(dataDir), userId, botId), {
-    recursive: true,
-    force: true,
-  });
+  const sessionsRoot = piSessionsRoot(dataDir);
+  const botSegment = sessionScopeSegment(botId, "botId");
+  let userRoots: Dirent[];
+  try {
+    userRoots = await readdir(sessionsRoot, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await Promise.all(
+    userRoots
+      .filter((entry) => entry.isDirectory())
+      .map((entry) =>
+        rm(path.join(sessionsRoot, entry.name, botSegment), { recursive: true, force: true }),
+      ),
+  );
 }
 
 export async function removePiUserSessions(

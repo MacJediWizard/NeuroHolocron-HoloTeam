@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "./client.js";
+import { isSpaceOwner, spaceOwnerUserId } from "./scope.js";
 
 /** An identity provider group whose members share one Space. */
 export interface GroupSpace {
@@ -140,6 +141,57 @@ async function leaveSpace(
       });
     }
   });
+}
+
+/**
+ * Before an account is deleted, gives the Space owner every shared row the user
+ * created in Spaces they do not own, so deleting the account leaves those Spaces
+ * intact. Personal rows (credentials, preferences, user-scope memory) stay with
+ * the user and are deleted with the account.
+ */
+export async function handOverSharedRows(
+  prisma: Pick<PrismaClient, "$transaction" | "spaceMember">,
+  userId: string,
+): Promise<void> {
+  const memberships = await prisma.spaceMember.findMany({
+    where: { userId },
+    select: { spaceId: true },
+  });
+  for (const { spaceId } of memberships) {
+    if (await isSpaceOwner(prisma, { spaceId, userId })) continue;
+    const owner = await spaceOwnerUserId(prisma, spaceId);
+    const where = { spaceId, userId };
+    const data = { userId: owner };
+    await prisma.$transaction(async (tx) => {
+      await tx.bot.updateMany({ where, data });
+      await tx.botSection.updateMany({ where, data });
+      await tx.chatGroup.updateMany({ where, data });
+      await tx.thread.updateMany({ where, data });
+      await tx.routine.updateMany({ where, data });
+      await tx.artifact.updateMany({ where, data });
+      await tx.mcpServer.updateMany({ where, data });
+      await tx.botSecret.updateMany({ where, data });
+      // Model and voice credential secrets have no spaceId, so they stay personal.
+      await tx.secret.updateMany({ where, data });
+      await tx.connection.updateMany({ where, data });
+      await tx.agentSkill.updateMany({ where, data });
+      await tx.taughtSkill.updateMany({ where, data });
+      await tx.scratchpadItem.updateMany({ where, data });
+      await tx.capabilityInstall.updateMany({ where, data });
+      await tx.memoryDocument.updateMany({ where: { ...where, scope: { not: "user" } }, data });
+      await tx.actionApprovalRule.updateMany({
+        where: { spaceId, createdByUserId: userId },
+        data: { createdByUserId: owner },
+      });
+      await tx.agentSecret.updateMany({
+        where: { spaceId, createdByUserId: userId },
+        data: { createdByUserId: owner },
+      });
+      await tx.computer.updateMany({ where, data });
+      await tx.browserProfile.updateMany({ where, data });
+      await tx.cloudAgent.updateMany({ where, data });
+    });
+  }
 }
 
 /**

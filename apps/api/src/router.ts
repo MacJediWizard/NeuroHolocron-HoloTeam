@@ -169,6 +169,7 @@ import {
   lockOwnedGroup,
   newestModelCredentialOrder,
   newestVoiceCredentialOrder,
+  ownerScope,
   Prisma,
   parseComputerMode,
   pushSessionExpiresAt,
@@ -182,6 +183,7 @@ import {
   SpaceNotFoundError,
   selectSpaceModelPreference,
   selectSpaceVoicePreference,
+  spaceOwnerUserId,
   touchGroupUpdatedAt,
 } from "@rakazo/db";
 import { getLogger } from "@rakazo/logging";
@@ -237,6 +239,7 @@ import {
   readServerUpdateStatus,
   UpdaterProxyError,
 } from "./server-update.js";
+import { requireSpaceOwner } from "./space-owner.js";
 import { assertTeachingSendAllowed, createTaughtSkillsService } from "./taught-skills.js";
 import {
   isPeerRun,
@@ -278,7 +281,7 @@ const EXPORT_MESSAGE_PAGE_SIZE = 500;
 
 async function reconcilePendingConnections(
   prisma: PrismaClient,
-  owner: Pick<Actor, "spaceId" | "userId">,
+  owner: Pick<Actor, "spaceId">,
   connectorId: string,
   connectedProviders: string[],
 ): Promise<void> {
@@ -289,7 +292,6 @@ async function reconcilePendingConnections(
     await prisma.connection.findMany({
       where: {
         spaceId: owner.spaceId,
-        userId: owner.userId,
         connectorId,
         status: { in: ["pending", "connected"] },
       },
@@ -307,7 +309,6 @@ async function reconcilePendingConnections(
             where: {
               id: { in: sync.connectIds },
               spaceId: owner.spaceId,
-              userId: owner.userId,
               status: "pending",
             },
             data: { status: "connected" },
@@ -320,7 +321,6 @@ async function reconcilePendingConnections(
             where: {
               id: { in: sync.revokeIds },
               spaceId: owner.spaceId,
-              userId: owner.userId,
               status: "pending",
             },
             data: { status: "revoked" },
@@ -331,7 +331,7 @@ async function reconcilePendingConnections(
   if (updates.length > 0) await prisma.$transaction(updates);
 }
 
-/** Serialize begin/revoke for one user+provider so slug-wide remote deletes cannot race a new connect. */
+/** Serialize begin/revoke for one Space+provider so slug-wide remote deletes cannot race a new connect. */
 
 function isAmbiguousRemoteRevokeFailure(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
@@ -381,13 +381,18 @@ function concreteKeepAccountIds(
 
 async function lockProviderConnectionScope(
   tx: Prisma.TransactionClient,
-  owner: Pick<Actor, "spaceId" | "userId">,
+  owner: Pick<Actor, "spaceId">,
   connectorId: string,
   provider: string,
 ): Promise<void> {
   // Avoid NUL separators in the lock key; text params may truncate at a zero byte and break begin.
-  const scope = `space:${owner.spaceId}|user:${owner.userId}|connector:${connectorId}|provider:${provider}`;
+  const scope = `space:${owner.spaceId}|connector:${connectorId}|provider:${provider}`;
   await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext('connection-provider'), hashtext(${scope}))`;
+}
+
+/** Bot and Space memory is shared by every member; "user" memory stays with its member. */
+function visibleMemoryDocuments(actor: Pick<Actor, "userId">): Prisma.MemoryDocumentWhereInput {
+  return { OR: [{ scope: { not: "user" } }, { scope: "user", userId: actor.userId }] };
 }
 
 function computerContext(actor: Actor, botId: string, operationId: string): AdapterContext {
@@ -1018,23 +1023,20 @@ export function createRouter(deps: RouterDeps) {
     },
     models: {
       list: authed.models.list.handler(async ({ context }) => {
-        const auth = await modelCredentialAuthKindsForSpace(
-          deps.prisma,
-          deps.secrets,
-          context.actor,
-        );
+        const owner = await ownerScope(deps.prisma, context.actor);
+        const auth = await modelCredentialAuthKindsForSpace(deps.prisma, deps.secrets, owner);
         const available = listAvailablePiCatalog(auth.byProvider, auth.byModel);
         const live = await codexLiveCatalogsForSpace(
           deps.prisma,
           deps.secrets,
-          context.actor,
+          owner,
           auth,
           codexCatalog,
           {
             // An expired bearer yields no catalog this round; kick the runtime's
             // locked refresh so the next read can see the account's real list.
             onExpiredToken: (secretId) =>
-              refreshExpiredCredential(context.actor, secretId, CHATGPT_OAUTH_PROVIDER),
+              refreshExpiredCredential(owner, secretId, CHATGPT_OAUTH_PROVIDER),
           },
         );
         const catalog = live.size > 0 ? applyCodexLiveCatalog(available, auth, live) : available;
@@ -1043,11 +1045,12 @@ export function createRouter(deps: RouterDeps) {
         return deps.env.agentRuntime === "scripted" ? [...catalog, scriptedCatalogEntry] : catalog;
       }),
       credentials: authed.models.credentials.handler(async ({ context }) => {
+        const ownerUserId = await spaceOwnerUserId(deps.prisma, context.actor.spaceId);
         const rows = await deps.prisma.userModelCredential.findMany({
-          where: { userId: context.actor.userId },
+          where: { userId: ownerUserId },
           include: {
             preferences: {
-              where: { userId: context.actor.userId, spaceId: context.actor.spaceId },
+              where: { userId: ownerUserId, spaceId: context.actor.spaceId },
             },
           },
           orderBy: newestModelCredentialOrder,
@@ -1056,7 +1059,7 @@ export function createRouter(deps: RouterDeps) {
           ? await deps.prisma.secret.findMany({
               where: {
                 id: { in: rows.map((row) => row.secretId) },
-                userId: context.actor.userId,
+                userId: ownerUserId,
                 spaceId: null,
               },
               select: { id: true, ciphertext: true },
@@ -1081,6 +1084,7 @@ export function createRouter(deps: RouterDeps) {
         });
       }),
       connect: authed.models.connect.handler(async ({ context, input }) => {
+        await requireSpaceOwner(deps.prisma, context.actor);
         let plaintext: string;
         try {
           let previousPlaintext: string | undefined;
@@ -1146,6 +1150,7 @@ export function createRouter(deps: RouterDeps) {
         },
       ),
       beginOAuth: authed.models.beginOAuth.handler(async ({ context, input }) => {
+        await requireSpaceOwner(deps.prisma, context.actor);
         return deps.oauthLogins.begin({
           userId: context.actor.userId,
           spaceId: context.actor.spaceId,
@@ -1160,6 +1165,7 @@ export function createRouter(deps: RouterDeps) {
         return deps.oauthLogins.submit(input.loginId, context.actor, input.code);
       }),
       completeOAuth: authed.models.completeOAuth.handler(async ({ context, input }) => {
+        await requireSpaceOwner(deps.prisma, context.actor);
         const result = await deps.oauthLogins.complete(input.loginId, {
           userId: context.actor.userId,
           spaceId: context.actor.spaceId,
@@ -1202,20 +1208,22 @@ export function createRouter(deps: RouterDeps) {
         return { ok: true as const };
       }),
       setDefault: authed.models.setDefault.handler(async ({ context, input }) => {
+        // The model choice is a Space setting on the owner's credentials; any member may change it.
+        const owner = await ownerScope(deps.prisma, context.actor);
         const loadSpaceModelState = async (
           client: Pick<PrismaClient, "spaceModelPreference" | "userModelCredential">,
         ) => {
           const [preferences, credentials] = await Promise.all([
             client.spaceModelPreference.findMany({
               where: {
-                spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
+                spaceId: owner.spaceId,
+                userId: owner.userId,
                 credential: { provider: input.provider },
               },
               include: { credential: true },
             }),
             client.userModelCredential.findMany({
-              where: { userId: context.actor.userId, provider: input.provider },
+              where: { userId: owner.userId, provider: input.provider },
             }),
           ]);
           return {
@@ -1239,14 +1247,14 @@ export function createRouter(deps: RouterDeps) {
               readStoredModelAuth(
                 deps.prisma,
                 deps.secrets,
-                context.actor.userId,
+                owner.userId,
                 candidate.secretId,
                 input.provider,
                 input.modelId,
                 codexCatalog,
                 {
                   onExpiredToken: () =>
-                    refreshExpiredCredential(context.actor, candidate.secretId, input.provider),
+                    refreshExpiredCredential(owner, candidate.secretId, input.provider),
                 },
               ).catch(() => undefined),
             ),
@@ -1269,7 +1277,7 @@ export function createRouter(deps: RouterDeps) {
                 const auth = await readStoredModelAuth(
                   tx,
                   deps.secrets,
-                  context.actor.userId,
+                  owner.userId,
                   candidate.secretId,
                   input.provider,
                   input.modelId,
@@ -1277,7 +1285,7 @@ export function createRouter(deps: RouterDeps) {
                   {
                     waitMs: 0,
                     onExpiredToken: () =>
-                      refreshExpiredCredential(context.actor, candidate.secretId, input.provider),
+                      refreshExpiredCredential(owner, candidate.secretId, input.provider),
                   },
                 );
                 if (auth.status === "unreadable") continue;
@@ -1325,7 +1333,7 @@ export function createRouter(deps: RouterDeps) {
               }
               await selectSpaceModelPreference(
                 tx,
-                context.actor,
+                owner,
                 credentialId,
                 input.modelId,
                 thinkingLevel,
@@ -1337,6 +1345,7 @@ export function createRouter(deps: RouterDeps) {
         return { ok: true as const };
       }),
       disconnect: authed.models.disconnect.handler(async ({ context, input }) => {
+        await requireSpaceOwner(deps.prisma, context.actor);
         // Retire pending sign-ins in every space first — the credentials are
         // account-wide, so a finishing OAuth session anywhere could otherwise
         // re-persist a credential the delete below just removed.
@@ -1416,11 +1425,7 @@ export function createRouter(deps: RouterDeps) {
             throw mapSpaceLifecycleError(error);
           });
         const assignments = await deps.prisma.botMcpServer.findMany({
-          where: {
-            botId: source.id,
-            spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
-          },
+          where: { botId: source.id, spaceId: context.actor.spaceId },
         });
         if (assignments.length) {
           await deps.prisma.botMcpServer.createMany({
@@ -1444,11 +1449,7 @@ export function createRouter(deps: RouterDeps) {
         const existing = await repos.getBot(context.actor, input.botId);
         if (input.sectionId) {
           const section = await deps.prisma.botSection.findFirst({
-            where: {
-              id: input.sectionId,
-              spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
-            },
+            where: { id: input.sectionId, spaceId: context.actor.spaceId },
             select: { id: true },
           });
           if (!section) throw new IsolationError();
@@ -1461,9 +1462,10 @@ export function createRouter(deps: RouterDeps) {
           input.modelId !== undefined &&
           (input.modelProvider !== existing.modelProvider || input.modelId !== existing.modelId);
         if (settingModel && input.modelProvider && input.modelId) {
+          const owner = await ownerScope(deps.prisma, context.actor);
           const credential = await findModelCredential(
             deps.prisma,
-            context.actor,
+            owner,
             input.modelProvider,
             input.modelId,
           );
@@ -1481,18 +1483,14 @@ export function createRouter(deps: RouterDeps) {
             const authError = await validateStoredModelAuth(
               deps.prisma,
               deps.secrets,
-              context.actor.userId,
+              owner.userId,
               credential.secretId,
               input.modelProvider,
               input.modelId,
               codexCatalog,
               {
                 onExpiredToken: () =>
-                  refreshExpiredCredential(
-                    context.actor,
-                    credential.secretId,
-                    input.modelProvider!,
-                  ),
+                  refreshExpiredCredential(owner, credential.secretId, input.modelProvider!),
               },
             );
             if (authError) throw new ORPCError("BAD_REQUEST", { message: authError });
@@ -1513,14 +1511,11 @@ export function createRouter(deps: RouterDeps) {
             let allowed = entry?.thinkingLevels;
             if (effectiveProvider === OPENAI_COMPATIBLE_PROVIDER_ID) {
               allowed = ["off"];
-              const credential = await findModelCredential(
-                deps.prisma,
-                context.actor,
-                effectiveProvider,
-              );
+              const owner = await ownerScope(deps.prisma, context.actor);
+              const credential = await findModelCredential(deps.prisma, owner, effectiveProvider);
               if (credential && credential.defaultModel === effectiveModelId) {
                 const secret = await deps.prisma.secret.findFirst({
-                  where: { id: credential.secretId, userId: context.actor.userId, spaceId: null },
+                  where: { id: credential.secretId, userId: owner.userId, spaceId: null },
                   select: { ciphertext: true },
                 });
                 if (secret) {
@@ -1728,12 +1723,7 @@ export function createRouter(deps: RouterDeps) {
           });
           if (previousSecretId) {
             await tx.secret.deleteMany({
-              where: {
-                id: previousSecretId,
-                spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
-                kind: "webhook",
-              },
+              where: { id: previousSecretId, spaceId: context.actor.spaceId, kind: "webhook" },
             });
           }
         });
@@ -1784,11 +1774,7 @@ export function createRouter(deps: RouterDeps) {
       update: authed.groups.update.handler(async ({ context, input }) => {
         if (input.sectionId) {
           const section = await deps.prisma.botSection.findFirst({
-            where: {
-              id: input.sectionId,
-              spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
-            },
+            where: { id: input.sectionId, spaceId: context.actor.spaceId },
             select: { id: true },
           });
           if (!section) throw new IsolationError();
@@ -2040,6 +2026,7 @@ export function createRouter(deps: RouterDeps) {
             threadId: target.threadId,
             botId: target.botId,
             userId: context.actor.userId,
+            authorUserId: context.actor.userId,
             blocks: [{ kind: "text", text: input.text }],
             prompt: input.text,
             trigger: "follow_up",
@@ -2076,6 +2063,7 @@ export function createRouter(deps: RouterDeps) {
           const message = await createThreadMessageInTransaction(tx, {
             threadId: target.threadId,
             role: "user",
+            authorUserId: context.actor.userId,
             blocks,
             clientNonce: input.clientNonce,
           });
@@ -2415,14 +2403,14 @@ export function createRouter(deps: RouterDeps) {
             status: { in: ["queued", "running", "interrupted", "failed"] },
             computer: {
               spaceId: context.actor.spaceId,
-              bots: { some: { userId: context.actor.userId, archivedAt: null } },
+              bots: { some: { archivedAt: null } },
             },
           },
           include: {
             computer: {
               include: {
                 bots: {
-                  where: { userId: context.actor.userId, archivedAt: null },
+                  where: { archivedAt: null },
                   select: { id: true, name: true },
                 },
               },
@@ -2443,7 +2431,7 @@ export function createRouter(deps: RouterDeps) {
               status: "interrupted",
               computer: {
                 spaceId: context.actor.spaceId,
-                bots: { some: { userId: context.actor.userId, archivedAt: null } },
+                bots: { some: { archivedAt: null } },
               },
             },
           });
@@ -2468,7 +2456,7 @@ export function createRouter(deps: RouterDeps) {
             status: "failed",
             computer: {
               spaceId: context.actor.spaceId,
-              bots: { some: { userId: context.actor.userId, archivedAt: null } },
+              bots: { some: { archivedAt: null } },
             },
           },
           data: { status: "dismissed" },
@@ -2954,7 +2942,7 @@ export function createRouter(deps: RouterDeps) {
         const docs = await deps.prisma.memoryDocument.findMany({
           where: {
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
+            ...visibleMemoryDocuments(context.actor),
             ...(input.botId ? { botId: input.botId } : {}),
             ...(input.scope ? { scope: input.scope } : {}),
           },
@@ -2974,7 +2962,7 @@ export function createRouter(deps: RouterDeps) {
           where: {
             id: input.documentId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
+            ...visibleMemoryDocuments(context.actor),
           },
         });
         if (!doc) throw new IsolationError();
@@ -3007,7 +2995,7 @@ export function createRouter(deps: RouterDeps) {
         const docs = await deps.prisma.memoryDocument.findMany({
           where: {
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
+            ...visibleMemoryDocuments(context.actor),
             ...(input.botId ? { botId: input.botId } : {}),
           },
         });
@@ -3090,7 +3078,6 @@ export function createRouter(deps: RouterDeps) {
           where: {
             id: input.routineId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
             bot: { archivedAt: null },
           },
         });
@@ -3219,7 +3206,6 @@ export function createRouter(deps: RouterDeps) {
           where: {
             id: input.routineId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!routine) throw new IsolationError();
@@ -3322,7 +3308,6 @@ export function createRouter(deps: RouterDeps) {
           where: {
             id: input.itemId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!existing) throw new IsolationError();
@@ -3344,7 +3329,6 @@ export function createRouter(deps: RouterDeps) {
           where: {
             id: input.itemId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!existing) throw new IsolationError();
@@ -3407,7 +3391,7 @@ export function createRouter(deps: RouterDeps) {
     capabilities: {
       list: authed.capabilities.list.handler(async ({ context }) => {
         const rows = await deps.prisma.capabilityInstall.findMany({
-          where: { spaceId: context.actor.spaceId, userId: context.actor.userId },
+          where: { spaceId: context.actor.spaceId },
         });
         return rows.map((row) => ({
           id: row.id,
@@ -3568,7 +3552,6 @@ export function createRouter(deps: RouterDeps) {
             where: {
               id: input.id,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
             },
           });
           if (!existing) return;
@@ -3582,7 +3565,6 @@ export function createRouter(deps: RouterDeps) {
                 where: {
                   id: existing.secretId,
                   spaceId: context.actor.spaceId,
-                  userId: context.actor.userId,
                 },
               });
             }
@@ -3595,7 +3577,7 @@ export function createRouter(deps: RouterDeps) {
       servers: {
         list: authed.mcp.servers.list.handler(async ({ context }) => {
           const rows = await deps.prisma.mcpServer.findMany({
-            where: { spaceId: context.actor.spaceId, userId: context.actor.userId },
+            where: { spaceId: context.actor.spaceId },
             orderBy: [{ name: "asc" }, { createdAt: "asc" }],
           });
           const secretIds = rows.flatMap((row) => (row.secretId ? [row.secretId] : []));
@@ -3604,7 +3586,6 @@ export function createRouter(deps: RouterDeps) {
                 where: {
                   id: { in: secretIds },
                   spaceId: context.actor.spaceId,
-                  userId: context.actor.userId,
                 },
                 select: { id: true, ciphertext: true },
               })
@@ -3678,7 +3659,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 id: input.id,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
             });
             if (!existing) throw new IsolationError();
@@ -3687,7 +3667,6 @@ export function createRouter(deps: RouterDeps) {
                   where: {
                     id: existing.secretId,
                     spaceId: context.actor.spaceId,
-                    userId: context.actor.userId,
                   },
                 })
               : null;
@@ -3772,7 +3751,6 @@ export function createRouter(deps: RouterDeps) {
                   where: {
                     id: existing.secretId,
                     spaceId: context.actor.spaceId,
-                    userId: context.actor.userId,
                   },
                 });
             } else if (clearing && existing.secretId) {
@@ -3780,7 +3758,6 @@ export function createRouter(deps: RouterDeps) {
                 where: {
                   id: existing.secretId,
                   spaceId: context.actor.spaceId,
-                  userId: context.actor.userId,
                 },
               });
             }
@@ -3793,7 +3770,6 @@ export function createRouter(deps: RouterDeps) {
             where: {
               id: input.id,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
             },
             select: { id: true, secretId: true },
           });
@@ -3813,7 +3789,6 @@ export function createRouter(deps: RouterDeps) {
                 where: {
                   id: server.secretId,
                   spaceId: context.actor.spaceId,
-                  userId: context.actor.userId,
                 },
               });
             }
@@ -3828,7 +3803,6 @@ export function createRouter(deps: RouterDeps) {
           const rows = await deps.prisma.botMcpServer.findMany({
             where: {
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
               bot: { archivedAt: null },
             },
             orderBy: { createdAt: "asc" },
@@ -3840,7 +3814,6 @@ export function createRouter(deps: RouterDeps) {
             where: {
               id: input.botId,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
             },
             select: { id: true },
           });
@@ -3849,7 +3822,6 @@ export function createRouter(deps: RouterDeps) {
             where: {
               botId: bot.id,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
             },
             orderBy: { createdAt: "asc" },
           });
@@ -3872,7 +3844,6 @@ export function createRouter(deps: RouterDeps) {
                   where: {
                     id: input.botId,
                     spaceId: context.actor.spaceId,
-                    userId: context.actor.userId,
                   },
                   select: { id: true },
                 }),
@@ -3880,7 +3851,6 @@ export function createRouter(deps: RouterDeps) {
                   where: {
                     id: input.serverId,
                     spaceId: context.actor.spaceId,
-                    userId: context.actor.userId,
                     enabled: true,
                   },
                   select: { id: true },
@@ -3922,7 +3892,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 id: input.botId,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
               select: { id: true },
             });
@@ -3931,7 +3900,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 id: { in: input.assignments.map((assignment) => assignment.serverId) },
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
               select: { id: true },
             });
@@ -3940,7 +3908,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 botId: bot.id,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
               select: { serverId: true },
             });
@@ -3952,7 +3919,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 botId: bot.id,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
             });
             if (input.assignments.length)
@@ -3982,7 +3948,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 botId: bot.id,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
               orderBy: { createdAt: "asc" },
             });
@@ -4100,11 +4065,9 @@ export function createRouter(deps: RouterDeps) {
     },
     connections: {
       catalog: authed.connections.catalog.handler(async ({ context, input }) => {
-        const adapterContext = connectionContext(
-          context.actor,
-          "connections.catalog",
-          context.signal,
-        );
+        // Connected accounts live on the Space owner's connector identity.
+        const owner = await ownerScope(deps.prisma, context.actor);
+        const adapterContext = connectionContext(owner, "connections.catalog", context.signal);
         const providers = input.connectorId
           ? [deps.connectors.managed(input.connectorId)].filter(
               (provider): provider is NonNullable<typeof provider> => Boolean(provider),
@@ -4138,7 +4101,7 @@ export function createRouter(deps: RouterDeps) {
       }),
       list: authed.connections.list.handler(async ({ context }) => {
         const rows = await deps.prisma.connection.findMany({
-          where: { spaceId: context.actor.spaceId, userId: context.actor.userId },
+          where: { spaceId: context.actor.spaceId },
         });
         return rows.map((row) => ({
           id: row.id,
@@ -4151,6 +4114,8 @@ export function createRouter(deps: RouterDeps) {
         }));
       }),
       begin: authed.connections.begin.handler(async ({ context, input }) => {
+        // Connected accounts live on the Space owner's connector identity.
+        const owner = await ownerScope(deps.prisma, context.actor);
         const connector =
           deps.integrationSettings &&
           (input.connectorId === "composio" || input.connectorId === "pipedream")
@@ -4168,7 +4133,6 @@ export function createRouter(deps: RouterDeps) {
           const existing = await tx.connection.findMany({
             where: {
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
               connectorId: input.connectorId,
               provider: input.provider,
             },
@@ -4201,7 +4165,7 @@ export function createRouter(deps: RouterDeps) {
         try {
           const auth = await connector.begin(
             { provider: input.provider, redirectUrl: `${deps.env.webOrigin}/app` },
-            connectionContext(context.actor, "connections.begin", context.signal),
+            connectionContext(owner, "connections.begin", context.signal),
           );
           // Re-take the provider lock and only advance still-pending rows so a
           // concurrent revoke cannot be overwritten back to pending/connected.
@@ -4211,7 +4175,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 id: row.id,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
                 status: "pending",
               },
               data: {
@@ -4225,11 +4188,7 @@ export function createRouter(deps: RouterDeps) {
           if (!applied) {
             // Revoke won the race. Clean up without a provider-wide slug delete.
             const state = auth.state?.trim();
-            const adapterContext = connectionContext(
-              context.actor,
-              "connections.begin",
-              context.signal,
-            );
+            const adapterContext = connectionContext(owner, "connections.begin", context.signal);
             if (state && state !== input.provider) {
               // Composio browser OAuth stores an authorization-request id in
               // auth.state. Prefer canceling that pending request by id so the
@@ -4262,7 +4221,7 @@ export function createRouter(deps: RouterDeps) {
                 let revokeRef = state;
                 if (resolveAccountId) {
                   const resolved = await resolveAccountId(
-                    context.actor.userId,
+                    owner.userId,
                     input.provider,
                     state,
                     [],
@@ -4307,7 +4266,6 @@ export function createRouter(deps: RouterDeps) {
                       const kept = await tx.connection.findMany({
                         where: {
                           spaceId: context.actor.spaceId,
-                          userId: context.actor.userId,
                           connectorId: input.connectorId,
                           provider: input.provider,
                           status: { in: ["connected", "pending", "error"] },
@@ -4338,7 +4296,6 @@ export function createRouter(deps: RouterDeps) {
             where: {
               id: row.id,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
               status: "pending",
             },
             data: { status: "error" },
@@ -4347,11 +4304,12 @@ export function createRouter(deps: RouterDeps) {
         }
       }),
       complete: authed.connections.complete.handler(async ({ context, input }) => {
+        // Connected accounts live on the Space owner's connector identity.
+        const owner = await ownerScope(deps.prisma, context.actor);
         const existing = await deps.prisma.connection.findFirst({
           where: {
             id: input.connectionId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!existing) throw new IsolationError();
@@ -4379,7 +4337,6 @@ export function createRouter(deps: RouterDeps) {
                 where: {
                   id: existing.id,
                   spaceId: context.actor.spaceId,
-                  userId: context.actor.userId,
                 },
               });
               if (!current) throw new IsolationError();
@@ -4389,7 +4346,7 @@ export function createRouter(deps: RouterDeps) {
                 // remotely. Cancel leftover Composio request ids / drop Pipedream
                 // remotes no active local row still references before rejecting.
                 const revokedContext = connectionContext(
-                  context.actor,
+                  owner,
                   "connections.complete",
                   context.signal,
                 );
@@ -4402,7 +4359,6 @@ export function createRouter(deps: RouterDeps) {
                     where: {
                       id: current.id,
                       spaceId: context.actor.spaceId,
-                      userId: context.actor.userId,
                       status: "revoked",
                     },
                     data: { status: "pending" },
@@ -4436,7 +4392,7 @@ export function createRouter(deps: RouterDeps) {
                       let revokeRef = pendingRef;
                       if (resolveAccountId) {
                         const resolved = await resolveAccountId(
-                          context.actor.userId,
+                          owner.userId,
                           current.provider,
                           pendingRef,
                           [],
@@ -4462,7 +4418,6 @@ export function createRouter(deps: RouterDeps) {
                       const kept = await tx.connection.findMany({
                         where: {
                           spaceId: context.actor.spaceId,
-                          userId: context.actor.userId,
                           connectorId: existing.connectorId,
                           provider: existing.provider,
                           status: { in: ["connected", "pending", "error"] },
@@ -4494,7 +4449,7 @@ export function createRouter(deps: RouterDeps) {
               }
 
               const adapterContext = connectionContext(
-                context.actor,
+                owner,
                 "connections.complete",
                 context.signal,
               );
@@ -4541,7 +4496,6 @@ export function createRouter(deps: RouterDeps) {
                 const siblings = await tx.connection.findMany({
                   where: {
                     spaceId: context.actor.spaceId,
-                    userId: context.actor.userId,
                     connectorId: existing.connectorId,
                     provider: existing.provider,
                     id: { not: existing.id },
@@ -4563,7 +4517,7 @@ export function createRouter(deps: RouterDeps) {
                   if (!ref || ref === existing.provider) continue;
                   if (resolveAccountId) {
                     const resolvedSiblingId = await resolveAccountId(
-                      context.actor.userId,
+                      owner.userId,
                       existing.provider,
                       ref,
                       [],
@@ -4583,13 +4537,13 @@ export function createRouter(deps: RouterDeps) {
                 }
                 resolvedAccountId = resolveAccountId
                   ? await resolveAccountId(
-                      context.actor.userId,
+                      owner.userId,
                       existing.provider,
                       current.providerRef,
                       excludeIds,
                       context.actor.spaceId,
                     ).catch(() => undefined)
-                  : await fallbackAccountId!(context.actor.userId, existing.provider).catch(
+                  : await fallbackAccountId!(owner.userId, existing.provider).catch(
                       () => undefined,
                     );
               }
@@ -4611,7 +4565,6 @@ export function createRouter(deps: RouterDeps) {
                 const taken = await tx.connection.findFirst({
                   where: {
                     spaceId: context.actor.spaceId,
-                    userId: context.actor.userId,
                     connectorId: existing.connectorId,
                     provider: existing.provider,
                     id: { not: existing.id },
@@ -4652,7 +4605,6 @@ export function createRouter(deps: RouterDeps) {
           where: {
             id: input.connectionId,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         if (!existing) throw new IsolationError();
@@ -4671,6 +4623,8 @@ export function createRouter(deps: RouterDeps) {
         };
       }),
       revoke: authed.connections.revoke.handler(async ({ context, input }) => {
+        // Connected accounts live on the Space owner's connector identity.
+        const owner = await ownerScope(deps.prisma, context.actor);
         type RemoteRevoke = {
           connectorId: string;
           connectionRef: string;
@@ -4682,7 +4636,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 id: input.connectionId,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
               },
             });
             if (!row) {
@@ -4699,7 +4652,6 @@ export function createRouter(deps: RouterDeps) {
               SELECT id
               FROM connections
               WHERE "spaceId" = ${context.actor.spaceId}
-                AND "userId" = ${context.actor.userId}
                 AND "connectorId" = ${row.connectorId}
                 AND provider = ${row.provider}
                 AND status IN ('connected', 'pending', 'error')
@@ -4709,7 +4661,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 id: row.id,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
                 status: { in: ["connected", "pending", "error"] },
               },
               data: { status: "revoked" },
@@ -4724,7 +4675,6 @@ export function createRouter(deps: RouterDeps) {
             const remaining = await tx.connection.count({
               where: {
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
                 connectorId: row.connectorId,
                 provider: row.provider,
                 status: { in: ["connected", "pending"] },
@@ -4760,7 +4710,7 @@ export function createRouter(deps: RouterDeps) {
                 const revokeSignal = signals.length === 1 ? signals[0]! : AbortSignal.any(signals);
                 await connector.revoke(
                   connectionRef,
-                  connectionContext(context.actor, "connections.revoke", revokeSignal),
+                  connectionContext(owner, "connections.revoke", revokeSignal),
                 );
               } catch (error) {
                 if (error instanceof ORPCError) throw error;
@@ -4793,7 +4743,6 @@ export function createRouter(deps: RouterDeps) {
               where: {
                 id: input.connectionId,
                 spaceId: context.actor.spaceId,
-                userId: context.actor.userId,
                 status: "revoked",
               },
               data: { status: outcome.previousStatus },
@@ -4808,7 +4757,7 @@ export function createRouter(deps: RouterDeps) {
             }
             await connector.revoke(
               outcome.remote.connectionRef,
-              connectionContext(context.actor, "connections.revoke", context.signal),
+              connectionContext(owner, "connections.revoke", context.signal),
             );
           } catch (error) {
             // Restore when DELETE clearly did not run (including pre-delete list
@@ -4832,12 +4781,13 @@ export function createRouter(deps: RouterDeps) {
         return { ok: true as const };
       }),
       tools: authed.connections.tools.handler(async ({ context, input }) => {
+        // Connected accounts live on the Space owner's connector identity.
+        const owner = await ownerScope(deps.prisma, context.actor);
         const connector = deps.connectors.managed(input.connectorId);
         if (!connector) return [];
         const row = await deps.prisma.connection.findFirst({
           where: {
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
             connectorId: input.connectorId,
             provider: input.provider,
             status: "connected",
@@ -4846,7 +4796,7 @@ export function createRouter(deps: RouterDeps) {
         if (!row) return [];
         try {
           const tools = await connector.discoverTools({
-            ...connectionContext(context.actor, "connections.tools", context.signal),
+            ...connectionContext(owner, "connections.tools", context.signal),
             connectedConnections: [
               {
                 id: row.id,
@@ -4892,7 +4842,6 @@ export function createRouter(deps: RouterDeps) {
             where: {
               id: input.botId,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
               archivedAt: null,
             },
             select: { id: true },
@@ -4930,7 +4879,6 @@ export function createRouter(deps: RouterDeps) {
             where: {
               id: input.botId,
               spaceId: context.actor.spaceId,
-              userId: context.actor.userId,
               archivedAt: null,
             },
             select: { id: true },
@@ -5203,10 +5151,7 @@ export function createRouter(deps: RouterDeps) {
     approvalRules: {
       list: authed.approvalRules.list.handler(async ({ context }) => {
         const rows = await deps.prisma.actionApprovalRule.findMany({
-          where: {
-            spaceId: context.actor.spaceId,
-            createdByUserId: context.actor.userId,
-          },
+          where: { spaceId: context.actor.spaceId },
           orderBy: { createdAt: "asc" },
         });
         return rows.map((row) => ({
@@ -5220,9 +5165,8 @@ export function createRouter(deps: RouterDeps) {
       set: authed.approvalRules.set.handler(async ({ context, input }) => {
         const row = await deps.prisma.actionApprovalRule.upsert({
           where: {
-            spaceId_createdByUserId_effect_matchKind_matchValue: {
+            spaceId_effect_matchKind_matchValue: {
               spaceId: context.actor.spaceId,
-              createdByUserId: context.actor.userId,
               effect: input.effect,
               matchKind: input.matchKind,
               matchValue: input.matchValue,
@@ -5247,11 +5191,7 @@ export function createRouter(deps: RouterDeps) {
       }),
       remove: authed.approvalRules.remove.handler(async ({ context, input }) => {
         await deps.prisma.actionApprovalRule.deleteMany({
-          where: {
-            id: input.id,
-            spaceId: context.actor.spaceId,
-            createdByUserId: context.actor.userId,
-          },
+          where: { id: input.id, spaceId: context.actor.spaceId },
         });
         return { ok: true as const };
       }),
@@ -5286,7 +5226,6 @@ export function createRouter(deps: RouterDeps) {
             botId: input.botId,
             groupId: null,
             spaceId: context.actor.spaceId,
-            userId: context.actor.userId,
           },
         });
         return rows.map((row) => ({
@@ -5362,7 +5301,7 @@ export function createRouter(deps: RouterDeps) {
     usage: {
       list: authed.usage.list.handler(async ({ context }) => {
         const rows = await deps.prisma.usageRecord.findMany({
-          where: { spaceId: context.actor.spaceId, userId: context.actor.userId },
+          where: { spaceId: context.actor.spaceId },
           orderBy: { createdAt: "desc" },
           take: 100,
         });
@@ -5379,7 +5318,7 @@ export function createRouter(deps: RouterDeps) {
       }),
       summary: authed.usage.summary.handler(async ({ context }) => {
         const result = await deps.prisma.usageRecord.aggregate({
-          where: { spaceId: context.actor.spaceId, userId: context.actor.userId },
+          where: { spaceId: context.actor.spaceId },
           _sum: { inputTokens: true, outputTokens: true },
           _count: { _all: true },
         });
@@ -5481,11 +5420,12 @@ export function createRouter(deps: RouterDeps) {
         return toVoiceStatus(cred);
       }),
       credentials: authed.voice.credentials.handler(async ({ context }) => {
+        const ownerUserId = await spaceOwnerUserId(deps.prisma, context.actor.spaceId);
         const rows = await deps.prisma.userVoiceCredential.findMany({
-          where: { userId: context.actor.userId },
+          where: { userId: ownerUserId },
           include: {
             preferences: {
-              where: { userId: context.actor.userId, spaceId: context.actor.spaceId },
+              where: { userId: ownerUserId, spaceId: context.actor.spaceId },
             },
           },
           orderBy: newestVoiceCredentialOrder,
@@ -5513,21 +5453,19 @@ export function createRouter(deps: RouterDeps) {
         disconnectVoiceCredential(deps, context.actor, { provider: input.provider }),
       ),
       setVoice: authed.voice.setVoice.handler(async ({ context, input }) => {
+        // Voice choice is a Space setting on the owner's credentials; any member may change it.
+        const owner = await ownerScope(deps.prisma, context.actor);
         const cred = await withSerializableRetry(() =>
           deps.prisma.$transaction(
             async (tx) => {
               const found = input.provider
                 ? await tx.userVoiceCredential.findFirst({
-                    where: { userId: context.actor.userId, provider: input.provider },
+                    where: { userId: owner.userId, provider: input.provider },
                     orderBy: newestVoiceCredentialOrder,
                   })
                 : (
                     await tx.spaceVoicePreference.findFirst({
-                      where: {
-                        userId: context.actor.userId,
-                        spaceId: context.actor.spaceId,
-                        isDefault: true,
-                      },
+                      where: { userId: owner.userId, spaceId: owner.spaceId, isDefault: true },
                       include: { credential: true },
                       orderBy: [{ updatedAt: "desc" }, { id: "desc" }],
                     })
@@ -5536,7 +5474,7 @@ export function createRouter(deps: RouterDeps) {
                 throw new ORPCError("BAD_REQUEST", { message: "Connect a voice provider first." });
               }
               // Picking a voice also makes its provider the one speak/transcribe use.
-              await selectSpaceVoicePreference(tx, context.actor, found.id, input.voiceId);
+              await selectSpaceVoicePreference(tx, owner, found.id, input.voiceId);
               return { ...found, voiceId: input.voiceId, isDefault: true };
             },
             { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
@@ -5732,6 +5670,9 @@ async function loadAutoReviewSettings(deps: RouterDeps, actor: Actor) {
   const environmentAvailable = isAutoReviewCheckerConfigured({ env: process.env });
   const checker = environmentAvailable ? null : resolveAutoReviewChecker(process.env);
   const requiredUserProvider = checker?.provider === "scripted" ? null : checker?.provider;
+  const ownerUserId = requiredUserProvider
+    ? await spaceOwnerUserId(deps.prisma, actor.spaceId)
+    : undefined;
   const [preference, credential] = await Promise.all([
     deps.prisma.actionAutoReviewPreference.findUnique({
       where: {
@@ -5744,7 +5685,7 @@ async function loadAutoReviewSettings(deps: RouterDeps, actor: Actor) {
     }),
     requiredUserProvider
       ? deps.prisma.userModelCredential.findFirst({
-          where: { userId: actor.userId, provider: requiredUserProvider },
+          where: { userId: ownerUserId, provider: requiredUserProvider },
           select: { id: true },
         })
       : Promise.resolve(null),
@@ -5814,10 +5755,11 @@ async function allowedThinkingLevels(
       ?.thinkingLevels;
   }
   let allowed: string[] | undefined = ["off"];
-  const credential = await findModelCredential(deps.prisma, actor, provider);
+  const owner = await ownerScope(deps.prisma, actor);
+  const credential = await findModelCredential(deps.prisma, owner, provider);
   if (credential && credential.defaultModel === modelId) {
     const secret = await deps.prisma.secret.findFirst({
-      where: { id: credential.secretId, userId: actor.userId, spaceId: null },
+      where: { id: credential.secretId, userId: owner.userId, spaceId: null },
       select: { ciphertext: true },
     });
     if (secret) {
@@ -6107,6 +6049,8 @@ async function persistModelCredential(
   },
   codexCatalog: CodexLiveCatalog,
 ) {
+  // Model credentials are the owner's account-wide credentials.
+  await requireSpaceOwner(deps.prisma, actor);
   throwIfAborted(input.signal);
   const requestedModelId = usableModelId(input.modelId);
   const authError = requestedModelId

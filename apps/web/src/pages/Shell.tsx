@@ -3598,6 +3598,7 @@ export function ShellPage() {
           </div>
         ) : (
           <Transcript
+            viewerId={userId}
             key={activeSnapshot?.threadId}
             scrollRef={messageScroll}
             scrollRequest={scrollRequest}
@@ -4720,6 +4721,7 @@ const Transcript = memo(function Transcript({
   speakingMessageId,
   onSpeak,
   onOpenComputer,
+  viewerId,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   scrollRequest: { messageId: string; nonce: number } | null;
@@ -4749,6 +4751,7 @@ const Transcript = memo(function Transcript({
   speakingMessageId: string | null;
   onSpeak: (message: ThreadMessage) => void;
   onOpenComputer: (botId?: string) => void;
+  viewerId?: string;
 }) {
   const { t } = useLingui();
   const [atEnd, setAtEnd] = useState(true);
@@ -5026,6 +5029,15 @@ const Transcript = memo(function Transcript({
               data-message-id={message.id}
               className={peerReceipt ? "relative py-0.5" : "group/message relative hover:z-20"}
             >
+              {message.role === "user" && message.author && message.author.id !== viewerId ? (
+                <div
+                  data-testid="message-author"
+                  className="mb-1 text-end text-[13px] font-semibold text-muted-foreground"
+                  dir="auto"
+                >
+                  {message.author.name}
+                </div>
+              ) : null}
               <div
                 className={
                   peerReceipt

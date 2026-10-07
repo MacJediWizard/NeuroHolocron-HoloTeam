@@ -271,7 +271,6 @@ describe("archiveGroup", () => {
         where: {
           id: "group-1",
           spaceId: actor.spaceId,
-          userId: actor.userId,
         },
         select: { archivedAt: true, thread: { select: { id: true } } },
       }),

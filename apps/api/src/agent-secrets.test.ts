@@ -1,4 +1,3 @@
-import { ORPCError } from "@orpc/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { deleteAgentSecret, listAgentSecrets, putAgentSecret } from "./agent-secrets.js";
 
@@ -59,11 +58,11 @@ describe("agent secrets", () => {
     ]);
   });
 
-  it("rejects non-owners", async () => {
+  it("lets any member see the Space's secrets", async () => {
     prisma.spaceMember.findUnique.mockResolvedValue({ role: "member" });
     await expect(
       listAgentSecrets({ prisma: prisma as never, secrets: { put } }, actor),
-    ).rejects.toBeInstanceOf(ORPCError);
+    ).resolves.toHaveLength(1);
   });
 
   it("puts and removes secrets", async () => {

@@ -23,6 +23,7 @@ model AiDataConsent {
 
 model User {
   aiDataConsents AiDataConsent[]
+  authoredMessages Message[] @relation("MessageAuthor")
   id                          String                       @id
   name                        String
   email                       String
@@ -157,7 +158,7 @@ model ActionApprovalRule {
   matchValue      String
   createdAt       DateTime @default(now())
 
-  @@unique([spaceId, createdByUserId, effect, matchKind, matchValue])
+  @@unique([spaceId, effect, matchKind, matchValue])
   @@index([spaceId, createdByUserId])
   @@map("action_approval_rules")
 }
@@ -443,8 +444,8 @@ model BotSection {
   bots      Bot[]
   groups    ChatGroup[]
 
-  @@unique([spaceId, userId, name])
-  @@index([spaceId, userId, position, createdAt])
+  @@unique([spaceId, name])
+  @@index([spaceId, position, createdAt])
   @@map("bot_sections")
 }
 
@@ -536,6 +537,9 @@ model Message {
   replyTo          Message?  @relation("MessageReplies", fields: [replyToMessageId], references: [id], onDelete: SetNull)
   replies          Message[] @relation("MessageReplies")
   runId            String?
+  // The member who wrote a user message; null for bot output and older rows.
+  authorUserId     String?
+  author           User?     @relation("MessageAuthor", fields: [authorUserId], references: [id], onDelete: SetNull)
   clientNonce      String?
   sourceRuns            Run[]             @relation("RunSourceMessage")
   externalTranscriptFor  ExternalMessage?
@@ -821,7 +825,7 @@ model AgentSkill {
   updatedAt   DateTime @updatedAt
 
   @@index([spaceId, userId])
-  // Case-insensitive unique index agent_skills_spaceId_userId_name_lower_key is created in SQL.
+  // Case-insensitive unique index agent_skills_spaceId_name_lower_key is created in SQL.
   @@map("agent_skills")
 }
 
@@ -1121,7 +1125,7 @@ model McpServer {
   assignments   BotMcpServer[]
   oauthSessions McpOAuthSession[]
 
-  @@unique([spaceId, userId, slug])
+  @@unique([spaceId, slug])
   @@index([spaceId, userId])
   @@map("mcp_servers")
 }
@@ -1275,7 +1279,7 @@ model BotSecret {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  @@unique([userId, spaceId, botId, name])
+  @@unique([spaceId, botId, name])
   @@index([botId])
   @@index([spaceId])
   @@map("bot_secrets")

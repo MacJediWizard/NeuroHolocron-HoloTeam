@@ -47,6 +47,7 @@ describe("team chat engagement judge", () => {
     const prisma = {
       deploymentSettings: { findUnique: vi.fn(async () => null) },
       spaceModelPreference: { findFirst: vi.fn(async () => null) },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       usageRecord: { create },
     };
     const runtime = {

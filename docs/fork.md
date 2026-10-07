@@ -8,6 +8,7 @@ and how it stays mergeable with upstream. Upstream changes are in [CHANGELOG.md]
 | Feature | Configure with | Docs |
 | --- | --- | --- |
 | Single sign-on through any OpenID Connect provider, optionally SSO-only | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_NAME`, `AUTH_PASSWORD_ENABLED` | [Self-hosting: Single sign-on](./self-host.md#single-sign-on-oidc) |
+| Shared Spaces: provider groups add members to a Space that they share with its owner | `OIDC_GROUP_SPACES`, `OIDC_GROUPS_CLAIM` | [Self-hosting: Shared Spaces](./self-host.md#shared-spaces-from-provider-groups) |
 | In-app secrets (model keys, integration credentials, bot secrets) kept in Infisical instead of Postgres | `SECRET_STORE=infisical` and `INFISICAL_*` | [Self-host secrets: Infisical](./self-host-secrets.md#keeping-in-app-secrets-in-infisical-optional) |
 | Images, installer, and desktop updates published from this repository | `SOURCE_REPO` in `packages/contracts/src/brand.js` | [Published images and tags](./self-host.md#published-images-and-tags) |
 | CI that runs without upstream's paid services | Repository variables | [Fork CI](./fork-ci.md) |

@@ -29,7 +29,7 @@ export class MarkdownMemoryStore implements MemoryStore {
     const documents = await this.prisma.memoryDocument.findMany({
       where: {
         spaceId: context.spaceId,
-        userId: context.userId,
+        ...ownerFilter(request.scope, context),
         scope: request.scope,
         ...(request.botId ? { botId: request.botId } : {}),
         ...(request.path ? { path: request.path } : {}),
@@ -54,8 +54,9 @@ export class MarkdownMemoryStore implements MemoryStore {
     const documents = await this.prisma.memoryDocument.findMany({
       where: {
         spaceId: context.spaceId,
-        userId: context.userId,
-        ...(request.scope === "all" ? {} : { scope: request.scope }),
+        ...(request.scope === "all"
+          ? { OR: [{ scope: { not: "user" } }, { scope: "user", userId: context.userId }] }
+          : { scope: request.scope, ...ownerFilter(request.scope, context) }),
         ...(request.botId ? { botId: request.botId } : {}),
       },
     });
@@ -78,7 +79,7 @@ export class MarkdownMemoryStore implements MemoryStore {
           const existing = await tx.memoryDocument.findFirst({
             where: {
               spaceId: context.spaceId,
-              userId: context.userId,
+              ...ownerFilter(request.scope, context),
               scope: request.scope,
               botId: request.botId ?? null,
               path: request.path,
@@ -150,6 +151,11 @@ export class MarkdownMemoryStore implements MemoryStore {
     if (!last) throw new Error("No memory files to import");
     return last;
   }
+}
+
+/** Only "user" memory is personal; bot and Space memory is shared by every member. */
+function ownerFilter(scope: string, context: AdapterContext): { userId?: string } {
+  return scope === "user" ? { userId: context.userId } : {};
 }
 
 function snippet(content: string, q: string): string {

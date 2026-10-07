@@ -263,6 +263,7 @@ describe("space catalog auth", () => {
     const preferenceFindMany = vi.fn().mockResolvedValue(options.preferences);
     const secretFindMany = vi.fn().mockResolvedValue(options.secrets);
     const prisma = {
+      spaceMember: { findMany: async () => [{ userId: "user-1", role: "owner" }] },
       userModelCredential: { findMany: credentialFindMany },
       spaceModelPreference: { findMany: preferenceFindMany },
       secret: { findMany: secretFindMany },
@@ -873,6 +874,7 @@ describe("connected model validation", () => {
 
   it("accepts catalog and saved free-form models but rejects unavailable choices", async () => {
     const catalogPrisma = {
+      spaceMember: { findMany: async () => [{ userId: "user-1", role: "owner" }] },
       spaceModelPreference: { findFirst: async () => null },
       userModelCredential: { findFirst: async () => credential("xai", null) },
     } as unknown as PrismaClient;
@@ -916,6 +918,7 @@ describe("connected model validation", () => {
       },
     );
     const customPrisma = {
+      spaceMember: { findMany: async () => [{ userId: "user-1", role: "owner" }] },
       spaceModelPreference: { findFirst: preferenceFindFirst },
       userModelCredential: { findFirst: async () => null },
     } as unknown as PrismaClient;
@@ -938,6 +941,7 @@ describe("connected model validation", () => {
     ).resolves.toBe("Unknown model for that provider");
 
     const disconnectedPrisma = {
+      spaceMember: { findMany: async () => [{ userId: "user-1", role: "owner" }] },
       spaceModelPreference: { findFirst: async () => null },
       userModelCredential: { findFirst: async () => null },
     } as unknown as PrismaClient;
@@ -951,5 +955,34 @@ describe("connected model validation", () => {
     await expect(
       validateConnectedModelChoice(catalogPrisma, actor, "xai", "undefined"),
     ).resolves.toBe("Unknown model for that provider");
+  });
+  it("validates a member's choice against the Space owner's saved models", async () => {
+    const preferenceFindFirst = vi.fn(async (args: { where: { modelId?: string } }) =>
+      args.where.modelId
+        ? { id: "owner-saved-model" }
+        : {
+            credential: credential("openai-compatible", "newest-model"),
+            isDefault: true,
+            modelId: "newest-model",
+            thinkingLevel: null,
+          },
+    );
+    const prisma = {
+      spaceMember: { findMany: async () => [{ userId: "owner-1", role: "owner" }] },
+      spaceModelPreference: { findFirst: preferenceFindFirst },
+      userModelCredential: { findFirst: async () => null },
+    } as unknown as PrismaClient;
+    await expect(
+      validateConnectedModelChoice(prisma, actor, "openai-compatible", "private-model"),
+    ).resolves.toBeUndefined();
+    expect(preferenceFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          spaceId: actor.spaceId,
+          userId: "owner-1",
+          credential: { userId: "owner-1", provider: "openai-compatible" },
+        }),
+      }),
+    );
   });
 });

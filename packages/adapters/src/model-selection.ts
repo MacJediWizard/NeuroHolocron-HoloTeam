@@ -5,6 +5,7 @@ import {
   chooseModelCredential,
   type findDefaultModelCredential,
   findModelCredential,
+  ownerScope,
   type PrismaClient,
 } from "@rakazo/db";
 import type { ModelCredentialAuthKind } from "./pi-catalog-availability.js";
@@ -73,8 +74,10 @@ export type SpaceCatalogAuth = {
 export async function modelCredentialAuthKindsForSpace(
   prisma: PrismaClient,
   secretStore: Pick<EncryptedSecretStore, "load">,
-  scope: Pick<Actor, "userId" | "spaceId">,
+  actorScope: Pick<Actor, "userId" | "spaceId">,
 ): Promise<SpaceCatalogAuth> {
+  // Members run on the Space owner's credentials and model choices.
+  const scope = await ownerScope(prisma, actorScope);
   const [credentials, preferences] = await Promise.all([
     prisma.userModelCredential.findMany({
       where: { userId: scope.userId },
@@ -334,12 +337,13 @@ export async function validateConnectedModelChoice(
   if (provider !== OPENAI_COMPATIBLE_PROVIDER_ID) {
     return "Unknown model for that provider";
   }
+  const owner = await ownerScope(prisma, actor);
   const savedChoice = await prisma.spaceModelPreference.findFirst({
     where: {
-      spaceId: actor.spaceId,
-      userId: actor.userId,
+      spaceId: owner.spaceId,
+      userId: owner.userId,
       modelId,
-      credential: { userId: actor.userId, provider },
+      credential: { userId: owner.userId, provider },
     },
     select: { id: true },
   });

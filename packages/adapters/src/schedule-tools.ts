@@ -284,7 +284,6 @@ export async function listSchedulesFromTool(
     where: {
       spaceId: input.spaceId,
       botId: input.botId,
-      userId: input.userId,
       ...(input.threadId ? { threadId: input.threadId } : {}),
     },
     orderBy: { createdAt: "desc" },
@@ -324,7 +323,6 @@ export async function cancelScheduleFromTool(
     where: {
       spaceId: input.spaceId,
       botId: input.botId,
-      userId: input.userId,
       ...(input.threadId ? { threadId: input.threadId } : {}),
       ...(routineId ? { id: routineId } : { name: name! }),
     },

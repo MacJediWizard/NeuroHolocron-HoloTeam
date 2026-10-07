@@ -208,6 +208,26 @@ An existing account joins on its first SSO sign-in when the emails match. While 
 is on, that needs a verified email, so an address someone registered first cannot capture the SSO
 sign-in. With it off, unverified accounts join too, and their earlier sessions end.
 
+#### Shared Spaces from provider groups
+
+Map provider groups to existing Spaces to let a team work in one Space:
+
+```env
+OIDC_GROUP_SPACES=engineering:<space id>,support:<space id>
+OIDC_GROUPS_CLAIM=groups   # optional; the ID token claim that lists groups
+```
+
+On every SSO sign-in, a user in a mapped group joins that Space as a member, and a user no longer
+in any group for it leaves (the Space owner never does). Someone who joins through a group gets no
+Space of their own. Ask the provider to put groups in the ID token (most do with the `profile`
+scope or a groups mapping).
+
+Members share everything in the Space: bots, chats, groups, routines, artifacts, memory, skills,
+connections, and secrets. Each message shows who wrote it. Members run on the owner's model and
+voice credentials and connected apps, and any member may change the Space's model choice. Only the
+owner can delete the Space, connect or remove model and voice credentials, change the memory
+provider, or manage billing; deployment settings stay with the deployment owner.
+
 The mobile app signs in with email only. Against an SSO-only server it explains that sign-in is not
 supported yet; use the web or desktop app.
 

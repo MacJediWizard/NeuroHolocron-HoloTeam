@@ -24,6 +24,7 @@ function setup() {
       spaceMemoryConfig: { findUnique: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
       aiDataConsent: { findMany: vi.fn(async () => []), upsert },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "owner", role: "owner" }]) },
       $transaction: vi.fn(async (queries) => Promise.all(queries)),
     },
   } as unknown as RouterDeps;
@@ -64,6 +65,25 @@ describe("consent grants", () => {
     expect(status.recipients).toHaveLength(1);
     expect(status.recipients[0]?.name).toBe("OpenAI");
     expect(deps.prisma.spaceVoicePreference.findMany).not.toHaveBeenCalled();
+  });
+  it("reads a member's recipients from the owner's setup and consent from the member", async () => {
+    const { deps, actor } = setup();
+    deps.env.agentRuntime = "pi";
+    await aiConsentStatus(deps, actor);
+    expect(deps.prisma.spaceModelPreference.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: "owner", spaceId: "space" } }),
+    );
+    expect(deps.prisma.spaceVoicePreference.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: "owner", spaceId: "space" } }),
+    );
+    expect(deps.prisma.bot.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.not.objectContaining({ userId: expect.anything() }),
+      }),
+    );
+    expect(deps.prisma.aiDataConsent.findMany).toHaveBeenCalledWith({
+      where: { userId: "user", spaceId: "space", version: AI_DISCLOSURE_VERSION },
+    });
   });
   it("returns an operator policy without requiring a hosted provider", async () => {
     const { deps, actor } = setup();

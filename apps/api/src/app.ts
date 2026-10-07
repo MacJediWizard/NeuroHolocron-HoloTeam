@@ -83,6 +83,7 @@ import {
   createDb,
   createPool,
   createThreadEvents,
+  handOverSharedRows,
   IsolationError,
   parsePositiveInteger,
   provisionMessagingIdentity,
@@ -394,6 +395,9 @@ export async function createApp(
     beforeDeleteUser: async (userId) => {
       // First, so a provider failure aborts deletion before anything is destroyed.
       await billing?.cancelForDeletedUser(userId);
+      // Work in Spaces the user only joined stays with the Space owner, so the
+      // bots left below are the ones in Spaces this user owns.
+      await handOverSharedRows(prisma, userId);
       const bots = await prisma.bot.findMany({
         where: { userId },
         select: { id: true, userId: true, spaceId: true, name: true, archivedAt: true },

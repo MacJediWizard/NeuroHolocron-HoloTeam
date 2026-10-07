@@ -86,6 +86,26 @@ describe("thread event reduction", () => {
     expect(next?.cursor).toBe(4);
   });
 
+  it("keeps the member who wrote a live message", () => {
+    const next = reduceThreadSnapshot(
+      snapshot([]),
+      event({
+        type: "thread.message.created",
+        payload: {
+          messageId: "member-1",
+          role: "user",
+          blocks: [{ kind: "text", text: "Hi" }],
+          author: { id: "user-2", name: "Ada" },
+        },
+      }),
+    );
+
+    expect(next?.messages.find((message) => message.id === "member-1")?.author).toEqual({
+      id: "user-2",
+      name: "Ada",
+    });
+  });
+
   it("appends a quoted reply carrying its excerpt", () => {
     const initial = snapshot([message("message-1", [{ kind: "text", text: "Done" }], 1)]);
 

@@ -1,6 +1,7 @@
 import type { ComputerMode } from "@rakazo/contracts";
 import type { PrismaClient } from "./client.js";
 import { Prisma } from "./client.js";
+import { spaceOwnerUserId } from "./scope.js";
 import { withTransactionRetry } from "./transaction-retry.js";
 
 export type { ComputerMode } from "@rakazo/contracts";
@@ -22,8 +23,8 @@ export function computerHomeKey(mode: ComputerMode, spaceId: string, botId?: str
   return botId;
 }
 
-type ComputerDb = Pick<PrismaClient, "computer">;
-type ComputerTx = Pick<Prisma.TransactionClient, "computer" | "$queryRaw">;
+type ComputerDb = Pick<PrismaClient, "computer" | "spaceMember">;
+type ComputerTx = Pick<Prisma.TransactionClient, "computer" | "spaceMember" | "$queryRaw">;
 type ComputerClient = ComputerDb & Partial<Pick<PrismaClient, "$transaction" | "$queryRaw">>;
 type RestoreTx = ComputerTx & Pick<Prisma.TransactionClient, "bot">;
 type RestoreClient = ComputerClient & Pick<PrismaClient, "bot">;
@@ -34,7 +35,8 @@ type ExecutionLeaseDb = Pick<PrismaClient, "computerExecutionLease">;
  *
  * Each Computer row becomes a sandbox container once provisioned, so an unbounded
  * record count means an unbounded container fleet for one user. A team computer is
- * one row per space shared by its bots and counts once, not per bot.
+ * one row per space shared by its bots and counts once, not per bot. Computers count
+ * against the owner of their Space, whichever member created them.
  */
 export function resolveMaxComputersPerUser(
   value = process.env.SANDBOX_MAX_COMPUTERS_PER_USER,
@@ -57,20 +59,20 @@ export class ComputerLimitError extends Error {
 }
 
 /**
- * Computers a user still backs with a live (non-archived) bot.
+ * Computers with a live (non-archived) bot in the Spaces a user owns.
  *
  * excludeBotId drops one bot's current reference: a bot being re-linked to a
  * new computer in the same transaction leaves its old row behind, so that
  * intermediate reference must not count against the final live set.
  */
-async function countInUseComputersForUser(
+async function countInUseComputersForOwner(
   prisma: ComputerDb,
-  userId: string,
+  ownerUserId: string,
   excludeBotId?: string,
 ): Promise<number> {
   return prisma.computer.count({
     where: {
-      userId,
+      space: { memberships: { some: { userId: ownerUserId, role: { contains: "owner" } } } },
       bots: {
         some: excludeBotId ? { archivedAt: null, id: { not: excludeBotId } } : { archivedAt: null },
       },
@@ -79,20 +81,28 @@ async function countInUseComputersForUser(
 }
 
 /**
- * Serialize existence check + in-use count + Computer create for one user.
+ * Serialize existence check + in-use count + Computer create for one Space owner.
  * Seed 1 keeps this keyspace apart from lockSpaceForContentCreation (seed 0).
  */
-async function lockUserForComputerQuota(
+async function lockOwnerForComputerQuota(
   tx: Pick<Prisma.TransactionClient, "$queryRaw">,
-  userId: string,
+  ownerUserId: string,
 ): Promise<void> {
   await tx.$queryRaw(Prisma.sql`
-    SELECT pg_advisory_xact_lock(hashtextextended(${userId}, 1))::text AS "lock"
+    SELECT pg_advisory_xact_lock(hashtextextended(${ownerUserId}, 1))::text AS "lock"
   `);
 }
 
+async function quotaOwnerForComputer(prisma: ComputerDb, computerId: string): Promise<string> {
+  const computer = await prisma.computer.findUniqueOrThrow({
+    where: { id: computerId },
+    select: { spaceId: true },
+  });
+  return spaceOwnerUserId(prisma, computer.spaceId);
+}
+
 /**
- * Refuse a restore that would push a user past the cap.
+ * Refuse a restore that would push the Space owner past the cap.
  *
  * A restore re-links the bot to its Computer row, which reactivates the quota
  * if that row was only referenced by archived bots (the dedicated case; a team
@@ -101,7 +111,7 @@ async function lockUserForComputerQuota(
  */
 export async function assertComputerQuotaForRestore(
   prisma: ComputerDb,
-  input: { userId: string; computerId: string },
+  input: { computerId: string; userId?: string },
 ): Promise<void> {
   const limit = resolveMaxComputersPerUser();
   if (limit <= 0) return;
@@ -114,12 +124,13 @@ export async function assertComputerQuotaForRestore(
     },
   });
   if (alreadyLive > 0) return;
-  const inUse = await countInUseComputersForUser(prisma, input.userId);
+  const owner = await quotaOwnerForComputer(prisma, input.computerId);
+  const inUse = await countInUseComputersForOwner(prisma, owner);
   if (inUse >= limit) throw new ComputerLimitError(limit);
 }
 
 /**
- * Unarchive a bot while holding the same per-user quota lock as create.
+ * Unarchive a bot while holding the same per-owner quota lock as create.
  *
  * Concurrent restores of archived bots on distinct computers can both pass an
  * unlocked count when one slot remains; the lock covers count + archivedAt
@@ -127,13 +138,13 @@ export async function assertComputerQuotaForRestore(
  */
 export async function restoreBotUnderComputerQuota(
   prisma: RestoreClient,
-  input: { userId: string; botId: string; computerId: string },
+  input: { botId: string; computerId: string; userId?: string },
 ): Promise<void> {
   const limit = resolveMaxComputersPerUser();
 
   async function restore(tx: RestoreTx) {
     if (limit > 0) {
-      await lockUserForComputerQuota(tx, input.userId);
+      await lockOwnerForComputerQuota(tx, await quotaOwnerForComputer(tx, input.computerId));
       await assertComputerQuotaForRestore(tx, input);
     }
     await tx.bot.update({ where: { id: input.botId }, data: { archivedAt: null } });
@@ -200,7 +211,8 @@ async function ensureComputerRecordWithQuota(
   limit: number,
   scopeKey: string,
 ) {
-  await lockUserForComputerQuota(tx, input.userId);
+  const owner = await spaceOwnerUserId(tx, input.spaceId);
+  await lockOwnerForComputerQuota(tx, owner);
   // Only a new row consumes quota: the upsert below reuses the existing team
   // computer on every bot created in that space, and reusing it with the count
   // already at the cap would wrongly refuse a second bot on a shared computer.
@@ -217,7 +229,7 @@ async function ensureComputerRecordWithQuota(
     // bot to the new dedicated one; setBotComputer switches the same way).
     // References from other active bots still count: a team computer another
     // live bot keeps using stays in-use after the re-link.
-    const inUse = await countInUseComputersForUser(tx, input.userId, input.botId);
+    const inUse = await countInUseComputersForOwner(tx, owner, input.botId);
     // The new row itself will be referenced by this bot after the link, so
     // the post-transaction set is one more than the remaining live set.
     if (inUse + 1 > limit) throw new ComputerLimitError(limit);
@@ -243,8 +255,8 @@ export async function ensureComputerRecord(
   const scopeKey = computerScopeKey(input.mode, input.spaceId, input.botId);
   if (limit <= 0) return upsertComputerRecord(prisma, input, scopeKey);
 
-  // Cap is set: hold a per-user advisory lock across find + count + create so
-  // concurrent creates for different spaces cannot both pass the check.
+  // Cap is set: hold a per-owner advisory lock across find + count + create so
+  // concurrent creates in different spaces of one owner cannot both pass the check.
   if (isTransactionClient(prisma)) {
     return ensureComputerRecordWithQuota(prisma, input, limit, scopeKey);
   }

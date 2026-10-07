@@ -16,12 +16,7 @@ describe("run connection selection", () => {
     } as unknown as PrismaClient;
     const liveSlugs = ["gmail", "slack"];
 
-    await persistLivePluginConnections(
-      prisma,
-      { userId: "user", spaceId: "space" },
-      rows,
-      liveSlugs,
-    );
+    await persistLivePluginConnections(prisma, { spaceId: "space" }, rows, liveSlugs);
 
     expect(rows.map((row) => row.status)).toEqual(["connected", "revoked", "revoked", "revoked"]);
     expect(
@@ -45,9 +40,7 @@ describe("run connection selection", () => {
     const prisma = {
       connection: { updateMany: vi.fn().mockRejectedValue(new Error("database unavailable")) },
     } as unknown as PrismaClient;
-    await persistLivePluginConnections(prisma, { userId: "user", spaceId: "space" }, rows, [
-      "slack",
-    ]);
+    await persistLivePluginConnections(prisma, { spaceId: "space" }, rows, ["slack"]);
     expect(prisma.connection.updateMany).not.toHaveBeenCalled();
     expect(rows[0]?.status).toBe("revoked");
     expect(selectRunConnections(rows, ["slack"])).toEqual([]);
@@ -99,9 +92,7 @@ describe("run connection selection", () => {
       connection: { updateMany: vi.fn().mockResolvedValue({ count: 0 }) },
     } as unknown as PrismaClient;
 
-    await persistLivePluginConnections(prisma, { userId: "user", spaceId: "space" }, rows, [
-      "gmail",
-    ]);
+    await persistLivePluginConnections(prisma, { spaceId: "space" }, rows, ["gmail"]);
 
     expect(prisma.connection.updateMany).not.toHaveBeenCalled();
     expect(oldAccount.status).toBe("revoked");

@@ -308,6 +308,7 @@ describe("createMessagingInboundHandler DM routing", () => {
       threadId: "thread-1",
       botId: "bot-1",
       userId: "user-1",
+      authorUserId: "user-1",
       blocks: [{ kind: "text", text: "hello bot" }],
       prompt: "hello bot",
       trigger: "messaging",

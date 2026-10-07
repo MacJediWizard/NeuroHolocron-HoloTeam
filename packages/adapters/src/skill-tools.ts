@@ -87,7 +87,7 @@ export async function listAgentSkillRecords(
   owner: SkillOwner,
 ): Promise<Array<SkillRecord & { id: string }>> {
   const rows = await prisma.agentSkill.findMany({
-    where: { spaceId: owner.spaceId, userId: owner.userId },
+    where: { spaceId: owner.spaceId },
     orderBy: [{ name: "asc" }, { id: "asc" }],
   });
   return mergeBuiltinSkills(builtinRecords(), rows.map(toRecord));
@@ -246,7 +246,6 @@ export async function skillUpdateFromTool(
       where: {
         id: existing.id,
         spaceId: owner.spaceId,
-        userId: owner.userId,
         source: "user",
       },
       data: {
@@ -276,7 +275,6 @@ export async function skillDeleteFromTool(
     where: {
       id: existing.id,
       spaceId: owner.spaceId,
-      userId: owner.userId,
       source: "user",
     },
   });

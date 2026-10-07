@@ -88,6 +88,7 @@ const ApiConfigSchema = z.object({
 type ApiOperation = z.infer<typeof ApiOperationSchema>;
 type InstalledRow = {
   id: string;
+  userId: string;
   kind: string;
   name: string;
   source: string;
@@ -107,14 +108,15 @@ export class InstalledConnectorProvider implements ConnectorProvider {
     private readonly allowPrivateEndpoint = false,
   ) {}
 
-  /** Decided per request from the install owner's current standing, so an install saved
-   * before an ownership change cannot keep reaching private endpoints. */
-  private async remoteFor(context: AdapterContext): Promise<RemoteRequestPolicy> {
+  /** Decided per request from the install creator's current standing, so an install saved
+   * before an ownership change cannot keep reaching private endpoints, and any Space
+   * member's run reaches what the creator was allowed to add. */
+  private async remoteFor(install: Pick<InstalledRow, "userId">): Promise<RemoteRequestPolicy> {
     return {
       ...this.remote,
       allowPrivateEndpoint: await actorMayUsePrivateEndpoint(
         this.prisma,
-        context.userId,
+        install.userId,
         this.allowPrivateEndpoint,
       ),
     };
@@ -148,21 +150,14 @@ export class InstalledConnectorProvider implements ConnectorProvider {
     const installs = await this.prisma.capabilityInstall.findMany({
       where: {
         spaceId: context.spaceId,
-        userId: context.userId,
         kind: { in: ["mcp", "api", "graphql"] },
       },
       orderBy: { createdAt: "asc" },
     });
-    // Only MCP installs reach the network during discovery.
-    const remote = installs.some((install) => install.kind === "mcp")
-      ? await this.remoteFor(context)
-      : this.remote;
     const tools: ConnectorTool[] = [];
     for (let offset = 0; offset < installs.length; offset += 4) {
       const groups = await Promise.all(
-        installs
-          .slice(offset, offset + 4)
-          .map((install) => this.discoverInstall(install, context, remote)),
+        installs.slice(offset, offset + 4).map((install) => this.discoverInstall(install, context)),
       );
       tools.push(...groups.flat());
     }
@@ -172,13 +167,16 @@ export class InstalledConnectorProvider implements ConnectorProvider {
   private async discoverInstall(
     install: InstalledRow,
     context: AdapterContext,
-    remote: RemoteRequestPolicy,
   ): Promise<ConnectorTool[]> {
     const catalogGroup = catalogGroupLabel(install.name, install.kind, install.id);
     try {
+      // Only MCP installs reach the network during discovery.
       if (install.kind === "mcp") {
         const config = McpConfigSchema.parse(install.config);
-        const credential = await this.loadCredential(install, context);
+        const [credential, remote] = await Promise.all([
+          this.loadCredential(install, context),
+          this.remoteFor(install),
+        ]);
         const tools = await listRemoteMcpTools({
           ...remote,
           endpoint: install.source,
@@ -260,7 +258,6 @@ export class InstalledConnectorProvider implements ConnectorProvider {
       where: {
         id: installId,
         spaceId: context.spaceId,
-        userId: context.userId,
         kind: { in: ["mcp", "api", "graphql"] },
       },
     });
@@ -271,7 +268,7 @@ export class InstalledConnectorProvider implements ConnectorProvider {
     let credential: string | undefined;
     try {
       credential = await this.loadCredential(install, context);
-      const remote = await this.remoteFor(context);
+      const remote = await this.remoteFor(install);
       if (install.kind === "mcp") {
         const config = McpConfigSchema.parse(install.config);
         const result = await callRemoteMcpTool(
@@ -346,7 +343,6 @@ export class InstalledConnectorProvider implements ConnectorProvider {
       where: {
         id: install.secretId,
         spaceId: context.spaceId,
-        userId: context.userId,
       },
     });
     return row ? this.secrets.load(row.ciphertext, row.id) : undefined;

@@ -17,17 +17,7 @@ function agentSecretDto(row: { id: string; name: string; createdAt: Date; update
   };
 }
 
-async function requireSpaceOwner(prisma: PrismaClient, actor: Actor): Promise<void> {
-  const membership = await prisma.spaceMember.findUnique({
-    where: { spaceId_userId: { spaceId: actor.spaceId, userId: actor.userId } },
-    select: { role: true },
-  });
-  const roles = membership?.role.split(",").map((role) => role.trim());
-  if (!roles?.includes("owner")) throw new ORPCError("FORBIDDEN");
-}
-
 export async function listAgentSecrets(deps: AgentSecretDeps, actor: Actor) {
-  await requireSpaceOwner(deps.prisma, actor);
   const rows = await deps.prisma.agentSecret.findMany({
     where: { spaceId: actor.spaceId },
     orderBy: [{ name: "asc" }],
@@ -42,7 +32,6 @@ export async function putAgentSecret(
   input: { name: string; value: string },
   signal = new AbortController().signal,
 ) {
-  await requireSpaceOwner(deps.prisma, actor);
   const stored = await deps.secrets.put(input.value, {
     operationId: `agent-secret:${input.name}`,
     traceId: `agent-secret:${input.name}`,
@@ -98,7 +87,6 @@ export async function deleteAgentSecret(
   actor: Actor,
   id: string,
 ): Promise<{ ok: true }> {
-  await requireSpaceOwner(deps.prisma, actor);
   await withTransactionRetry(() =>
     deps.prisma.$transaction(
       async (tx) => {

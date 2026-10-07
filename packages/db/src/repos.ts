@@ -100,12 +100,12 @@ function mapBot(
 
 export function createRepos(prisma: PrismaClient) {
   async function listBotSectionsForSpaces(
-    actor: Actor,
+    _actor: Actor,
     spaceIds: string[],
   ): Promise<Array<BotSection & { spaceId: string }>> {
     if (spaceIds.length === 0) return [];
     const sections = await prisma.botSection.findMany({
-      where: { spaceId: { in: spaceIds }, userId: actor.userId },
+      where: { spaceId: { in: spaceIds } },
       orderBy: [{ position: "asc" }, { createdAt: "asc" }],
     });
     return sections.map((section) => ({
@@ -118,12 +118,11 @@ export function createRepos(prisma: PrismaClient) {
     }));
   }
 
-  async function listSpaceBotsForSpaces(actor: Actor, spaceIds: string[]): Promise<SpaceBot[]> {
+  async function listSpaceBotsForSpaces(_actor: Actor, spaceIds: string[]): Promise<SpaceBot[]> {
     if (spaceIds.length === 0) return [];
     const bots = await prisma.bot.findMany({
       where: {
         spaceId: { in: spaceIds },
-        userId: actor.userId,
         archivedAt: null,
       },
       select: {
@@ -189,7 +188,6 @@ export function createRepos(prisma: PrismaClient) {
               where: {
                 id: input.botId,
                 spaceId: actor.spaceId,
-                userId: actor.userId,
                 archivedAt: null,
               },
               select: { id: true },
@@ -198,7 +196,6 @@ export function createRepos(prisma: PrismaClient) {
               where: {
                 id: input.groupId,
                 spaceId: actor.spaceId,
-                userId: actor.userId,
                 archivedAt: null,
               },
               select: { id: true },
@@ -206,7 +203,7 @@ export function createRepos(prisma: PrismaClient) {
         if (!target) throw new IsolationError();
 
         const aggregate = await tx.botSection.aggregate({
-          where: { spaceId: actor.spaceId, userId: actor.userId },
+          where: { spaceId: actor.spaceId },
           _max: { position: true },
         });
         await tx.botSection.createMany({
@@ -220,11 +217,7 @@ export function createRepos(prisma: PrismaClient) {
         });
         const section = await tx.botSection.findUniqueOrThrow({
           where: {
-            spaceId_userId_name: {
-              spaceId: actor.spaceId,
-              userId: actor.userId,
-              name,
-            },
+            spaceId_name: { spaceId: actor.spaceId, name },
           },
         });
         if (input.botId) {
@@ -250,7 +243,6 @@ export function createRepos(prisma: PrismaClient) {
         where: {
           id: input.sectionId,
           spaceId: actor.spaceId,
-          userId: actor.userId,
         },
       });
       if (!existing) throw new IsolationError();
@@ -285,7 +277,6 @@ export function createRepos(prisma: PrismaClient) {
       const bots = await prisma.bot.findMany({
         where: {
           spaceId: actor.spaceId,
-          userId: actor.userId,
           archivedAt: options.archived ? { not: null } : null,
         },
         include: {
@@ -364,7 +355,6 @@ export function createRepos(prisma: PrismaClient) {
         where: {
           id: botId,
           spaceId: actor.spaceId,
-          userId: actor.userId,
           ...(options.includeArchived ? {} : { archivedAt: null }),
         },
         include: { thread: true, computer: true },
@@ -397,9 +387,7 @@ export function createRepos(prisma: PrismaClient) {
     ): Promise<Bot> {
       let color = input.color;
       if (color === undefined) {
-        const count = await prisma.bot.count({
-          where: { spaceId: actor.spaceId, userId: actor.userId },
-        });
+        const count = await prisma.bot.count({ where: { spaceId: actor.spaceId } });
         color = BOT_COLORS[count % BOT_COLORS.length] ?? BOT_COLORS[0];
       }
       let modelProvider = input.modelProvider ?? null;
@@ -410,7 +398,6 @@ export function createRepos(prisma: PrismaClient) {
           where: {
             id: input.parentBotId,
             spaceId: actor.spaceId,
-            userId: actor.userId,
           },
         });
         if (!parent) throw new IsolationError();
@@ -431,7 +418,7 @@ export function createRepos(prisma: PrismaClient) {
             userId: actor.userId,
           });
           const positions = await tx.bot.aggregate({
-            where: { spaceId: actor.spaceId, userId: actor.userId },
+            where: { spaceId: actor.spaceId },
             _max: { position: true },
           });
           const teamComputer = await ensureComputerRecord(tx, {
@@ -524,7 +511,7 @@ export function createRepos(prisma: PrismaClient) {
       } catch (error) {
         if (!input.spawnKey || !isSpawnKeyConflict(error)) throw error;
         const existing = await findBySpawnKey();
-        if (!existing || existing.userId !== actor.userId) throw error;
+        if (!existing) throw error;
         if (!existing.archivedAt) {
           bot = existing;
         } else {
@@ -539,7 +526,7 @@ export function createRepos(prisma: PrismaClient) {
           } catch (retryError) {
             if (!isSpawnKeyConflict(retryError)) throw retryError;
             const winner = await findBySpawnKey();
-            if (!winner || winner.userId !== actor.userId || winner.archivedAt) throw retryError;
+            if (!winner || winner.archivedAt) throw retryError;
             bot = winner;
           }
         }
@@ -552,7 +539,6 @@ export function createRepos(prisma: PrismaClient) {
         const bots = await tx.bot.findMany({
           where: {
             spaceId: actor.spaceId,
-            userId: actor.userId,
             archivedAt: null,
           },
           select: { id: true },
@@ -570,7 +556,7 @@ export function createRepos(prisma: PrismaClient) {
 
     async setBotComputer(actor: Actor, botId: string, mode: ComputerMode): Promise<Bot> {
       const bot = await prisma.bot.findFirst({
-        where: { id: botId, spaceId: actor.spaceId, userId: actor.userId },
+        where: { id: botId, spaceId: actor.spaceId },
         include: { computer: true },
       });
       if (!bot?.computer) throw new IsolationError();

@@ -1,17 +1,23 @@
 import type { PrismaClient } from "./client.js";
 import { newestCredentialOrder } from "./model-credentials.js";
+import { ownerScope } from "./scope.js";
 
 export const newestVoiceCredentialOrder = newestCredentialOrder;
 
+/**
+ * Any member's scope. Voice credentials and the Space's voice choice live on the
+ * Space owner's account, so every function below swaps in the owner's userId.
+ */
 type VoiceCredentialScope = { userId: string; spaceId: string };
 
 export async function selectSpaceVoicePreference(
-  prisma: Pick<PrismaClient, "spaceVoicePreference">,
-  scope: VoiceCredentialScope,
+  prisma: Pick<PrismaClient, "spaceVoicePreference" | "spaceMember">,
+  memberScope: VoiceCredentialScope,
   credentialId: string,
   voiceId: string,
   speechModel?: string | null,
 ) {
+  const scope = await ownerScope(prisma, memberScope);
   await prisma.spaceVoicePreference.updateMany({
     where: {
       spaceId: scope.spaceId,
@@ -67,8 +73,9 @@ function withVoicePreference<
 
 export async function findDefaultVoiceCredential(
   prisma: PrismaClient,
-  scope: VoiceCredentialScope,
+  memberScope: VoiceCredentialScope,
 ) {
+  const scope = await ownerScope(prisma, memberScope);
   const preference = await prisma.spaceVoicePreference.findFirst({
     where: { spaceId: scope.spaceId, userId: scope.userId, isDefault: true },
     include: { credential: true },
@@ -90,9 +97,10 @@ export function findNewestUserVoiceCredential(
 
 export async function findVoiceCredential(
   prisma: PrismaClient,
-  scope: VoiceCredentialScope,
+  memberScope: VoiceCredentialScope,
   provider: string,
 ) {
+  const scope = await ownerScope(prisma, memberScope);
   const preference = await prisma.spaceVoicePreference.findFirst({
     where: {
       spaceId: scope.spaceId,

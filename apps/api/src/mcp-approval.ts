@@ -47,14 +47,13 @@ async function threadsForDecision(
     where: {
       id: input.threadId,
       spaceId: actor.spaceId,
-      userId: actor.userId,
       OR: [{ botId: input.botId }, { group: { members: { some: { botId: input.botId } } } }],
     },
     select: { id: true, botId: true },
   });
   if (member.length > 0) return member;
   // A bot removed from a group leaves its card behind. The bot still has to
-  // belong to this actor; the fallback never opens another bot's direct chat.
+  // belong to this Space; the fallback never opens another bot's direct chat.
   try {
     await requireBotThread(deps, actor, input.botId);
   } catch (error) {
@@ -65,7 +64,6 @@ async function threadsForDecision(
     where: {
       id: input.threadId,
       spaceId: actor.spaceId,
-      userId: actor.userId,
       groupId: { not: null },
     },
     select: { id: true, botId: true },
@@ -82,7 +80,6 @@ async function threadsForBot(
   return db.thread.findMany({
     where: {
       spaceId: actor.spaceId,
-      userId: actor.userId,
       OR: [{ botId }, { groupId: { not: null }, messages: { some: { botId } } }],
     },
     select: { id: true, botId: true },
@@ -210,7 +207,7 @@ async function closeServerCards(
 ): Promise<ThreadSeq[]> {
   const messages = await client.message.findMany({
     where: {
-      thread: { spaceId: actor.spaceId, userId: actor.userId },
+      thread: { spaceId: actor.spaceId },
       blocks: { array_contains: [{ kind: "mcp_approval", serverId }] },
     },
     select: {

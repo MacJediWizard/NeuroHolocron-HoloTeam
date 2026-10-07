@@ -316,6 +316,8 @@ export class StoredMcpOAuthProvider implements OAuthClientProvider {
 
 type Pending = {
   serverId: string;
+  /** Creator of the server; their standing gates private endpoints. */
+  serverUserId: string;
   spaceId: string;
   userId: string;
   endpoint: string;
@@ -510,7 +512,6 @@ export class McpOAuthBroker {
       where: {
         id: input.serverId,
         spaceId: input.spaceId,
-        userId: input.userId,
         enabled: true,
       },
     });
@@ -550,7 +551,7 @@ export class McpOAuthBroker {
       server.endpoint,
       this.network,
       loaded.material,
-      await actorMayUsePrivateEndpoint(this.prisma, input.userId, this.allowPrivateEndpoint),
+      await actorMayUsePrivateEndpoint(this.prisma, server.userId, this.allowPrivateEndpoint),
     );
     const transport = new StreamableHTTPClientTransport(endpoint, {
       requestInit: { headers: networkFetch.headers },
@@ -607,6 +608,7 @@ export class McpOAuthBroker {
     expiry.unref?.();
     this.pending.set(sessionId, {
       serverId: server.id,
+      serverUserId: server.userId,
       spaceId: input.spaceId,
       userId: input.userId,
       endpoint: server.endpoint,
@@ -650,7 +652,6 @@ export class McpOAuthBroker {
         where: {
           id: session.serverId,
           spaceId: input.spaceId,
-          userId: input.userId,
           enabled: true,
         },
       });
@@ -662,6 +663,7 @@ export class McpOAuthBroker {
       };
       pending = {
         serverId: server.id,
+        serverUserId: server.userId,
         spaceId: input.spaceId,
         userId: input.userId,
         endpoint: session.endpoint,
@@ -690,7 +692,11 @@ export class McpOAuthBroker {
       pending.endpoint,
       this.network,
       {},
-      await actorMayUsePrivateEndpoint(this.prisma, pending.userId, this.allowPrivateEndpoint),
+      await actorMayUsePrivateEndpoint(
+        this.prisma,
+        pending.serverUserId,
+        this.allowPrivateEndpoint,
+      ),
     );
     const transport = new StreamableHTTPClientTransport(endpoint, {
       authProvider: pending.provider,
@@ -731,11 +737,11 @@ export class McpOAuthBroker {
 
   async disconnect(input: { serverId: string; spaceId: string; userId: string }): Promise<void> {
     const server = await this.prisma.mcpServer.findFirst({
-      where: { id: input.serverId, spaceId: input.spaceId, userId: input.userId },
+      where: { id: input.serverId, spaceId: input.spaceId },
     });
     if (!server?.secretId) return;
     const row = await this.prisma.secret.findFirst({
-      where: { id: server.secretId, spaceId: input.spaceId, userId: input.userId },
+      where: { id: server.secretId, spaceId: input.spaceId },
     });
     if (!row) return;
     const material = this.read(row.ciphertext, row.id);
@@ -749,7 +755,7 @@ export class McpOAuthBroker {
   ): Promise<{ material: OAuthMaterial; secretId?: string }> {
     if (!server.secretId) return { material: {} };
     const row = await this.prisma.secret.findFirst({
-      where: { id: server.secretId, spaceId: context.spaceId, userId: context.userId },
+      where: { id: server.secretId, spaceId: context.spaceId },
     });
     return row
       ? { material: this.read(row.ciphertext, row.id), secretId: row.id }
@@ -788,7 +794,6 @@ export class McpOAuthBroker {
         where: {
           id: serverId,
           spaceId: context.spaceId,
-          userId: context.userId,
         },
         select: { endpoint: true, secretId: true },
       });
@@ -801,7 +806,6 @@ export class McpOAuthBroker {
             where: {
               id: server.secretId,
               spaceId: context.spaceId,
-              userId: context.userId,
             },
           })
         : null;
