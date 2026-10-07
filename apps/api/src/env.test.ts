@@ -35,6 +35,38 @@ describe("loadEnv", () => {
     expect(env.wakeupDriver).toBe("memory");
   });
 
+  it("leaves OIDC off and password sign-in on by default", () => {
+    const env = loadEnv(base);
+    expect(env.oidc).toBeUndefined();
+    expect(env.passwordAuth).toBe(true);
+  });
+
+  it("loads an OIDC provider and lets it replace password sign-in", () => {
+    const oidc = {
+      OIDC_ISSUER: "https://id.example.test/application/o/app/",
+      OIDC_CLIENT_ID: "client",
+      OIDC_CLIENT_SECRET: "secret",
+    };
+    expect(loadEnv({ ...base, ...oidc }).oidc).toEqual({
+      issuer: oidc.OIDC_ISSUER,
+      clientId: "client",
+      clientSecret: "secret",
+      name: "SSO",
+    });
+    const env = loadEnv({ ...base, ...oidc, OIDC_NAME: "Company", AUTH_PASSWORD_ENABLED: "false" });
+    expect(env.oidc?.name).toBe("Company");
+    expect(env.passwordAuth).toBe(false);
+  });
+
+  it("refuses a partial OIDC provider and a deployment nobody can sign in to", () => {
+    expect(() => loadEnv({ ...base, OIDC_ISSUER: "https://id.example.test/" })).toThrow(
+      "must be set together",
+    );
+    expect(() => loadEnv({ ...base, AUTH_PASSWORD_ENABLED: "false" })).toThrow(
+      "nobody can sign in",
+    );
+  });
+
   it("loads an optional integrations catalog mirror", () => {
     expect(loadEnv(base).integrationsCatalogUrl).toBeUndefined();
     expect(

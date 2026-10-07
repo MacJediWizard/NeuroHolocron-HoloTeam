@@ -13,6 +13,19 @@ import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { APIError, createAuthMiddleware } from "better-auth/api";
 import { bearer, organization } from "better-auth/plugins";
+import { genericOAuth } from "better-auth/plugins/generic-oauth";
+
+/** Provider id of the operator's OpenID Connect identity provider. */
+export const OIDC_PROVIDER_ID = "oidc";
+
+export interface OidcProvider {
+  /** Issuer URL; discovery is read from `<issuer>/.well-known/openid-configuration`. */
+  issuer: string;
+  clientId: string;
+  clientSecret: string;
+  /** Button label, e.g. the identity provider's name. */
+  name: string;
+}
 
 export interface AuthEnv {
   secret: string;
@@ -20,6 +33,10 @@ export interface AuthEnv {
   webOrigin: string;
   signupsEnabled: string | undefined;
   signupAllowlist: string | undefined;
+  /** Operator identity provider. Its users skip the signup policy: the provider decides who gets in. */
+  oidc?: OidcProvider;
+  /** Email and password sign-in and sign-up. Default on. */
+  passwordAuth?: boolean;
   extraOrigins?: string[];
   email?: TransactionalEmailProvider;
   onEmailError?: (error: unknown) => void;
@@ -225,8 +242,11 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     trustedOrigins: buildTrustedOrigins(env),
     rateLimit: authRateLimitOptions(),
     database: prismaAdapter(prisma, { provider: "postgresql" }),
+    // The operator's identity provider vouches for its email, so its sign-in
+    // may join an existing account with that address.
+    account: env.oidc ? { accountLinking: { trustedProviders: [OIDC_PROVIDER_ID] } } : undefined,
     emailAndPassword: {
-      enabled: true,
+      enabled: env.passwordAuth !== false,
       // Signup policy is mutable deployment state, so the request hook below
       // enforces it instead of freezing an environment value at process start.
       disableSignUp: false,
@@ -298,6 +318,7 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
         disableOrganizationDeletion: true,
         creatorRole: "owner",
       }),
+      ...(env.oidc ? [oidcPlugin(env.oidc)] : []),
     ],
     hooks: {
       before: createAuthMiddleware(async (ctx) => {
@@ -410,7 +431,17 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
             // deployment owner. Bootstrap only at the first admitted session.
             const membership = await prisma.spaceMember.findFirst({ where: { userId: user.id } });
             if (!membership) {
-              if (!policy.enabled || !emailAllowed(user.email, policy.allowlist)) {
+              // The identity provider already decided this user may sign in.
+              const admittedByProvider =
+                env.oidc && ctx
+                  ? (await ctx.context.internalAdapter.findAccounts(user.id)).some(
+                      (account) => account.providerId === OIDC_PROVIDER_ID,
+                    )
+                  : false;
+              if (
+                !admittedByProvider &&
+                (!policy.enabled || !emailAllowed(user.email, policy.allowlist))
+              ) {
                 throw new APIError("FORBIDDEN", { message: "Registration is closed" });
               }
               await bootstrapUserSpace(prisma, user, env);
@@ -435,6 +466,26 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
         },
       },
     },
+  });
+}
+
+function oidcPlugin(provider: OidcProvider) {
+  const issuer = provider.issuer.endsWith("/") ? provider.issuer : `${provider.issuer}/`;
+  return genericOAuth({
+    config: [
+      {
+        providerId: OIDC_PROVIDER_ID,
+        name: provider.name,
+        discoveryUrl: new URL(".well-known/openid-configuration", issuer).href,
+        clientId: provider.clientId,
+        clientSecret: provider.clientSecret,
+        scopes: ["openid", "email", "profile"],
+        pkce: true,
+        // The operator runs this provider; providers differ on whether they
+        // send email_verified at all.
+        mapProfileToUser: () => ({ emailVerified: true }),
+      },
+    ],
   });
 }
 
