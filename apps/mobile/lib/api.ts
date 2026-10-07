@@ -473,7 +473,13 @@ export function signUp(email: string, password: string, name: string) {
   return authenticateWithEmail("sign-up", { email, password, name });
 }
 
-export type PasswordResetCapabilities = { passwordReset: boolean; resetUrl: string | null };
+export type PasswordResetCapabilities = {
+  passwordReset: boolean;
+  resetUrl: string | null;
+  /** False when the server only allows single sign-on. Older servers omit it. */
+  passwordAuth?: boolean;
+  sso?: { providerId: string; name: string } | null;
+};
 
 export async function passwordResetCapabilities(): Promise<PasswordResetCapabilities> {
   const { response, body } = await fetchMobileJson<PasswordResetCapabilities>(

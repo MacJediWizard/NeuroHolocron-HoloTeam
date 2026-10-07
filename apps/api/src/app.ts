@@ -68,7 +68,13 @@ import {
   stripeBillingConfigFromEnv,
   toTeamChatInbound,
 } from "@rakazo/adapters";
-import { createAuth, isBlockedAuthPath, loopbackTwinOrigins, OIDC_PROVIDER_ID } from "@rakazo/auth";
+import {
+  createAuth,
+  isBlockedAuthPath,
+  loopbackTwinOrigins,
+  OIDC_PROVIDER_ID,
+  oidcRegistered,
+} from "@rakazo/auth";
 import type { Actor } from "@rakazo/contracts";
 import { signupAllowlistBootUpdate, signupPolicyFromEnv } from "@rakazo/core";
 import type { Pool, PrismaClient } from "@rakazo/db";
@@ -561,12 +567,21 @@ export async function createApp(
       credentials: true,
     }),
   );
+  const sso =
+    env.oidc && (await oidcRegistered(auth))
+      ? { providerId: OIDC_PROVIDER_ID, name: env.oidc.name }
+      : null;
+  if (env.oidc && !sso) {
+    // Restarting retries discovery; an SSO-only server would otherwise run with no sign-in.
+    if (!env.passwordAuth) throw new Error("OIDC discovery failed and password sign-in is off");
+    getLogger().error("OIDC discovery failed; single sign-on is unavailable until restart");
+  }
   app.get("/api/auth/capabilities", (c) =>
     c.json({
       passwordAuth: env.passwordAuth,
       passwordReset: env.passwordAuth && Boolean(email),
       resetUrl: env.passwordAuth && email ? new URL("/reset-password", env.webOrigin).href : null,
-      sso: env.oidc ? { providerId: OIDC_PROVIDER_ID, name: env.oidc.name } : null,
+      sso,
       billing: Boolean(billing),
     }),
   );

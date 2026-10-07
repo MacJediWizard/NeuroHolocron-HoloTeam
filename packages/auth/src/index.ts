@@ -250,7 +250,18 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
     database: prismaAdapter(prisma, { provider: "postgresql" }),
     // The operator's identity provider vouches for its email, so its sign-in
     // may join an existing account with that address.
-    account: env.oidc ? { accountLinking: { trustedProviders: [OIDC_PROVIDER_ID] } } : undefined,
+    account: env.oidc
+      ? {
+          accountLinking: {
+            trustedProviders: [OIDC_PROVIDER_ID],
+            // Better Auth will not link into an account whose email was never
+            // verified, so whoever registered the address first cannot inherit
+            // the sign-in. Without password sign-in that registration has no way
+            // in, and installs without email never verify anyone.
+            requireLocalEmailVerified: env.passwordAuth !== false,
+          },
+        }
+      : undefined,
     emailAndPassword: {
       enabled: env.passwordAuth !== false,
       // Signup policy is mutable deployment state, so the request hook below
@@ -464,6 +475,20 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
           },
         },
       },
+      account: {
+        create: {
+          after: async (account, ctx) => {
+            if (env.passwordAuth !== false || account.providerId !== OIDC_PROVIDER_ID || !ctx) {
+              return;
+            }
+            // Joining an unverified account: end sessions its earlier owner may hold.
+            const user = await ctx.context.internalAdapter.findUserById(account.userId);
+            if (user && !user.emailVerified) {
+              await ctx.context.internalAdapter.deleteUserSessions(account.userId);
+            }
+          },
+        },
+      },
       user: {
         create: {
           before: async (user) => {
@@ -482,6 +507,12 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
       },
     },
   });
+}
+
+/** Better Auth skips a provider whose discovery failed at startup. */
+export async function oidcRegistered(auth: ReturnType<typeof createAuth>): Promise<boolean> {
+  const context = await auth.$context;
+  return context.socialProviders.some((provider) => provider.id === OIDC_PROVIDER_ID);
 }
 
 function oidcPlugin(provider: OidcProvider) {
