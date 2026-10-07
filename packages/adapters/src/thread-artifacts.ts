@@ -110,6 +110,54 @@ export async function attachWorkspaceFileToThread(
   };
 }
 
+/** Remove artifacts created for a message that was never delivered. */
+export async function discardThreadArtifacts(
+  deps: {
+    prisma: PrismaClient;
+    artifacts: ArtifactStore;
+  },
+  input: {
+    spaceId: string;
+    userId: string;
+    botId: string;
+    operationId: string;
+    artifactIds: readonly string[];
+  },
+): Promise<void> {
+  if (!input.artifactIds.length) return;
+  const rows = await deps.prisma.artifact.findMany({
+    where: { id: { in: [...input.artifactIds] }, spaceId: input.spaceId },
+    select: { id: true, storageKey: true },
+  });
+  const context = {
+    operationId: input.operationId,
+    traceId: input.operationId,
+    spaceId: input.spaceId,
+    userId: input.userId,
+    botId: input.botId,
+    signal: new AbortController().signal,
+  };
+  // Remove the stored bytes first and drop only the rows whose bytes are gone,
+  // so a failed removal never leaves storage without a row that points at it.
+  const removed = await Promise.all(
+    rows.map((row) =>
+      deps.artifacts.remove(row.storageKey, context).then(
+        () => row.id,
+        () => undefined,
+      ),
+    ),
+  );
+  const removedIds = removed.filter((id): id is string => Boolean(id));
+  if (removedIds.length) {
+    await deps.prisma.artifact.deleteMany({
+      where: { id: { in: removedIds }, spaceId: input.spaceId },
+    });
+  }
+  if (removedIds.length < rows.length) {
+    throw new Error("could not remove every stored file for an undelivered message");
+  }
+}
+
 export async function materializeCurrentTurnFiles(
   deps: {
     prisma: PrismaClient;

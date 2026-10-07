@@ -134,6 +134,73 @@ describe("messaging another bot", () => {
     expect(harness.enqueue).toHaveBeenCalledTimes(1);
   });
 
+  it("sends attached files to the recipient with the message", async () => {
+    const harness = deps();
+    const image = {
+      kind: "image" as const,
+      artifactId: "artifact-1",
+      mimeType: "image/png",
+      name: "hero.png",
+    };
+    const discard = vi.fn().mockResolvedValue(undefined);
+    const sent = await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-target",
+      message: "set this as the featured image",
+      attach: async () => ({ blocks: [image], discard }),
+    });
+
+    expect(sent).toMatchObject({ ok: true });
+    expect(discard).not.toHaveBeenCalled();
+    const created = harness.tx.message.create.mock.calls.map(
+      ([call]) => (call as { data: { threadId: string; blocks: unknown[] } }).data,
+    );
+    expect(created.find((data) => data.threadId === "thread-target")?.blocks).toEqual([
+      expect.objectContaining({ kind: "bot_message_received" }),
+      image,
+    ]);
+    expect(created.find((data) => data.threadId === "thread-sender")?.blocks).toEqual([
+      expect.objectContaining({ kind: "bot_message_sent" }),
+      image,
+    ]);
+  });
+
+  it("stores no files when the target cannot be reached", async () => {
+    const harness = deps();
+    const attach = vi.fn();
+    const sent = await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-missing",
+      message: "set this as the featured image",
+      attach,
+    });
+    expect(sent).toMatchObject({ ok: false });
+    expect(attach).not.toHaveBeenCalled();
+  });
+
+  it("removes stored files when the delivery does not commit", async () => {
+    const harness = deps({ senderRunning: false });
+    const discard = vi.fn().mockResolvedValue(undefined);
+    const sent = await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-target",
+      message: "set this as the featured image",
+      attach: async () => ({ blocks: [], discard }),
+    });
+    expect(sent).toEqual({ ok: false, error: "source run is no longer active" });
+    expect(discard).toHaveBeenCalledTimes(1);
+  });
+
+  it("removes stored files when the delivery was already sent", async () => {
+    const harness = deps({ alreadyDelivered: { id: "message-0" } });
+    const discard = vi.fn().mockResolvedValue(undefined);
+    const sent = await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-target",
+      message: "set this as the featured image",
+      deliveryKey: "effect-1",
+      attach: async () => ({ blocks: [], discard }),
+    });
+    expect(sent).toMatchObject({ ok: true, replayed: true });
+    expect(discard).toHaveBeenCalledTimes(1);
+  });
+
   it("tells the sender to continue independent work", async () => {
     const harness = deps();
     const sent = await messageBot(harness.deps, run, sender, {

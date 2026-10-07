@@ -59,6 +59,11 @@ export async function loadBotMessageContext(
   return { ...context, repliesToRequest };
 }
 
+export type PreparedBotMessageAttachments = {
+  blocks: readonly Extract<MessageBlock, { kind: "image" | "file" }>[];
+  discard: () => Promise<void>;
+};
+
 export async function messageBot(
   deps: Pick<ExecutorDeps, "prisma" | "events" | "jobs">,
   run: {
@@ -76,6 +81,12 @@ export async function messageBot(
     message: string;
     intent?: BotMessageIntent;
     deliveryKey?: string;
+    /**
+     * Stores the files sent with the message; they land on the recipient's
+     * computer like a chat attachment. It runs only once the delivery is known
+     * to be valid, and `discard` removes the files if it does not commit.
+     */
+    attach?: () => Promise<PreparedBotMessageAttachments>;
   },
   options?: { allowTerminalSource?: boolean },
 ) {
@@ -134,6 +145,13 @@ export async function messageBot(
       note: `Already sent to ${target.name} in this turn; it was not sent again.`,
     }) as const;
 
+  const prepared = input.attach ? await input.attach() : undefined;
+  const attachments = prepared?.blocks ?? [];
+  const discardAttachments = async () => {
+    await prepared?.discard().catch((error) => {
+      getLogger().error("bot message attachment cleanup", error);
+    });
+  };
   const wakePrompt = buildBotMessageWakePrompt({ from: sender, text: message, intent });
   const outboundBlock: MessageBlock = {
     kind: "bot_message_sent",
@@ -207,7 +225,7 @@ export async function messageBot(
         const outbound = await createThreadMessageInTransaction(tx, {
           threadId: run.threadId,
           role: "bot",
-          blocks: [outboundBlock],
+          blocks: [outboundBlock, ...attachments],
           botId: run.botId,
           runId: run.id,
           allowCancelledRun: options?.allowTerminalSource === true,
@@ -225,7 +243,7 @@ export async function messageBot(
         const inbound = await createThreadMessageInTransaction(tx, {
           threadId: targetThreadId,
           role: "user",
-          blocks: [inboundBlock],
+          blocks: [inboundBlock, ...attachments],
           replyToMessageId:
             sourceContext?.fromBotId === target.id && intent !== "fyi"
               ? sourceContext.returnToMessageId
@@ -263,7 +281,7 @@ export async function messageBot(
           botId: target.id,
           type: "thread.message.created",
           runId: nextRun.id,
-          payload: { messageId: inbound.id, role: "user", blocks: [inboundBlock] },
+          payload: { messageId: inbound.id, role: "user", blocks: [inboundBlock, ...attachments] },
         });
         const outboundEvent = await appendEventInTransaction(tx, {
           spaceId: run.spaceId,
@@ -272,7 +290,7 @@ export async function messageBot(
           type: "thread.message.created",
           runId: run.id,
           allowCancelledRun: options?.allowTerminalSource === true,
-          payload: { messageId: outbound.id, role: "bot", blocks: [outboundBlock] },
+          payload: { messageId: outbound.id, role: "bot", blocks: [outboundBlock, ...attachments] },
         });
         return {
           ok: true as const,
@@ -290,10 +308,15 @@ export async function messageBot(
         where: { threadId_clientNonce: { threadId: targetThreadId, clientNonce: deliveryKey } },
         select: { id: true },
       });
-      if (winner) return replayed();
+      if (winner) {
+        await discardAttachments();
+        return replayed();
+      }
     }
+    await discardAttachments();
     throw error;
   }
+  if ("replayed" in committed || !committed.ok) await discardAttachments();
   if ("replayed" in committed) return replayed();
   if (!committed.ok) return committed;
 

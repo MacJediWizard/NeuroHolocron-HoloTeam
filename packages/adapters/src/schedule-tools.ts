@@ -13,11 +13,25 @@ export { isOneShotRoutineCron, ONCE_ROUTINE_CRON };
 
 export const SCHEDULE_TOOL_NAMES = new Set(["schedule_create", "schedule_list", "schedule_cancel"]);
 
+/** Tools that pause a run until a person acts in this bot's own chat. */
+export const HUMAN_WAIT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "request_takeover",
+  "ask_user",
+  "request_secret",
+]);
+
 export function filterBuiltinToolsForRun<T extends { name: string }>(
   tools: T[],
   runTrigger: string,
 ): T[] {
-  return runTrigger === "routine" ? tools.filter((tool) => tool.name !== "schedule_create") : tools;
+  if (runTrigger === "routine") return tools.filter((tool) => tool.name !== "schedule_create");
+  // Another bot asked for this work and nobody watches this chat while it runs,
+  // so a pause for a person would hold the requester's queue indefinitely. The bot
+  // reports the blocker instead and the requester takes it to the user.
+  if (runTrigger === "bot_message") {
+    return tools.filter((tool) => !HUMAN_WAIT_TOOL_NAMES.has(tool.name));
+  }
+  return tools;
 }
 
 /** Keep cross-bot messaging thread-specific while exposing schedules in DMs and groups. */

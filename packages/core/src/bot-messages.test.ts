@@ -361,6 +361,17 @@ describe("inbound wake prompt", () => {
     expect(resultPrompt).not.toContain("staying silent is fine");
   });
 
+  it("tells a delegated bot to stop and report a blocker that needs a person", () => {
+    expect(prompt).toContain("No person is watching this chat");
+    expect(prompt).toContain("the right path forward");
+    const resultPrompt = buildBotMessageWakePrompt({
+      from: { id: "b_1", name: "Researcher" },
+      text: "Done.",
+      intent: "result",
+    });
+    expect(resultPrompt).not.toContain("No person is watching this chat");
+  });
+
   it("keeps silence available only for an explicit FYI", () => {
     const fyiPrompt = buildBotMessageWakePrompt({
       from: { id: "b_1", name: "Researcher" },

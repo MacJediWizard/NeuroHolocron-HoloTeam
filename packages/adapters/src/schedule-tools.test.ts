@@ -170,6 +170,19 @@ describe("filterBuiltinToolsForThread", () => {
     );
   });
 
+  it("keeps a bot-requested run from waiting on a person nobody is watching for", () => {
+    const humanTools = [
+      { name: "request_takeover" },
+      { name: "ask_user" },
+      { name: "request_secret" },
+      { name: "message_bot" },
+    ];
+    expect(filterBuiltinToolsForRun(humanTools, "bot_message").map((tool) => tool.name)).toEqual([
+      "message_bot",
+    ]);
+    expect(filterBuiltinToolsForRun(humanTools, "user")).toEqual(humanTools);
+  });
+
   it("composes thread then run filters without dropping group schedule tools", () => {
     const groupTools = filterBuiltinToolsForRun(
       filterBuiltinToolsForThread(tools, "group-1"),

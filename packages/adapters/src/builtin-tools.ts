@@ -986,6 +986,13 @@ export const builtinAgentTools: ConnectorTool[] = [
           enum: ["request", "result", "question", "status", "fyi"],
           description: "What the recipient should do with this message. Defaults to request.",
         },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          maxItems: 4,
+          description:
+            "Optional workspace paths of files to send with the message, such as a current-turn attachment (attachments/<id>.png). The recipient gets them on its own computer. Pass the file whenever the recipient needs it; do not describe it or send a link instead.",
+        },
       },
       required: ["message"],
     },
