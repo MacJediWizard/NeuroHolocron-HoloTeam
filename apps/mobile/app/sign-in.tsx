@@ -134,6 +134,8 @@ export default function SignIn() {
   }
 
   const custom = usesCustomApiBase(apiBase);
+  // Single sign-on runs in the browser; the app has no way to receive that session yet.
+  const ssoOnly = reset?.passwordAuth === false;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: tokens.background }}>
@@ -170,7 +172,21 @@ export default function SignIn() {
                       ? t("Sign up for Rakazo")
                       : t("Reset your password")}
               </Text>
-              {resetSent ? (
+              {ssoOnly ? (
+                <Text
+                  accessibilityRole="alert"
+                  style={{
+                    color: tokens.mutedForeground,
+                    fontSize: 15,
+                    marginTop: 28,
+                    textAlign: "center",
+                  }}
+                >
+                  {t("This server signs in with {provider}, which the app does not support yet.", {
+                    provider: reset?.sso?.name ?? t("single sign-on"),
+                  })}
+                </Text>
+              ) : resetSent ? (
                 <View style={{ alignItems: "center", marginTop: 28 }}>
                   <Pressable
                     accessibilityRole="button"

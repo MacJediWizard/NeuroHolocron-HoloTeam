@@ -28,6 +28,8 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   // Signup triggers a session refresh that remounts the anonymous auth page.
   const sent = resetSent || searchParams.get("verify") === "email";
   const [reset, setReset] = useState<AuthCapabilities | null>(null);
+  const [capabilitiesFailed, setCapabilitiesFailed] = useState(false);
+  const [capabilitiesAttempt, setCapabilitiesAttempt] = useState(0);
   // Older servers omit passwordAuth; treat that as enabled.
   const passwordAuth = reset?.passwordAuth !== false;
   const sso = reset?.sso ?? null;
@@ -44,11 +46,15 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
 
   useEffect(() => {
     let active = true;
+    setCapabilitiesFailed(false);
     void fetchAuthCapabilities()
       .then((capabilities) => {
         if (active) setReset(capabilities);
       })
-      .catch(() => undefined);
+      // An SSO-only server is unusable until this loads, so offer a retry.
+      .catch(() => {
+        if (active) setCapabilitiesFailed(true);
+      });
     return () => {
       // Do not abort on unmount: a guard redirect that bounces through this
       // page only mounts it for a render or two, and the cancelled fetch then
@@ -56,7 +62,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
       // keeps its own time bound.
       active = false;
     };
-  }, [mode]);
+  }, [mode, capabilitiesAttempt]);
 
   async function signInWithSso() {
     if (!sso) return;
@@ -140,6 +146,24 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         </div>
       ) : (
         <>
+          {capabilitiesFailed && !reset ? (
+            <div
+              role="alert"
+              className="mb-6 flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm"
+            >
+              <span className="text-muted-foreground">
+                <Trans>Could not load sign-in options</Trans>
+              </span>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => setCapabilitiesAttempt((attempt) => attempt + 1)}
+              >
+                <Trans>Try again</Trans>
+              </Button>
+            </div>
+          ) : null}
           {sso ? (
             <Button
               type="button"

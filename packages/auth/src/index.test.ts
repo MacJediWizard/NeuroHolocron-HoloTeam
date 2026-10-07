@@ -5,6 +5,7 @@ import {
   createAuth,
   isBlockedAuthPath,
   OIDC_PROVIDER_ID,
+  oidcRegistered,
   passwordResetEmail,
   resolveSignupPolicy,
 } from "./index.js";
@@ -244,5 +245,67 @@ describe("operator OIDC provider", () => {
     );
     expect(url.searchParams.get("scope")?.split(" ")).toEqual(["openid", "email", "profile"]);
     expect(url.searchParams.get("code_challenge")).toBeTruthy();
+  });
+
+  it("reports the provider unregistered when discovery fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("connect ECONNREFUSED");
+      }),
+    );
+    const auth = createAuth(prisma as never, {
+      ...baseEnv,
+      oidc: {
+        issuer: "https://id.example.test/",
+        clientId: "client",
+        clientSecret: "secret",
+        name: "SSO",
+      },
+    });
+
+    await expect(oidcRegistered(auth)).resolves.toBe(false);
+  });
+
+  it("links unverified accounts only when password sign-in is off", () => {
+    const oidc = {
+      issuer: "https://id.example.test/",
+      clientId: "c",
+      clientSecret: "s",
+      name: "SSO",
+    };
+    const linking = (passwordAuth: boolean) =>
+      createAuth(prisma as never, { ...baseEnv, oidc, passwordAuth }).options.account
+        ?.accountLinking?.requireLocalEmailVerified;
+
+    expect(linking(true)).toBe(true);
+    expect(linking(false)).toBe(false);
+  });
+
+  it("ends earlier sessions when SSO joins an unverified account", async () => {
+    const oidc = {
+      issuer: "https://id.example.test/",
+      clientId: "c",
+      clientSecret: "s",
+      name: "SSO",
+    };
+    const onAccountCreated = createAuth(prisma as never, { ...baseEnv, oidc, passwordAuth: false })
+      .options.databaseHooks?.account?.create?.after;
+    const contextFor = (emailVerified: boolean) => {
+      const internalAdapter = {
+        findUserById: vi.fn(async () => ({ id: "user", emailVerified })),
+        deleteUserSessions: vi.fn(async () => undefined),
+      };
+      return { internalAdapter, ctx: { context: { internalAdapter } } as never };
+    };
+    const account = { providerId: OIDC_PROVIDER_ID, userId: "user" } as never;
+
+    const unverified = contextFor(false);
+    await onAccountCreated?.(account, unverified.ctx);
+    expect(unverified.internalAdapter.deleteUserSessions).toHaveBeenCalledWith("user");
+
+    const verified = contextFor(true);
+    await onAccountCreated?.(account, verified.ctx);
+    expect(verified.internalAdapter.deleteUserSessions).not.toHaveBeenCalled();
   });
 });

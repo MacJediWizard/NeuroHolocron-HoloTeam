@@ -1366,6 +1366,10 @@ msgstr "Could not load model settings"
 msgid "Could not load run history"
 msgstr "Could not load run history"
 
+#: src/pages/Auth.tsx
+msgid "Could not load sign-in options"
+msgstr "Could not load sign-in options"
+
 #: src/pages/KnowledgeSection.tsx
 msgid "Could not load skill"
 msgstr "Could not load skill"
@@ -4093,6 +4097,7 @@ msgstr "Trial"
 msgid "Trial ends {day}"
 msgstr "Trial ends {day}"
 
+#: src/pages/Auth.tsx
 #: src/pages/Onboarding.tsx
 msgid "Try again"
 msgstr "Try again"
