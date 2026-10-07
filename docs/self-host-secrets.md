@@ -100,8 +100,11 @@ By default, credentials that users save in the app (model keys, MCP and
 webhook secrets, bot credentials, integration settings) are encrypted with
 `ENCRYPTION_KEY` and stored in Postgres. Set `SECRET_STORE=infisical` to keep
 them in an Infisical folder instead, so operators can view, rotate and audit
-them there. Rows then hold an `infisical:<key>` reference; the key name is
-`SECRET_<record id>` and the secret comment says what it is.
+them there. Rows then hold an `infisical:<key>` reference; the key name starts
+with `SECRET_<record id>` and the secret comment says what it is. Each save
+writes a new key, so a save that fails never changes the value in use. To
+rotate a value by hand, edit the key the row references; running sessions
+reconnect with it after the next refresh.
 
 | Key | Value |
 | --- | --- |
@@ -115,7 +118,10 @@ them there. Rows then hold an `infisical:<key>` reference; the key name is
 Give the identity create, edit, delete and read-value access to that folder
 only. The api and worker mirror the folder in memory, reload it every
 refresh interval and whenever any process writes, and fail to start if
-Infisical is unreachable at boot. One-time codes and MCP OAuth sessions stay
+Infisical is unreachable at boot. A failed refresh keeps the last values and
+logs a warning until it recovers. Imported secrets are ignored. The api
+deletes keys no row references once they are an hour old (replaced, failed
+or deleted saves). One-time codes and MCP OAuth sessions stay
 encrypted in Postgres because they are short-lived. `ENCRYPTION_KEY` is still
 required: rows written before the switch keep decrypting with it.
 
@@ -124,10 +130,11 @@ Move existing rows after deploying with the setting on:
 ```bash
 pnpm --filter @rakazo/api secrets:infisical --dry-run   # lists row ids, no values
 pnpm --filter @rakazo/api secrets:infisical             # copies, then swaps each row to a reference
-pnpm --filter @rakazo/api secrets:infisical --prune     # also deletes folder keys no row references
+pnpm --filter @rakazo/api secrets:infisical --prune     # also deletes unreferenced keys over an hour old
 ```
 
-The command is idempotent and prints row ids and labels only. Keep a
+The command is idempotent, safe while the app runs, and prints row ids and
+labels only. Keep a
 database backup from before the first run; a row whose value is deleted
 from Infisical cannot be recovered from Postgres.
 

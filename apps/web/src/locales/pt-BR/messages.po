@@ -1135,7 +1135,7 @@ msgstr ""
 #. placeholder {0}: sso.name
 #: src/pages/Auth.tsx
 msgid "Continue with {0}"
-msgstr ""
+msgstr "Continuar com {0}"
 
 #: src/pages/Auth.tsx
 msgid "Continue with email"
@@ -1365,6 +1365,10 @@ msgstr "Não foi possível carregar as configurações do modelo"
 #: src/pages/RoutineRunHistory.tsx
 msgid "Could not load run history"
 msgstr "Não foi possível carregar o histórico de execuções"
+
+#: src/pages/Auth.tsx
+msgid "Could not load sign-in options"
+msgstr "Não foi possível carregar as opções de login"
 
 #: src/pages/KnowledgeSection.tsx
 msgid "Could not load skill"
@@ -2441,6 +2445,7 @@ msgstr "Carregando provedores de voz..."
 
 #: src/App.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/Onboarding.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -4093,6 +4098,7 @@ msgstr ""
 msgid "Trial ends {day}"
 msgstr ""
 
+#: src/pages/Auth.tsx
 #: src/pages/Onboarding.tsx
 msgid "Try again"
 msgstr "Tentar novamente"

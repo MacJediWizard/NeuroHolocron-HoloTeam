@@ -1,9 +1,6 @@
 import type { PrismaClient } from "@rakazo/db";
-import {
-  type InfisicalSecretStore,
-  infisicalSecretKey,
-  isSecretReference,
-} from "./infisical-secret-store.js";
+import type { InfisicalSecretStore } from "./infisical-secret-store.js";
+import { INFISICAL_REFERENCE_PREFIX, isSecretReference } from "./infisical-secret-store.js";
 import { runSecretKind } from "./run-secret.js";
 
 export interface SecretMigrationReport {
@@ -11,8 +8,9 @@ export interface SecretMigrationReport {
   alreadyReferenced: number;
   /** Rows whose value could not be decrypted with the deployment key. */
   unreadable: string[];
-  /** Infisical keys no row references (deleted rows, interrupted writes). */
+  /** Infisical keys no row references (deleted rows, replaced or interrupted saves). */
   orphaned: string[];
+  /** Orphaned keys removed; recent ones are kept in case their save is still committing. */
   pruned: number;
 }
 
@@ -31,7 +29,8 @@ const RUN_SECRET_PREFIX = runSecretKind("");
 /**
  * Moves every long-lived secret value into Infisical and leaves a reference in
  * its row. One-time codes and OAuth handshakes stay local; they expire in minutes.
- * Safe to rerun: referenced rows are skipped and writes overwrite the same key.
+ * Safe to rerun, and safe while the app runs: each copy goes to a new key, and a
+ * row edited meanwhile keeps its new value.
  */
 export async function migrateSecretsToInfisical(
   prisma: PrismaClient,
@@ -77,24 +76,33 @@ export async function migrateSecretsToInfisical(
     // picked up on the next run.
     const where = { id: row.id, ciphertext: row.ciphertext };
     const data = { ciphertext: stored.ciphertext };
-    if (row.table === "secrets") await prisma.secret.updateMany({ where, data });
-    else if (row.table === "bot_secrets") await prisma.botSecret.updateMany({ where, data });
-    else await prisma.integrationProviderConfig.updateMany({ where, data });
+    const { count } =
+      row.table === "secrets"
+        ? await prisma.secret.updateMany({ where, data })
+        : row.table === "bot_secrets"
+          ? await prisma.botSecret.updateMany({ where, data })
+          : await prisma.integrationProviderConfig.updateMany({ where, data });
+    if (count === 0) await store.remove(stored.ciphertext.slice(INFISICAL_REFERENCE_PREFIX.length));
   }
-  const referenced = new Set(rows.map((row) => infisicalSecretKey(row.recordId)));
+  const referenced = new Set(await infisicalReferencedKeys(prisma));
   report.orphaned = store.keys().filter((key) => key.startsWith("SECRET_") && !referenced.has(key));
-  if (options.prune && !options.dryRun) {
-    // Re-read so keys written after the snapshot above are never removed.
-    const current = new Set(
-      (await storedRows(prisma)).map((row) => infisicalSecretKey(row.recordId)),
-    );
-    for (const key of report.orphaned) {
-      if (current.has(key)) continue;
-      await store.remove(key);
-      report.pruned += 1;
-    }
-  }
+  if (options.prune && !options.dryRun) report.pruned = (await store.sweep(referenced)).length;
   return report;
+}
+
+/** Infisical keys that rows currently reference. */
+export async function infisicalReferencedKeys(prisma: PrismaClient): Promise<string[]> {
+  const where = { ciphertext: { startsWith: INFISICAL_REFERENCE_PREFIX } };
+  const select = { ciphertext: true } as const;
+  const tables = await Promise.all([
+    prisma.secret.findMany({ where, select }),
+    prisma.botSecret.findMany({ where, select }),
+    prisma.integrationProviderConfig.findMany({ where, select }),
+  ]);
+  return tables
+    .flat()
+    .filter((row) => isSecretReference(row.ciphertext))
+    .map((row) => row.ciphertext.slice(INFISICAL_REFERENCE_PREFIX.length));
 }
 
 async function storedRows(prisma: PrismaClient): Promise<StoredRow[]> {

@@ -473,7 +473,13 @@ export function signUp(email: string, password: string, name: string) {
   return authenticateWithEmail("sign-up", { email, password, name });
 }
 
-export type PasswordResetCapabilities = { passwordReset: boolean; resetUrl: string | null };
+export type PasswordResetCapabilities = {
+  passwordReset: boolean;
+  resetUrl: string | null;
+  /** False when the server only allows single sign-on. Older servers omit it. */
+  passwordAuth?: boolean;
+  sso?: { providerId: string; name: string } | null;
+};
 
 export async function passwordResetCapabilities(): Promise<PasswordResetCapabilities> {
   const { response, body } = await fetchMobileJson<PasswordResetCapabilities>(
@@ -481,7 +487,9 @@ export async function passwordResetCapabilities(): Promise<PasswordResetCapabili
     { headers: { origin: "rakazo://" } },
     { passwordReset: false, resetUrl: null },
   );
-  if (!response.ok) throw new Error("Could not load password recovery settings");
+  // Servers older than this endpoint sign in with a password only.
+  if (response.status === 404) return { passwordReset: false, resetUrl: null };
+  if (!response.ok) throw new Error("Could not load sign-in options");
   return body;
 }
 

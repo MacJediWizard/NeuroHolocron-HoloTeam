@@ -200,6 +200,17 @@ space even when not on the signup allowlist, and its email is trusted as verifie
 access in the provider. `AUTH_PASSWORD_ENABLED=false` hides the email form and refuses password
 sign-in; the API will not start with it unless OIDC is configured.
 
+The API reads the provider's discovery document at startup. If that fails, the button stays
+hidden until the next restart, and with password sign-in off the API exits so the container
+restarts and tries again.
+
+An existing account joins on its first SSO sign-in when the emails match. While password sign-in
+is on, that needs a verified email, so an address someone registered first cannot capture the SSO
+sign-in. With it off, unverified accounts join too, and their earlier sessions end.
+
+The mobile app signs in with email only. Against an SSO-only server it explains that sign-in is not
+supported yet; use the web or desktop app.
+
 ### Secret store (Infisical)
 
 Credentials that users save in the app are encrypted with `ENCRYPTION_KEY` and stored in Postgres by

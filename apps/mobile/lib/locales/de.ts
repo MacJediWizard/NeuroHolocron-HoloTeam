@@ -42,6 +42,11 @@ export const DE_MESSAGES: Record<string, string> = {
   Password: "Passwort",
   "Password recovery is not configured for this server":
     "Die Passwortwiederherstellung ist für diesen Server nicht konfiguriert",
+  "This server signs in with {provider}, which the app does not support yet.":
+    "Dieser Server meldet dich mit {provider} an, was die App noch nicht unterstützt.",
+  "Could not load sign-in options": "Anmeldeoptionen konnten nicht geladen werden",
+  "Try again": "Erneut versuchen",
+  "single sign-on": "Single Sign-On",
   "Reset your password": "Setze dein Passwort zurück",
   "Send reset link": "Link zum Zurücksetzen senden",
   Server: "Server",

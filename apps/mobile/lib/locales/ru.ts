@@ -429,6 +429,11 @@ export const RU_MESSAGES: Record<string, string> = {
   "Replace API key": "Заменить ключ API",
   "Replace key": "Заменить ключ",
   Reset: "Сбросить",
+  "This server signs in with {provider}, which the app does not support yet.":
+    "Этот сервер использует вход через {provider}, который приложение пока не поддерживает.",
+  "Could not load sign-in options": "Не удалось загрузить варианты входа",
+  "Try again": "Повторить",
+  "single sign-on": "единый вход",
   "Reset your password": "Сбросить пароль",
   "Reset computer": "Сбросить компьютер",
   "Reset computer?": "Сбросить компьютер?",

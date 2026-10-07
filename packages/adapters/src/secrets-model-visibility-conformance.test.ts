@@ -392,7 +392,8 @@ describe("secrets model-visibility conformance", () => {
         },
       };
       const secrets = {
-        load: vi.fn().mockReturnValue(JSON.stringify(material)),
+        loadAsync: vi.fn().mockResolvedValue(JSON.stringify(material)),
+        revision: vi.fn().mockReturnValue("r1"),
       };
       const connector = new McpConnector(prisma as never, secrets as never, {
         network: {

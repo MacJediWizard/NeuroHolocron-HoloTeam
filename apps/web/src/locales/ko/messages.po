@@ -1135,7 +1135,7 @@ msgstr ""
 #. placeholder {0}: sso.name
 #: src/pages/Auth.tsx
 msgid "Continue with {0}"
-msgstr ""
+msgstr "{0}(으)로 계속"
 
 #: src/pages/Auth.tsx
 msgid "Continue with email"
@@ -1365,6 +1365,10 @@ msgstr "AI 모델 설정을 불러오지 못했습니다."
 #: src/pages/RoutineRunHistory.tsx
 msgid "Could not load run history"
 msgstr "실행 기록을 불러오지 못했습니다"
+
+#: src/pages/Auth.tsx
+msgid "Could not load sign-in options"
+msgstr "로그인 옵션을 불러올 수 없습니다"
 
 #: src/pages/KnowledgeSection.tsx
 msgid "Could not load skill"
@@ -2441,6 +2445,7 @@ msgstr "음성 서비스를 불러오는 중…"
 
 #: src/App.tsx
 #: src/pages/Artifacts.tsx
+#: src/pages/Auth.tsx
 #: src/pages/IntegrationSetup.tsx
 #: src/pages/Onboarding.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -4093,6 +4098,7 @@ msgstr ""
 msgid "Trial ends {day}"
 msgstr ""
 
+#: src/pages/Auth.tsx
 #: src/pages/Onboarding.tsx
 msgid "Try again"
 msgstr "다시 시도"

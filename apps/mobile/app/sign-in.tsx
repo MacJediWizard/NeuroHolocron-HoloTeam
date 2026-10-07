@@ -4,6 +4,7 @@ import { Redirect, useFocusEffect, useLocalSearchParams, useRouter } from "expo-
 import { useCallback, useEffect, useState } from "react";
 import {
   AccessibilityInfo,
+  ActivityIndicator,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -47,6 +48,8 @@ export default function SignIn() {
   const [hasSession, setHasSession] = useState(false);
   const [apiBase, setApiBase] = useState(() => currentApiBase());
   const [reset, setReset] = useState<PasswordResetCapabilities | null>(null);
+  const [capabilitiesFailed, setCapabilitiesFailed] = useState(false);
+  const [capabilitiesAttempt, setCapabilitiesAttempt] = useState(0);
   const [resetSent, setResetSent] = useState(false);
 
   useFocusEffect(
@@ -65,15 +68,19 @@ export default function SignIn() {
   useEffect(() => {
     let active = true;
     setReset(null);
+    setCapabilitiesFailed(false);
     void passwordResetCapabilities()
       .then((capabilities) => {
         if (active) setReset(capabilities);
       })
-      .catch(() => undefined);
+      // Without them an SSO-only server would get a password form it refuses.
+      .catch(() => {
+        if (active) setCapabilitiesFailed(true);
+      });
     return () => {
       active = false;
     };
-  }, [apiBase]);
+  }, [apiBase, capabilitiesAttempt]);
 
   useEffect(() => {
     if (resetSent) AccessibilityInfo.announceForAccessibility(t("Check your email"));
@@ -135,6 +142,8 @@ export default function SignIn() {
   }
 
   const custom = usesCustomApiBase(apiBase);
+  // Single sign-on runs in the browser; the app has no way to receive that session yet.
+  const ssoOnly = reset?.passwordAuth === false;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: tokens.background }}>
@@ -171,7 +180,45 @@ export default function SignIn() {
                       ? t("Sign up for {PRODUCT_NAME}", { PRODUCT_NAME })
                       : t("Reset your password")}
               </Text>
-              {resetSent ? (
+              {ssoOnly ? (
+                <Text
+                  accessibilityRole="alert"
+                  style={{
+                    color: tokens.mutedForeground,
+                    fontSize: 15,
+                    marginTop: 28,
+                    textAlign: "center",
+                  }}
+                >
+                  {t("This server signs in with {provider}, which the app does not support yet.", {
+                    provider: reset?.sso?.name ?? t("single sign-on"),
+                  })}
+                </Text>
+              ) : capabilitiesFailed ? (
+                <View accessibilityRole="alert" style={{ alignItems: "center", marginTop: 28 }}>
+                  <Text
+                    style={{ color: tokens.mutedForeground, fontSize: 15, textAlign: "center" }}
+                  >
+                    {t("Could not load sign-in options")}
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    hitSlop={12}
+                    onPress={() => setCapabilitiesAttempt((attempt) => attempt + 1)}
+                    style={{ marginTop: 16 }}
+                  >
+                    <Text style={{ color: tokens.foreground, fontSize: 15, fontWeight: "600" }}>
+                      {t("Try again")}
+                    </Text>
+                  </Pressable>
+                </View>
+              ) : !reset && !resetSent ? (
+                <ActivityIndicator
+                  accessibilityLabel={t("Loading…")}
+                  color={tokens.mutedForeground}
+                  style={{ marginTop: 28 }}
+                />
+              ) : resetSent ? (
                 <View style={{ alignItems: "center", marginTop: 28 }}>
                   <Pressable
                     accessibilityRole="button"

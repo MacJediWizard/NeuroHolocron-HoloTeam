@@ -7,12 +7,11 @@ import {
 } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
 import { ComposioConnector } from "./composio-connector.js";
-import { isSecretReference } from "./infisical-secret-store.js";
 import { PipedreamConnector } from "./pipedream-connector.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
 /** Resolve persisted credentials on every operation so API and workers observe changes.
- * Cache adapters by stored version to preserve sessions without retaining old credentials. */
+ * Cache adapters by secret revision to preserve sessions without retaining old credentials. */
 export class IntegrationProviderSettings {
   private readonly cache = new Map<
     string,
@@ -54,14 +53,13 @@ export class IntegrationProviderSettings {
       return this.fallbacks[id];
     }
     const cached = this.cache.get(id);
-    // A reference stays the same when the value is edited in the external store,
-    // so the resolved value is the version there. References resolve from memory.
-    const reference = isSecretReference(row.ciphertext);
-    if (!reference && cached?.version === row.ciphertext) return cached.adapter;
-    const plaintext = this.secrets.load(row.ciphertext, `integration-provider:${id}`);
-    const version = reference ? plaintext : row.ciphertext;
+    // The revision also changes when an external store's value is edited in place. It is read
+    // before the value, so a rotation landing mid-read reloads on the next call.
+    const version = this.secrets.revision(row.ciphertext, `integration-provider:${id}`);
     if (cached?.version === version) return cached.adapter;
-    const config = IntegrationProviderConfigSchema.parse(JSON.parse(plaintext));
+    const config = IntegrationProviderConfigSchema.parse(
+      JSON.parse(await this.secrets.loadAsync(row.ciphertext, `integration-provider:${id}`)),
+    );
     if (config.provider !== id)
       throw new Error("Integration provider configuration does not match");
     const adapter = this.create(config);
@@ -83,16 +81,17 @@ export class IntegrationProviderSettings {
       context,
       `integration-provider:${config.provider}`,
     );
+    // Taken now, with the value this adapter was built from, not after the database write.
+    const version = this.secrets.revision(
+      stored.ciphertext,
+      `integration-provider:${config.provider}`,
+    );
     await this.prisma.integrationProviderConfig.upsert({
       where: { id: config.provider },
       create: { id: config.provider, ciphertext: stored.ciphertext },
       update: { ciphertext: stored.ciphertext },
     });
-    const plaintext = JSON.stringify(config);
-    this.cache.set(config.provider, {
-      version: isSecretReference(stored.ciphertext) ? plaintext : stored.ciphertext,
-      adapter,
-    });
+    this.cache.set(config.provider, { version, adapter });
   }
 
   providers(): ManagedConnectorProvider[] {

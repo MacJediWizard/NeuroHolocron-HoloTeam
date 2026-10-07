@@ -20,7 +20,10 @@ upstream.
 The API reads and writes in-app secrets through one secret-store interface. The default store
 encrypts each value with `ENCRYPTION_KEY` and keeps it in Postgres. With `SECRET_STORE=infisical`,
 values live in an Infisical folder used only by the app, and the API keeps an in-memory mirror that
-refreshes every `INFISICAL_REFRESH_SECONDS` and after every write.
+refreshes every `INFISICAL_REFRESH_SECONDS` and after every write. Each save writes a new key, so a
+failed save never changes the value in use, and the API deletes keys no row references once they
+are an hour old. A value edited in Infisical is picked up on the next refresh, and MCP sessions
+reconnect with it.
 
 ```env
 SECRET_STORE=infisical
@@ -40,7 +43,7 @@ first run):
 ```sh
 pnpm --filter @rakazo/api secrets:infisical --dry-run   # lists row ids, no values
 pnpm --filter @rakazo/api secrets:infisical             # copies, then swaps each row to a reference
-pnpm --filter @rakazo/api secrets:infisical --prune     # also deletes folder keys no row references
+pnpm --filter @rakazo/api secrets:infisical --prune     # also deletes unreferenced keys over an hour old
 ```
 
 `ENCRYPTION_KEY` stays required. The full reference is in
@@ -71,3 +74,8 @@ A release commit bumps `apps/desktop/package.json` and is tagged `vX.Y.Z`. The t
   blog, and terms.
 - The brand tool covers every file in `apps/www`, so new upstream pages are rebranded on merge.
 - Infisical and OIDC are documented in this file, the README, and the self-host guide.
+- SSO: the button appears only when the provider registered, the sign-in page retries a failed
+  options request, existing accounts link by verified email (any email when SSO-only, ending
+  earlier sessions), and the mobile app explains SSO-only servers.
+- Infisical: versioned keys, safe migration while the app runs, hourly cleanup, rotation pickup
+  for MCP sessions and integrations, logged refresh failures, and shutdown that stops polling.
