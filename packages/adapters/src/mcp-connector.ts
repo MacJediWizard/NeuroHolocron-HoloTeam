@@ -354,8 +354,10 @@ export class McpConnector implements ConnectorProvider {
             },
           })
         : null;
+      // Read before the value, so a rotation landing mid-connect reconnects next time.
+      const revision = secret ? this.secrets.revision(secret.ciphertext, secret.id) : undefined;
       material = secret
-        ? (JSON.parse(this.secrets.load(secret.ciphertext, secret.id)) as OAuthMaterial)
+        ? (JSON.parse(await this.secrets.loadAsync(secret.ciphertext, secret.id)) as OAuthMaterial)
         : {};
       const loaded = { material, ...(secret ? { secretId: secret.id } : {}) };
       const args = Array.isArray(server.args) ? server.args.map(String) : [];
@@ -410,14 +412,8 @@ export class McpConnector implements ConnectorProvider {
       return {
         session,
         material,
-        ...(secret
-          ? {
-              secret: {
-                ciphertext: secret.ciphertext,
-                id: secret.id,
-                revision: this.secrets.revision(secret.ciphertext, secret.id),
-              },
-            }
+        ...(secret && revision !== undefined
+          ? { secret: { ciphertext: secret.ciphertext, id: secret.id, revision } }
           : {}),
       };
     } catch (error) {

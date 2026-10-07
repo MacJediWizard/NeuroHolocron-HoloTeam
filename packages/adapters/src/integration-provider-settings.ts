@@ -53,11 +53,12 @@ export class IntegrationProviderSettings {
       return this.fallbacks[id];
     }
     const cached = this.cache.get(id);
-    // The revision also changes when an external store's value is edited in place.
+    // The revision also changes when an external store's value is edited in place. It is read
+    // before the value, so a rotation landing mid-read reloads on the next call.
     const version = this.secrets.revision(row.ciphertext, `integration-provider:${id}`);
     if (cached?.version === version) return cached.adapter;
     const config = IntegrationProviderConfigSchema.parse(
-      JSON.parse(this.secrets.load(row.ciphertext, `integration-provider:${id}`)),
+      JSON.parse(await this.secrets.loadAsync(row.ciphertext, `integration-provider:${id}`)),
     );
     if (config.provider !== id)
       throw new Error("Integration provider configuration does not match");
@@ -80,15 +81,17 @@ export class IntegrationProviderSettings {
       context,
       `integration-provider:${config.provider}`,
     );
+    // Taken now, with the value this adapter was built from, not after the database write.
+    const version = this.secrets.revision(
+      stored.ciphertext,
+      `integration-provider:${config.provider}`,
+    );
     await this.prisma.integrationProviderConfig.upsert({
       where: { id: config.provider },
       create: { id: config.provider, ciphertext: stored.ciphertext },
       update: { ciphertext: stored.ciphertext },
     });
-    this.cache.set(config.provider, {
-      version: this.secrets.revision(stored.ciphertext, `integration-provider:${config.provider}`),
-      adapter,
-    });
+    this.cache.set(config.provider, { version, adapter });
   }
 
   providers(): ManagedConnectorProvider[] {

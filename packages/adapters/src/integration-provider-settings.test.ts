@@ -60,6 +60,24 @@ describe("integration provider settings", () => {
       apiKey: "fake-replacement-key",
     });
   });
+  it("reloads on the next resolve when the secret changes while saving", async () => {
+    const f = fixture();
+    let revision = "r1";
+    vi.spyOn(f.secrets, "revision").mockImplementation(() => revision);
+    const upsert = f.prisma.integrationProviderConfig.upsert.getMockImplementation();
+    f.prisma.integrationProviderConfig.upsert.mockImplementation(async (args) => {
+      // A refresh lands while the row is written.
+      revision = "r2";
+      return upsert!(args);
+    });
+    await f.settings.save({ provider: "composio", apiKey: "fake-first-key" }, context);
+    expect(f.factory).toHaveBeenCalledTimes(1);
+    await f.settings.resolve("composio");
+    expect(f.factory).toHaveBeenCalledTimes(2);
+    await f.settings.resolve("composio");
+    expect(f.factory).toHaveBeenCalledTimes(2);
+  });
+
   it("preserves working settings and hides provider error details on failed verification", async () => {
     const f = fixture();
     await f.settings.save({ provider: "composio", apiKey: "fake-working-key" }, context);

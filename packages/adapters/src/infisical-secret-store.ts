@@ -284,6 +284,7 @@ export class InfisicalSecretStore extends EncryptedSecretStore {
     for (const [key, value] of next) {
       if (this.values.get(key) !== value) this.revisions.set(key, ++this.lastRevision);
     }
+    for (const key of this.revisions.keys()) if (!next.has(key)) this.revisions.delete(key);
     this.values = next;
     this.lastRefreshedAt = new Date();
   }
@@ -292,6 +293,7 @@ export class InfisicalSecretStore extends EncryptedSecretStore {
     this.localChanges.set(key, { value, sequence: ++this.sequence });
     if (value === undefined) {
       this.values.delete(key);
+      this.revisions.delete(key);
     } else {
       this.values.set(key, value);
       this.revisions.set(key, ++this.lastRevision);
