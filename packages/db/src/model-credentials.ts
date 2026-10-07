@@ -1,5 +1,6 @@
 import { usableModelId } from "@rakazo/contracts";
 import type { PrismaClient } from "./client.js";
+import { ownerScope } from "./scope.js";
 
 export const newestCredentialOrder = [
   { updatedAt: "desc" as const },
@@ -9,15 +10,20 @@ export const newestCredentialOrder = [
 
 export const newestModelCredentialOrder = newestCredentialOrder;
 
+/**
+ * Any member's scope. Model credentials and the Space's model choice live on the
+ * Space owner's account, so every function below swaps in the owner's userId.
+ */
 type ModelCredentialScope = { userId: string; spaceId: string };
 
 export async function selectSpaceModelPreference(
-  prisma: Pick<PrismaClient, "spaceModelPreference">,
-  scope: ModelCredentialScope,
+  prisma: Pick<PrismaClient, "spaceModelPreference" | "spaceMember">,
+  memberScope: ModelCredentialScope,
   credentialId: string,
   modelId: string | null | undefined,
   thinkingLevel?: string | null,
 ) {
+  const scope = await ownerScope(prisma, memberScope);
   const persistedModelId = usableModelId(modelId);
   await prisma.spaceModelPreference.updateMany({
     where: {
@@ -81,8 +87,9 @@ function withModelPreference<
 
 export async function findDefaultModelCredential(
   prisma: PrismaClient,
-  scope: ModelCredentialScope,
+  memberScope: ModelCredentialScope,
 ) {
+  const scope = await ownerScope(prisma, memberScope);
   const preference = await prisma.spaceModelPreference.findFirst({
     where: { spaceId: scope.spaceId, userId: scope.userId, isDefault: true },
     include: { credential: true },
@@ -250,10 +257,11 @@ function credentialFromChoice<
 
 export async function findModelCredential(
   prisma: PrismaClient,
-  scope: ModelCredentialScope,
+  memberScope: ModelCredentialScope,
   provider: string,
   modelId?: string | null,
 ) {
+  const scope = await ownerScope(prisma, memberScope);
   if (
     typeof prisma.spaceModelPreference.findMany === "function" &&
     typeof prisma.userModelCredential.findMany === "function"

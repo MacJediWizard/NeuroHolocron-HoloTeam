@@ -26,7 +26,6 @@ async function findArtifactMessages(
         FROM messages m
         INNER JOIN threads t ON t.id = m."threadId"
         WHERE t."spaceId" = ${actor.spaceId}
-          AND t."userId" = ${actor.userId}
           AND ${targetColumn} = candidate."targetId"
           AND m.blocks::text ILIKE ('%' || candidate."artifactId" || '%')
         ORDER BY m."createdAt" DESC
@@ -67,7 +66,6 @@ export async function querySpaceSearch(
   const bots = await prisma.bot.findMany({
     where: {
       spaceId: actor.spaceId,
-      userId: actor.userId,
       archivedAt: null,
       OR: [
         { name: { contains: query, mode: "insensitive" } },
@@ -94,7 +92,6 @@ export async function querySpaceSearch(
   const groups = await prisma.chatGroup.findMany({
     where: {
       spaceId: actor.spaceId,
-      userId: actor.userId,
       name: { contains: query, mode: "insensitive" },
     },
     take: CONVERSATION_HIT_LIMIT,
@@ -118,7 +115,6 @@ export async function querySpaceSearch(
   const artifacts = await prisma.artifact.findMany({
     where: {
       spaceId: actor.spaceId,
-      userId: actor.userId,
       groupId: null,
       botId: { not: null },
       name: { contains: query, mode: "insensitive" },
@@ -158,7 +154,6 @@ export async function querySpaceSearch(
   const groupArtifacts = await prisma.artifact.findMany({
     where: {
       spaceId: actor.spaceId,
-      userId: actor.userId,
       groupId: { not: null },
       name: { contains: query, mode: "insensitive" },
     },
@@ -196,7 +191,6 @@ export async function querySpaceSearch(
   const routines = await prisma.routine.findMany({
     where: {
       spaceId: actor.spaceId,
-      userId: actor.userId,
       OR: [
         { name: { contains: query, mode: "insensitive" } },
         { prompt: { contains: query, mode: "insensitive" } },
@@ -237,7 +231,6 @@ export async function querySpaceSearch(
     INNER JOIN threads t ON t.id = m."threadId"
     INNER JOIN bots b ON b.id = t."botId"
     WHERE t."spaceId" = ${actor.spaceId}
-      AND t."userId" = ${actor.userId}
       AND b."archivedAt" IS NULL
       AND m.blocks::text ILIKE ${pattern}
     ORDER BY m."createdAt" DESC
@@ -270,7 +263,6 @@ export async function querySpaceSearch(
     INNER JOIN threads t ON t.id = m."threadId"
     INNER JOIN chat_groups g ON g.id = t."groupId"
     WHERE t."spaceId" = ${actor.spaceId}
-      AND t."userId" = ${actor.userId}
       AND t."groupId" IS NOT NULL
       AND m.blocks::text ILIKE ${pattern}
     ORDER BY m."createdAt" DESC

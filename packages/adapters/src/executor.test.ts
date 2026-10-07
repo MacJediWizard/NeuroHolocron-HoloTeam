@@ -934,7 +934,6 @@ describe("run notification preference", () => {
         botId: "bot-1",
         threadId: "thread-1",
         spaceId: "workspace-1",
-        userId: "user-1",
       },
       select: {
         bot: { select: { notifyOnFinish: true } },
@@ -1931,6 +1930,7 @@ description: Prepare standup notes
       message: { findMany: vi.fn(async () => []) },
       task: { findUniqueOrThrow: vi.fn(async () => ({ id: "task-1", prompt: "hello" })) },
       connection: { findMany: vi.fn(async () => []) },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst: vi.fn(async () => null) },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
@@ -1994,6 +1994,7 @@ description: Prepare standup notes
           thinkingLevel: "high",
         })),
       },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
@@ -2037,6 +2038,7 @@ description: Prepare standup notes
       },
     );
     const prisma = {
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       secret: { findFirst: vi.fn(async () => null), findUnique: vi.fn(async () => null) },
@@ -2086,6 +2088,7 @@ description: Prepare standup notes
       },
     );
     const prisma = {
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       secret: { findFirst: vi.fn(async () => null), findUnique: vi.fn(async () => null) },
@@ -2121,6 +2124,7 @@ description: Prepare standup notes
           thinkingLevel: null,
         })),
       },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: {
         findFirst: vi.fn(async () =>
           modelPreference({
@@ -2166,6 +2170,7 @@ description: Prepare standup notes
           thinkingLevel: null,
         })),
       },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: {
         findFirst: vi.fn(async () =>
           modelPreference({
@@ -2230,6 +2235,7 @@ description: Prepare standup notes
           thinkingLevel: null,
         })),
       },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: {
         findFirst: vi.fn(async () =>
           modelPreference({
@@ -2281,6 +2287,7 @@ description: Prepare standup notes
           thinkingLevel: null,
         })),
       },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
@@ -2333,6 +2340,7 @@ description: Prepare standup notes
     };
     const prisma = {
       bot: { findFirst: vi.fn(async () => bot) },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
@@ -2393,6 +2401,7 @@ description: Prepare standup notes
           thinkingLevel: "high",
         })),
       },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },
@@ -2431,6 +2440,7 @@ description: Prepare standup notes
   it("withholds the deployment key when settings name a different provider", async () => {
     const prisma = {
       bot: { findFirst: vi.fn(async () => null) },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst: vi.fn(async () => null) },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: {
@@ -2472,6 +2482,7 @@ description: Prepare standup notes
           thinkingLevel: "high",
         })),
       },
+      spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
       spaceModelPreference: { findFirst },
       userModelCredential: { findFirst: vi.fn(async () => null) },
       deploymentSettings: { findUnique: vi.fn(async () => null) },

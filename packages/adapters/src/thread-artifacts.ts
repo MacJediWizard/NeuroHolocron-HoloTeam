@@ -139,7 +139,6 @@ export async function materializeCurrentTurnFiles(
     where: {
       id: { in: fileBlocks.map((block) => block.artifactId) },
       spaceId: input.context.spaceId,
-      userId: input.context.userId,
     },
   });
   const byId = new Map(rows.map((row) => [row.id, row]));

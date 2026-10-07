@@ -125,6 +125,7 @@ function makeDisconnectDeps(
     existing?: Array<{ id: string; secretId: string; userId: string; provider: string }>;
     modelReferences?: number;
     voiceReferences?: number;
+    role?: string;
   } = {},
 ) {
   const rows = overrides.existing ?? [];
@@ -143,6 +144,7 @@ function makeDisconnectDeps(
     spaceVoicePreference: { deleteMany: preferenceDeleteMany },
     userModelCredential: { count: modelCount },
     secret: { deleteMany: secretDeleteMany },
+    spaceMember: { findUnique: vi.fn().mockResolvedValue({ role: overrides.role ?? "owner" }) },
     $transaction: vi.fn(),
   };
   prisma.$transaction.mockImplementation(async (callback: (tx: typeof prisma) => unknown) =>
@@ -265,6 +267,15 @@ describe("disconnectVoiceCredential", () => {
     expect(secretDeleteMany).not.toHaveBeenCalled();
   });
 
+  it("leaves the owner's voice connection alone for a member", async () => {
+    const { deps, transaction } = makeDisconnectDeps({ role: "member" });
+
+    await expect(
+      disconnectVoiceCredential(deps, actor, { provider: "scripted" }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(transaction).not.toHaveBeenCalled();
+  });
+
   it("rejects a blank provider before opening a transaction", async () => {
     const { deps, transaction } = makeDisconnectDeps();
 
@@ -306,6 +317,9 @@ describe("updateVoiceSpeechModel", () => {
     const create = vi.fn();
     const prisma = {
       userVoiceCredential: { findFirst: vi.fn().mockResolvedValue(credential) },
+      spaceMember: {
+        findMany: vi.fn().mockResolvedValue([{ userId: actor.userId, role: "owner" }]),
+      },
       spaceVoicePreference: {
         findUnique: vi.fn().mockResolvedValue(preference),
         create,
@@ -427,6 +441,9 @@ describe("synthesizeVoice", () => {
       secret: {
         findFirst: vi.fn().mockResolvedValue({ id: "secret-1", ciphertext: "cipher" }),
       },
+      spaceMember: {
+        findMany: vi.fn().mockResolvedValue([{ userId: actor.userId, role: "owner" }]),
+      },
     };
     const deps = {
       prisma,
@@ -469,6 +486,9 @@ describe("synthesizeVoice", () => {
       },
       secret: {
         findFirst: vi.fn().mockResolvedValue({ id: "secret-1", ciphertext: "cipher" }),
+      },
+      spaceMember: {
+        findMany: vi.fn().mockResolvedValue([{ userId: actor.userId, role: "owner" }]),
       },
     };
     const deps = {

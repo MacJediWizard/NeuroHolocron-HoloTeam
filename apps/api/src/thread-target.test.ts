@@ -52,6 +52,7 @@ describe("threadHead", () => {
 describe("queued run supersession", () => {
   it("only cancels queued runs started by user messages or reactions", async () => {
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       run: {
         findMany: vi.fn().mockResolvedValue([{ id: "run-old", taskId: "task-old" }]),
         updateMany: vi.fn(),
@@ -86,6 +87,7 @@ describe("reaction messages", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([]),
       message: {
         findFirst: vi.fn().mockResolvedValue({ id: "parent" }),
@@ -139,6 +141,7 @@ describe("reaction messages", () => {
         blocks: [{ kind: "text", text: "❤️" }],
         replyToMessageId: "parent",
         clientNonce: "third",
+        authorUserId: "user-1",
       }),
     });
     expect(tx.event.create).toHaveBeenLastCalledWith({
@@ -149,6 +152,7 @@ describe("reaction messages", () => {
           role: "user",
           blocks: [{ kind: "text", text: "❤️" }],
           replyToMessageId: "parent",
+          author: { id: "user-1", name: "Ada" },
         },
       }),
     });
@@ -199,6 +203,7 @@ describe("threadSnapshot", () => {
       },
     ]);
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       message: { findMany: vi.fn().mockResolvedValue([]) },
       event: {
@@ -265,6 +270,7 @@ describe("threadSnapshot", () => {
     const findManyEvents = vi.fn();
     const findFirstRun = botRunFindFirst([run]);
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       message: { findMany: vi.fn().mockResolvedValue([]) },
       event: {
@@ -405,6 +411,7 @@ describe("threadSnapshot", () => {
     };
     const findFirstRun = botRunFindFirst([failed, completed]);
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       message: { findMany: vi.fn().mockResolvedValue([]) },
       event: {
@@ -441,6 +448,7 @@ describe("threadSnapshot", () => {
     const findManyEvents = vi.fn();
     const findFirstRun = botRunFindFirst([]);
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       message: { findMany: vi.fn().mockResolvedValue([]) },
       event: {
@@ -952,6 +960,7 @@ function groupRunFindMany(input: { active?: unknown[]; terminals?: unknown[] }) 
 
 function groupPrisma(findManyRuns: ReturnType<typeof groupRunFindMany>) {
   const tx = {
+    user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
     $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
     message: { findMany: vi.fn().mockResolvedValue([]) },
     event: {
@@ -978,6 +987,7 @@ function groupTarget() {
 describe("sendThreadMessage", () => {
   it("answers a waiting question with a free-text chat message", async () => {
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
@@ -1082,6 +1092,7 @@ describe("sendThreadMessage", () => {
       blocks: [{ kind: "ask", text: "Which city should I use?", status: "pending" }],
     };
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
@@ -1250,6 +1261,7 @@ describe("sendThreadMessage", () => {
       blocks: [{ kind: "ask", text: "Which city should I use?", status: "pending" }],
     };
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "group-1" }]),
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
@@ -1351,6 +1363,7 @@ describe("sendThreadMessage", () => {
 
   it("still requires the card for a pending approval ask", async () => {
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn().mockResolvedValue({ nextMessageSeq: 2 }),
       },
@@ -1429,6 +1442,7 @@ describe("sendThreadMessage", () => {
 
   it("waits for the creation intro instead of starting a second run", async () => {
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: 2 } : { nextEventSeq: 3 },
@@ -1507,6 +1521,7 @@ describe("sendThreadMessage", () => {
 
   it("steers a waiting-takeover run instead of refusing the message", async () => {
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi
           .fn()
@@ -1588,6 +1603,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -1671,6 +1687,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -1762,6 +1779,7 @@ describe("sendThreadMessage", () => {
       blocks: [{ kind: "ask", text: "Which city should I use?", status: "pending" }],
     };
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "thread-1" }]),
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
@@ -1854,6 +1872,7 @@ describe("sendThreadMessage", () => {
       blocks: [{ kind: "ask", text: "Which city should I use?", status: "pending" }],
     };
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       $queryRaw: vi.fn().mockResolvedValue([{ id: "group-1" }]),
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
@@ -1957,6 +1976,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2045,6 +2065,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2172,6 +2193,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2254,6 +2276,7 @@ describe("sendThreadMessage", () => {
     let eventSeq = 0;
     const clientNonce = callClientNonce("call-7");
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2313,6 +2336,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2391,6 +2415,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2466,6 +2491,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2568,6 +2594,7 @@ describe("sendThreadMessage", () => {
       let messageSeq = 0;
       let eventSeq = 0;
       const tx = {
+        user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
         thread: {
           update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
             data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2648,6 +2675,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2736,6 +2764,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },
@@ -2806,6 +2835,7 @@ describe("sendThreadMessage", () => {
     let messageSeq = 0;
     let eventSeq = 0;
     const tx = {
+      user: { findUniqueOrThrow: vi.fn().mockResolvedValue({ id: "user-1", name: "Ada" }) },
       thread: {
         update: vi.fn(async ({ data }: { data: { nextMessageSeq?: unknown } }) =>
           data.nextMessageSeq ? { nextMessageSeq: ++messageSeq } : { nextEventSeq: ++eventSeq },

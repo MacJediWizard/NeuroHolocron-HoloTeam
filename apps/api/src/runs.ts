@@ -42,7 +42,6 @@ export async function listSpaceRuns(
   const rows = await prisma.run.findMany({
     where: {
       spaceId: actor.spaceId,
-      userId: actor.userId,
       bot: { archivedAt: null },
       ...(filter === "active"
         ? { status: { in: [...ACTIVE_RUN_STATUSES] } }

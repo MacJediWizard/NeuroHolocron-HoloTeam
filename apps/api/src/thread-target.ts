@@ -115,7 +115,6 @@ async function resolveOwnedConnectorDisplayNames(
     where: {
       id: { in: connectionIds },
       spaceId: actor.spaceId,
-      userId: actor.userId,
       status: "connected",
     },
     select: { id: true, displayName: true },
@@ -213,6 +212,11 @@ function sendEventRunIds(payload: Prisma.JsonValue | undefined): string[] {
   return Array.isArray(runIds) ? runIds.filter((id): id is string => typeof id === "string") : [];
 }
 
+/** Rides on the live event so other members see who wrote the message. */
+async function loadMessageAuthor(tx: Prisma.TransactionClient, userId: string) {
+  return tx.user.findUniqueOrThrow({ where: { id: userId }, select: { id: true, name: true } });
+}
+
 function sendResult(message: { seq: number }, runs: Array<{ id: string; taskId: string }>) {
   const first = runs[0];
   if (!first) throw new IsolationError("Send did not create a run");
@@ -260,7 +264,6 @@ async function lockAndLoadGroupMembers(
     where: {
       id: target.groupId,
       spaceId: actor.spaceId,
-      userId: actor.userId,
       archivedAt: null,
       thread: { id: target.threadId },
     },
@@ -680,7 +683,9 @@ export async function sendThreadMessage(
           replyToMessageId,
           replyQuote,
           clientNonce: input.clientNonce,
+          authorUserId: actor.userId,
         });
+        const author = await loadMessageAuthor(tx, actor.userId);
         const activeRuns = await tx.run.findMany({
           where: {
             threadId: target.threadId,
@@ -724,6 +729,7 @@ export async function sendThreadMessage(
             payload: {
               messageId: message.id,
               role: "user",
+              author,
               blocks,
               callId,
               runIds: answered.map((run) => run.id),
@@ -762,6 +768,7 @@ export async function sendThreadMessage(
             payload: {
               messageId: message.id,
               role: "user",
+              author,
               blocks,
               callId,
               replyToMessageId,
@@ -808,6 +815,7 @@ export async function sendThreadMessage(
           payload: {
             messageId: message.id,
             role: "user",
+            author,
             blocks,
             callId,
             runIds: [run.id],
@@ -846,7 +854,9 @@ export async function sendThreadMessage(
         replyToMessageId,
         replyQuote,
         clientNonce: input.clientNonce,
+        authorUserId: actor.userId,
       });
+      const author = await loadMessageAuthor(tx, actor.userId);
       const activeRuns = await tx.run.findMany({
         where: {
           threadId: target.threadId,
@@ -968,6 +978,7 @@ export async function sendThreadMessage(
         payload: {
           messageId: message.id,
           role: "user",
+          author,
           blocks,
           callId,
           runIds: runs.map((run) => run.id),
@@ -1029,14 +1040,22 @@ export async function reactToThreadMessage(
       blocks,
       replyToMessageId: parent.id,
       clientNonce: input.clientNonce,
+      authorUserId: actor.userId,
     });
+    const author = await loadMessageAuthor(tx, actor.userId);
     if (target.kind === "group") await touchGroupUpdatedAt(tx, target.groupId);
     const event = await appendEventInTransaction(tx, {
       spaceId: actor.spaceId,
       threadId: target.threadId,
       botId,
       type: "thread.message.created",
-      payload: { messageId: message.id, role: "user", blocks, replyToMessageId: parent.id },
+      payload: {
+        messageId: message.id,
+        role: "user",
+        author,
+        blocks,
+        replyToMessageId: parent.id,
+      },
     });
     return { eventSeq: event.seq };
   });
@@ -1211,7 +1230,6 @@ export async function setThreadUnreadState(
     where: {
       id: target.threadId,
       spaceId: actor.spaceId,
-      userId: actor.userId,
       unread: { not: unread },
     },
     data: { unread },

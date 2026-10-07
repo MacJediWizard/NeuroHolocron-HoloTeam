@@ -1,0 +1,262 @@
+import { randomBytes } from "node:crypto";
+import type { PrismaClient } from "./client.js";
+import { hasOwnerRole, isSpaceOwner, spaceOwnerUserId } from "./scope.js";
+
+/** An identity provider group whose members share one Space. */
+export interface GroupSpace {
+  group: string;
+  spaceId: string;
+}
+
+type GroupSpaceClient = Pick<
+  PrismaClient,
+  "$transaction" | "space" | "member" | "spaceMember" | "memoryDocument" | "notificationPreference"
+>;
+
+function newId(): string {
+  return randomBytes(16).toString("hex");
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "P2002");
+}
+
+async function ignoreDuplicate(write: Promise<unknown>): Promise<void> {
+  await write.catch((error: unknown) => {
+    if (!isUniqueViolation(error)) throw error;
+  });
+}
+
+/**
+ * Makes the user's membership of every group-mapped Space match their identity
+ * provider groups: a member of the group joins the Space, anyone else leaves it.
+ * Space owners are never removed, so a mapping cannot lock the owner out.
+ * Returns the mapped Space ids that do not exist, so the caller can report them.
+ */
+export async function syncGroupSpaces(
+  prisma: GroupSpaceClient,
+  userId: string,
+  groups: readonly string[],
+  mapping: readonly GroupSpace[],
+): Promise<{ missingSpaceIds: string[] }> {
+  const wanted = new Map<string, boolean>();
+  for (const { group, spaceId } of mapping) {
+    wanted.set(spaceId, (wanted.get(spaceId) ?? false) || groups.includes(group));
+  }
+  const spaces = await prisma.space.findMany({
+    where: { id: { in: [...wanted.keys()] }, deletingAt: null },
+    select: { id: true, organizationId: true },
+  });
+  const missingSpaceIds = [...wanted.keys()].filter((id) => !spaces.some((s) => s.id === id));
+  const wantedIds = new Set([...wanted].filter(([, keep]) => keep).map(([id]) => id));
+  for (const space of spaces) {
+    if (wantedIds.has(space.id)) await joinSpace(prisma, userId, space, wantedIds);
+    else await leaveSpace(prisma, userId, space);
+  }
+  return { missingSpaceIds };
+}
+
+async function joinSpace(
+  prisma: GroupSpaceClient,
+  userId: string,
+  space: { id: string; organizationId: string },
+  wantedIds: ReadonlySet<string>,
+): Promise<void> {
+  const createdAt = new Date();
+  const memberId = newId();
+  const joined = await prisma.member
+    .create({
+      data: {
+        id: memberId,
+        organizationId: space.organizationId,
+        userId,
+        role: "member",
+        createdAt,
+      },
+    })
+    .then(
+      () => true,
+      (error: unknown) => {
+        if (!isUniqueViolation(error)) throw error;
+        return false;
+      },
+    );
+  if (joined) {
+    // The member insert trigger also adds the organization's default Space,
+    // which the group may not grant.
+    await prisma.spaceMember.deleteMany({
+      where: { id: `default-space-member:${memberId}`, spaceId: { notIn: [...wantedIds] } },
+    });
+  }
+  await ignoreDuplicate(
+    prisma.spaceMember.create({
+      data: {
+        id: newId(),
+        spaceId: space.id,
+        organizationId: space.organizationId,
+        userId,
+        role: "member",
+        createdAt,
+      },
+    }),
+  );
+  const hasMemory = await prisma.memoryDocument.findFirst({
+    where: { spaceId: space.id, userId, scope: "user", path: "MEMORY.md" },
+    select: { id: true },
+  });
+  if (!hasMemory) {
+    await ignoreDuplicate(
+      prisma.memoryDocument.create({
+        data: {
+          spaceId: space.id,
+          userId,
+          scope: "user",
+          path: "MEMORY.md",
+          content: "# Space memory\n\nPreferences and context kept within this space live here.\n",
+        },
+      }),
+    );
+  }
+  await ignoreDuplicate(
+    prisma.notificationPreference.create({ data: { spaceId: space.id, userId } }),
+  );
+}
+
+async function leaveSpace(
+  prisma: GroupSpaceClient,
+  userId: string,
+  space: { id: string; organizationId: string },
+): Promise<void> {
+  await prisma.$transaction(async (tx) => {
+    // An owner is never removed by group sync, whatever else their role lists.
+    if (await isSpaceOwner(tx, { spaceId: space.id, userId })) return;
+    await tx.spaceMember.deleteMany({ where: { spaceId: space.id, userId } });
+    // Without a Space left in the organization, the organization membership goes too.
+    const remaining = await tx.spaceMember.count({
+      where: { organizationId: space.organizationId, userId },
+    });
+    if (remaining === 0) {
+      const membership = await tx.member.findFirst({
+        where: { organizationId: space.organizationId, userId },
+        select: { id: true, role: true },
+      });
+      if (membership && !hasOwnerRole(membership.role)) {
+        await tx.member.deleteMany({ where: { id: membership.id } });
+      }
+    }
+  });
+}
+
+/** A client inside an interactive transaction. */
+type TransactionClient = Omit<
+  PrismaClient,
+  "$connect" | "$disconnect" | "$on" | "$transaction" | "$extends"
+>;
+
+/**
+ * Before an account is deleted, hands its Spaces over in one transaction: owned
+ * Spaces pass to another member, then shared rows in every Space the user no
+ * longer owns go to that Space's owner. Either all of it lands or none of it.
+ * Both steps do nothing when repeated, so a deletion that fails later can retry.
+ */
+export async function handOverAccount(
+  prisma: Pick<PrismaClient, "$transaction">,
+  userId: string,
+): Promise<void> {
+  await prisma.$transaction(
+    async (tx) => {
+      await transferOwnedSpaces(tx, userId);
+      await handOverSharedRows(tx, userId);
+    },
+    { timeout: 60_000 },
+  );
+}
+
+/**
+ * Makes the longest-standing other member the owner of each Space the user owns,
+ * so those Spaces keep an owner. A Space with no other member is left alone and
+ * goes with the account.
+ */
+export async function transferOwnedSpaces(
+  tx: Pick<TransactionClient, "spaceMember">,
+  userId: string,
+): Promise<void> {
+  const memberships = await tx.spaceMember.findMany({
+    where: { userId },
+    select: { id: true, spaceId: true, role: true },
+  });
+  for (const membership of memberships) {
+    if (!hasOwnerRole(membership.role)) continue;
+    const successor = await tx.spaceMember.findFirst({
+      where: { spaceId: membership.spaceId, userId: { not: userId } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true },
+    });
+    if (!successor) continue;
+    await tx.spaceMember.update({ where: { id: successor.id }, data: { role: "owner" } });
+    await tx.spaceMember.update({ where: { id: membership.id }, data: { role: "member" } });
+  }
+}
+
+/**
+ * Gives the Space owner every shared row the user created in Spaces they do not
+ * own, so deleting the account leaves those Spaces intact. Personal rows
+ * (credentials, preferences, user-scope memory) stay with the user and are
+ * deleted with the account.
+ */
+export async function handOverSharedRows(tx: TransactionClient, userId: string): Promise<void> {
+  const memberships = await tx.spaceMember.findMany({
+    where: { userId },
+    select: { spaceId: true },
+  });
+  for (const { spaceId } of memberships) {
+    if (await isSpaceOwner(tx, { spaceId, userId })) continue;
+    const owner = await spaceOwnerUserId(tx, spaceId);
+    const where = { spaceId, userId };
+    const data = { userId: owner };
+    await tx.bot.updateMany({ where, data });
+    await tx.botSection.updateMany({ where, data });
+    await tx.chatGroup.updateMany({ where, data });
+    await tx.thread.updateMany({ where, data });
+    await tx.routine.updateMany({ where, data });
+    await tx.artifact.updateMany({ where, data });
+    await tx.mcpServer.updateMany({ where, data });
+    await tx.botSecret.updateMany({ where, data });
+    // Model and voice credential secrets have no spaceId, so they stay personal.
+    await tx.secret.updateMany({ where, data });
+    await tx.connection.updateMany({ where, data });
+    await tx.agentSkill.updateMany({ where, data });
+    await tx.taughtSkill.updateMany({ where, data });
+    await tx.scratchpadItem.updateMany({ where, data });
+    await tx.capabilityInstall.updateMany({ where, data });
+    await tx.memoryDocument.updateMany({ where: { ...where, scope: { not: "user" } }, data });
+    await tx.actionApprovalRule.updateMany({
+      where: { spaceId, createdByUserId: userId },
+      data: { createdByUserId: owner },
+    });
+    await tx.agentSecret.updateMany({
+      where: { spaceId, createdByUserId: userId },
+      data: { createdByUserId: owner },
+    });
+    await tx.computer.updateMany({ where, data });
+    await tx.browserProfile.updateMany({ where, data });
+    await tx.cloudAgent.updateMany({ where, data });
+  }
+}
+
+/**
+ * Parses `group:spaceId` pairs separated by commas. A group may map to several
+ * Spaces and several groups to one Space.
+ */
+export function parseGroupSpaces(value: string | undefined): GroupSpace[] {
+  if (!value?.trim()) return [];
+  return value.split(",").map((entry) => {
+    const separator = entry.lastIndexOf(":");
+    const group = entry.slice(0, separator).trim();
+    const spaceId = entry.slice(separator + 1).trim();
+    if (separator < 0 || !group || !spaceId) {
+      throw new Error(`OIDC_GROUP_SPACES entry "${entry.trim()}" must be group:spaceId`);
+    }
+    return { group, spaceId };
+  });
+}

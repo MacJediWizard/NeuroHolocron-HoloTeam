@@ -926,6 +926,7 @@ describe("refreshExpiredModelCredential", () => {
   function secretRow(initial: string) {
     let current = initial;
     const prisma = {
+      spaceMember: { findMany: async () => [{ userId: "user-1", role: "owner" }] },
       secret: {
         findFirst: vi.fn(async () => ({ id: "secret-1", ciphertext: "cipher" })),
         update: vi.fn(async () => ({})),
@@ -1071,6 +1072,7 @@ describe("kickModelCredentialRefresh", () => {
       credential: oauthCred({ access: "old", expires: 1 }),
     });
     const prisma = {
+      spaceMember: { findMany: async () => [{ userId: "user-1", role: "owner" }] },
       secret: {
         findFirst: vi.fn(async () => ({ id: "secret-1", ciphertext: "cipher" })),
         update: vi.fn(async () => ({})),

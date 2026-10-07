@@ -83,7 +83,7 @@ describeWithDatabase("Composio catalog reconciliation", () => {
     const first = await createConnection(owner, "GMAIL");
     const duplicate = await createConnection(owner, "GMAIL");
     const otherProvider = await createConnection(owner, "SLACK");
-    const otherUser = await createConnection(
+    const sameSpaceMember = await createConnection(
       { spaceId: owner.spaceId, userId: other.userId },
       "GMAIL",
     );
@@ -105,9 +105,12 @@ describeWithDatabase("Composio catalog reconciliation", () => {
       { id: first.id, status: "connected" },
       { id: duplicate.id, status: "revoked" },
     ]);
-    await expect(statuses([otherProvider.id, otherUser.id, otherWorkspace.id])).resolves.toEqual([
+    // Connections are shared by the Space, so another member's row for the same provider is a duplicate.
+    await expect(
+      statuses([otherProvider.id, sameSpaceMember.id, otherWorkspace.id]),
+    ).resolves.toEqual([
       { id: otherProvider.id, status: "pending" },
-      { id: otherUser.id, status: "pending" },
+      { id: sameSpaceMember.id, status: "revoked" },
       { id: otherWorkspace.id, status: "pending" },
     ]);
 

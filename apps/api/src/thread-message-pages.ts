@@ -4,6 +4,8 @@ import type { Prisma, PrismaClient } from "@rakazo/db";
 
 type MessageDb = PrismaClient | Prisma.TransactionClient;
 
+const withAuthor = { author: { select: { id: true, name: true } } } as const;
+
 export async function loadMessagePage(
   prisma: MessageDb,
   threadId: string,
@@ -30,6 +32,7 @@ export async function loadMessagePage(
         where: { threadId, seq: { gte: minSeq, lte: maxSeq } },
         orderBy: { seq: "asc" },
         take: pageSize,
+        include: withAuthor,
       });
       const truncated = rows.length >= pageSize;
       const coveredThroughSeq = truncated ? (rows[rows.length - 1]?.seq ?? maxSeq) : maxSeq;
@@ -59,6 +62,7 @@ export async function loadMessagePage(
       },
       orderBy: { seq: "desc" },
       take: pageSize + 1,
+      include: withAuthor,
     });
     const hasOlder = rows.length > pageSize;
     const pageRows = rows.slice(0, pageSize).reverse();
@@ -181,6 +185,7 @@ function toThreadMessage(row: {
   replyQuote: string | null;
   runId: string | null;
   clientNonce?: string | null;
+  author?: { id: string; name: string } | null;
   createdAt: Date;
 }): ThreadMessage {
   return {
@@ -194,6 +199,7 @@ function toThreadMessage(row: {
     replyQuote: row.replyQuote ?? undefined,
     runId: row.runId ?? undefined,
     callId: callIdFromClientNonce(row.clientNonce),
+    ...(row.author ? { author: row.author } : {}),
     createdAt: row.createdAt.toISOString(),
   };
 }

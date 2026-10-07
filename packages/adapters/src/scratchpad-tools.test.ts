@@ -128,7 +128,6 @@ describe("scratchpad tools store", () => {
         id: "item-1",
         spaceId: "ws",
         botId: "bot",
-        userId: "user",
       },
     });
   });

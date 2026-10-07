@@ -115,6 +115,7 @@ async function runWithModel(modelId: string) {
     },
     task: { findUniqueOrThrow: vi.fn(async () => ({ id: run.taskId, prompt: "Look again" })) },
     connection: { findMany: vi.fn(async () => []) },
+    spaceMember: { findMany: vi.fn(async () => [{ userId: "user-1", role: "owner" }]) },
     spaceModelPreference: { findFirst: vi.fn(async () => null) },
     userModelCredential: { findFirst: vi.fn(async () => null) },
     deploymentSettings: {

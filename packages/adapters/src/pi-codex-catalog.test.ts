@@ -52,6 +52,7 @@ function oauthPlaintext(access = ACCESS_TOKEN, expiresInMs = 3_600_000, accountI
 
 function authPrisma(options: { secrets?: Array<{ id: string; ciphertext: string }> }) {
   return {
+    spaceMember: { findMany: async () => [{ userId: "user-1", role: "owner" }] },
     secret: {
       findMany: vi
         .fn()

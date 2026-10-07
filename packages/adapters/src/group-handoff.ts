@@ -50,7 +50,6 @@ export async function handoffToGroupBot(
           spaceId: run.spaceId,
           threadId: run.threadId,
           botId: run.botId,
-          userId: run.userId,
           status: "running",
         },
         select: { id: true, sourceMessage: { select: { blocks: true } } },

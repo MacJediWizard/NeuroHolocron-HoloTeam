@@ -213,8 +213,16 @@ describePostgres("cloud agent lifecycle and recovery (PostgreSQL + Cursor emulat
 
   it("never dispatches a launch whose card transaction fails", async () => {
     const h = await setup();
-    await expect(h.tool("launch", { prompt: "Task" }, { userId: "wrong-owner" })).rejects.toThrow();
-    expect(await prisma.cloudAgent.count({ where: { userId: h.id } })).toBe(0);
+    await expect(
+      executeCloudAgentTool(
+        h.deps,
+        h.context,
+        { ...h.run, threadId: "missing-thread" },
+        "cloud_agent_launch",
+        { prompt: "Task" },
+      ),
+    ).rejects.toThrow();
+    expect(await prisma.cloudAgent.count({ where: { spaceId: h.id } })).toBe(0);
     expect(h.wire.requests).toHaveLength(0);
   });
 
@@ -266,14 +274,13 @@ describePostgres("cloud agent lifecycle and recovery (PostgreSQL + Cursor emulat
     expect((await h.state(id)).nextPollAt).toBeNull();
   });
 
-  it("isolates users, spaces, and credential bindings before any provider request", async () => {
+  it("isolates spaces and credential bindings before any provider request", async () => {
     const h = await setup();
     const id = await h.launch();
     await h.poll(id);
     const requests = h.wire.requests.length;
-    expect(await h.tool("cancel", { id }, { userId: "other-user" })).toMatchObject({
-      error: "Unknown cloud agent.",
-    });
+    // Any member of the Space may follow the bot's cloud agent.
+    expect(await h.tool("status", { id }, { userId: "member-2" })).toMatchObject({ id });
     expect(
       await h.tool("reply", { id, prompt: "Attack" }, { spaceId: "other-space" }),
     ).toHaveProperty("error");

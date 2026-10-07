@@ -183,12 +183,7 @@ export async function loadWebhookTarget(
     where: { id: bot.webhookSecretId },
     select: { id: true, ciphertext: true, kind: true, userId: true, spaceId: true },
   });
-  if (
-    !secret ||
-    secret.kind !== WEBHOOK_SECRET_KIND ||
-    secret.userId !== bot.userId ||
-    secret.spaceId !== bot.spaceId
-  ) {
+  if (!secret || secret.kind !== WEBHOOK_SECRET_KIND || secret.spaceId !== bot.spaceId) {
     cache.delete(botId);
     return null;
   }

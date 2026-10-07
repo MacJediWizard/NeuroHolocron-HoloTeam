@@ -206,6 +206,8 @@ export interface SendUserMessageInput {
   prompt: string;
   trigger: "user" | "follow_up" | "webhook" | "messaging";
   clientNonce?: string;
+  /** The member who wrote the message; unset for webhook and system deliveries. */
+  authorUserId?: string;
   linkMessageToRun?: boolean;
   /** When false, persist the user message without starting a run (team-chat transcript). */
   createRun?: boolean;
@@ -384,7 +386,14 @@ export async function sendUserMessage(
         role: "user",
         blocks: input.blocks,
         clientNonce: input.clientNonce,
+        authorUserId: input.authorUserId,
       });
+      const author = input.authorUserId
+        ? await tx.user.findUniqueOrThrow({
+            where: { id: input.authorUserId },
+            select: { id: true, name: true },
+          })
+        : undefined;
       const createRun = input.createRun !== false;
       // Include the creation intro. It has no tools, so it must not absorb the message, and a
       // second run would overlap it on a dedicated computer. Pending steering waits for the
@@ -457,6 +466,7 @@ export async function sendUserMessage(
         payload: {
           messageId: message.id,
           role: "user",
+          author,
           blocks: input.blocks,
           // Carries the call id on the live event so a spoken turn groups into the
           // call card immediately, instead of after a refetch reads the nonce.
@@ -610,7 +620,6 @@ async function commitAnswerRunInput(
   const choiceAsk = !approvalAsk && !secretAsk && Boolean(pendingAsk.actions?.length);
   const selectedChoice = choiceAsk ? resolveAskChoice(input.answer, pendingAsk.actions) : undefined;
   if (secretAsk && !runSecretWriter) return null;
-  if (secretAsk && pendingAsk.credential && run.userId !== input.answeredByUserId) return null;
   const loginAsk = secretAsk && pendingAsk.credential?.auth.type === "login";
   // A username belongs only to a login card, which cannot be saved without one.
   if (loginAsk !== Boolean(input.username?.trim())) return null;
@@ -619,7 +628,6 @@ async function commitAnswerRunInput(
     : undefined;
   if (login && !login.success) return null;
   let approvalEffect: { id: string; kind: string } | null = null;
-  let approvalUserId: string | null = null;
 
   if (approvalAsk) {
     if (!pendingAsk.actions?.some((action) => action.id === input.answer)) return null;
@@ -632,10 +640,6 @@ async function commitAnswerRunInput(
       },
     });
     if (!approvalEffect) return null;
-    if (input.answer === "always") {
-      if (run.userId !== input.answeredByUserId) return null;
-      approvalUserId = input.answeredByUserId;
-    }
   }
 
   const queued = await tx.run.updateMany({
@@ -663,9 +667,8 @@ async function commitAnswerRunInput(
     if (input.answer === "always") {
       await tx.actionApprovalRule.upsert({
         where: {
-          spaceId_createdByUserId_effect_matchKind_matchValue: {
+          spaceId_effect_matchKind_matchValue: {
             spaceId: input.spaceId,
-            createdByUserId: approvalUserId!,
             effect: "always_allow",
             matchKind: "tool",
             matchValue: approvalEffect!.kind,
@@ -673,7 +676,7 @@ async function commitAnswerRunInput(
         },
         create: {
           spaceId: input.spaceId,
-          createdByUserId: approvalUserId!,
+          createdByUserId: input.answeredByUserId,
           effect: "always_allow",
           matchKind: "tool",
           matchValue: approvalEffect!.kind,

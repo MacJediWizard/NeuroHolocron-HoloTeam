@@ -83,6 +83,7 @@ import {
   createDb,
   createPool,
   createThreadEvents,
+  handOverAccount,
   IsolationError,
   parsePositiveInteger,
   provisionMessagingIdentity,
@@ -382,7 +383,11 @@ export async function createApp(
     webOrigin: env.webOrigin,
     signupsEnabled: env.signupsEnabled,
     signupAllowlist: env.signupAllowlist,
-    oidc: env.oidc,
+    oidc: env.oidc && {
+      ...env.oidc,
+      onGroupSpaceMissing: (spaceIds) =>
+        getLogger().error("OIDC_GROUP_SPACES names a Space that does not exist", { spaceIds }),
+    },
     passwordAuth: env.passwordAuth,
     email,
     onEmailError: (error) => getLogger().error("transactional email delivery failed", error),
@@ -390,6 +395,10 @@ export async function createApp(
     beforeDeleteUser: async (userId) => {
       // First, so a provider failure aborts deletion before anything is destroyed.
       await billing?.cancelForDeletedUser(userId);
+      // Shared Spaces the user owns pass to another member and work in Spaces
+      // the user only joined stays with the Space owner, so the bots left below
+      // are the ones in Spaces nobody else belongs to.
+      await handOverAccount(prisma, userId);
       const bots = await prisma.bot.findMany({
         where: { userId },
         select: { id: true, userId: true, spaceId: true, name: true, archivedAt: true },

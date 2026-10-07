@@ -41,18 +41,14 @@ export async function executeCloudAgentTool(
     const result = await deps.prisma.$transaction(async (tx) => {
       // Serialize with clearThread before creating either the intent or its card.
       await tx.thread.update({
-        where: { id: run.threadId, userId: context.userId, spaceId: context.spaceId },
+        where: { id: run.threadId, spaceId: context.spaceId },
         data: { unread: false },
       });
       const existing = await tx.cloudAgent.findUnique({
         where: { operationKey: context.operationId },
       });
       if (existing) {
-        if (
-          existing.spaceId !== context.spaceId ||
-          existing.userId !== context.userId ||
-          existing.providerKey !== connection.key
-        ) {
+        if (existing.spaceId !== context.spaceId || existing.providerKey !== connection.key) {
           throw new Error("Cloud agent operation scope changed");
         }
         return { agent: existing };
@@ -100,7 +96,6 @@ export async function executeCloudAgentTool(
         id: String(args.id).trim(),
         providerKey: connection.key,
         spaceId: context.spaceId,
-        userId: context.userId,
       },
     });
     if (!owned) return { error: "Unknown cloud agent." };

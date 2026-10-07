@@ -155,6 +155,29 @@ describe("reconcileStuckWork", () => {
     expect(stamps).toHaveLength(1);
   });
 
+  it("reminds every member of the Space and stamps the episode once", async () => {
+    const run = candidate("waiting_takeover", 5);
+    const stamps: Array<{ runId: string | null; payload: unknown }> = [];
+    const prisma = noticePrisma(run, stamps, ["user-1", "user-2"]);
+    const { jobs } = publisher();
+    const { provider, send } = notifications();
+
+    await reconcileStuckWork({ prisma, jobs, notifications: provider, now, batchSize: 100 });
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "user-1" }),
+    );
+    expect(send).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ userId: "user-2" }),
+    );
+    expect(stamps).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ state: "delivered" }) }),
+    ]);
+  });
+
   it("does not stamp a reminder until Expo has a token to deliver it", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "rakazo-stuck-push-"));
     dirs.push(dataDir);
@@ -509,9 +532,14 @@ function stampMatchesDelete(stamp: NoticeStamp, where: NoticeDeleteWhere | undef
   });
 }
 
-function noticePrisma(run: ReturnType<typeof candidate>, stamps: NoticeStamp[]) {
+function noticePrisma(
+  run: ReturnType<typeof candidate>,
+  stamps: NoticeStamp[],
+  members = [run.userId],
+) {
   let nextId = 0;
   const prisma = {
+    spaceMember: { findMany: vi.fn(async () => members.map((userId) => ({ userId }))) },
     run: {
       findMany: vi.fn(async () => [run]),
       findUnique: vi.fn(async () => ({
@@ -557,6 +585,7 @@ function noticePrisma(run: ReturnType<typeof candidate>, stamps: NoticeStamp[]) 
 
 function expireClient(run: ReturnType<typeof candidate>, options?: { cancelled?: number }) {
   const client = {
+    spaceMember: { findMany: vi.fn(async () => [{ userId: run.userId }]) },
     run: {
       findMany: vi.fn(async () => [run]),
       updateMany: vi.fn(async () => ({ count: options?.cancelled ?? 1 })),

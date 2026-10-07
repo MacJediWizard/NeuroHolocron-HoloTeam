@@ -93,7 +93,7 @@ export async function messageBot(
   const hop = nextBotMessageHop(sourceContext?.hop);
 
   const candidates = await deps.prisma.bot.findMany({
-    where: { spaceId: run.spaceId, userId: run.userId, archivedAt: null },
+    where: { spaceId: run.spaceId, archivedAt: null },
     select: { id: true, name: true, title: true, thread: { select: { id: true } } },
   });
   const target = resolveBotAddress(candidates, {
@@ -180,7 +180,6 @@ export async function messageBot(
             spaceId: run.spaceId,
             threadId: run.threadId,
             botId: run.botId,
-            userId: run.userId,
             status: options?.allowTerminalSource
               ? { in: ["completed", "failed", "cancelled"] }
               : "running",
@@ -196,7 +195,6 @@ export async function messageBot(
           where: {
             id: target.id,
             spaceId: run.spaceId,
-            userId: run.userId,
             archivedAt: null,
           },
           select: { id: true },

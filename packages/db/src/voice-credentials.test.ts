@@ -4,14 +4,36 @@ import { selectSpaceVoicePreference } from "./voice-credentials.js";
 
 const scope = { userId: "user", spaceId: "space" };
 
-function preferenceClient() {
+function preferenceClient(owner = "user") {
   const updateMany = vi.fn().mockResolvedValue({ count: 0 });
   const upsert = vi.fn().mockResolvedValue({ id: "preference" });
-  const prisma = { spaceVoicePreference: { updateMany, upsert } } as unknown as PrismaClient;
+  const prisma = {
+    spaceMember: { findMany: vi.fn().mockResolvedValue([{ userId: owner, role: "owner" }]) },
+    spaceVoicePreference: { updateMany, upsert },
+  } as unknown as PrismaClient;
   return { prisma, upsert };
 }
 
 describe("selectSpaceVoicePreference", () => {
+  it("writes a member's voice choice onto the Space owner's preference", async () => {
+    const { prisma, upsert } = preferenceClient("owner");
+
+    await selectSpaceVoicePreference(prisma, scope, "credential", "voice");
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          spaceId_userId_credentialId: {
+            spaceId: "space",
+            userId: "owner",
+            credentialId: "credential",
+          },
+        },
+        create: expect.objectContaining({ userId: "owner" }),
+      }),
+    );
+  });
+
   it("leaves the speech model unchanged when the caller omits it", async () => {
     const { prisma, upsert } = preferenceClient();
 

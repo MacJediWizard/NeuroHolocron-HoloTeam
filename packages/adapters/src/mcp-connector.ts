@@ -129,7 +129,6 @@ export class McpConnector implements ConnectorProvider {
       where: {
         botId: context.botId,
         spaceId: context.spaceId,
-        userId: context.userId,
         server: { enabled: true },
       },
       include: { server: true },
@@ -252,7 +251,6 @@ export class McpConnector implements ConnectorProvider {
         botId: context.botId,
         serverId: call.route.resourceId,
         spaceId: context.spaceId,
-        userId: context.userId,
         server: { enabled: true },
       },
       include: { server: true },
@@ -294,9 +292,9 @@ export class McpConnector implements ConnectorProvider {
   }
 
   private sessionKey(server: McpServer, context: AdapterContext): string {
-    // Identity headers are applied once, at connect time, so a session is only
-    // valid for the identity it connected as. The key has to carry that identity.
-    return `${server.id} ${context.spaceId} ${context.userId}`;
+    // A server's secret and endpoint policy are the Space's, not the caller's, so
+    // every member's run shares one session per server.
+    return `${server.id} ${context.spaceId}`;
   }
 
   private async evict(sessionKey: string): Promise<void> {
@@ -350,7 +348,6 @@ export class McpConnector implements ConnectorProvider {
             where: {
               id: server.secretId,
               spaceId: context.spaceId,
-              userId: context.userId,
             },
           })
         : null;
@@ -375,9 +372,10 @@ export class McpConnector implements ConnectorProvider {
         if (!server.endpoint) throw new Error("MCP endpoint is required");
         const endpoint = new URL(server.endpoint);
         const localHttp = endpoint.protocol === "http:" && isLocalMcpHost(endpoint.hostname);
+        // The server creator's standing decides, so a member's run reaches what they added.
         const allowPrivateEndpoint = await actorMayUsePrivateEndpoint(
           this.prisma,
-          context.userId,
+          server.userId,
           this.options.allowPrivateEndpoint === true,
         );
         const authProvider =

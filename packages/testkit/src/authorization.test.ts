@@ -573,7 +573,7 @@ describeWithDatabase("API authorization and resource isolation", () => {
     }
   });
 
-  it("keeps approval rules private to each user in a shared Space", async () => {
+  it("shares approval rules with every member of a Space", async () => {
     const owner = await signup(app, `approval-owner-${stamp}@rakazo.test`, "Approval Owner");
     const member = await signup(app, `approval-member-${stamp}@rakazo.test`, "Approval Member");
     const ownerActor = await rpc<Actor>(app, owner, "me");
@@ -594,24 +594,26 @@ describeWithDatabase("API authorization and resource isolation", () => {
       matchKind: "tool",
       matchValue: "destination.write",
     });
-    expect(await rpc<unknown[]>(app, member, "approvalRules/list")).toEqual([]);
+    expect(await rpc<Array<{ id: string }>>(app, member, "approvalRules/list")).toEqual([
+      expect.objectContaining({ id: ownerRule.id }),
+    ]);
 
     const memberRule = await rpc<{ id: string }>(app, member, "approvalRules/set", {
       effect: "require_approval",
       matchKind: "category",
       matchValue: "email",
     });
-    expect(await rpc<Array<{ id: string }>>(app, owner, "approvalRules/list")).toEqual([
-      expect.objectContaining({ id: ownerRule.id }),
-    ]);
-    expect(await rpc<Array<{ id: string }>>(app, member, "approvalRules/list")).toEqual([
-      expect.objectContaining({ id: memberRule.id }),
-    ]);
+    expect(await rpc<Array<{ id: string }>>(app, owner, "approvalRules/list")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: ownerRule.id }),
+        expect.objectContaining({ id: memberRule.id }),
+      ]),
+    );
 
     await rpc(app, member, "approvalRules/remove", { id: ownerRule.id });
     expect(
       await handles.prisma.actionApprovalRule.findUnique({ where: { id: ownerRule.id } }),
-    ).not.toBeNull();
+    ).toBeNull();
   });
 
   it("keeps space data and computers behind the selected space boundary", async () => {

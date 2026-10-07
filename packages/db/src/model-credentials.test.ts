@@ -9,10 +9,17 @@ import {
   selectSpaceModelPreference,
 } from "./model-credentials.js";
 
+function ownedBy(userId: string) {
+  return { findMany: vi.fn().mockResolvedValue([{ userId, role: "owner" }]) };
+}
+
 describe("findDefaultModelCredential", () => {
   it("resolves the default from the active space preference", async () => {
     const findFirst = vi.fn().mockResolvedValue(null);
-    const prisma = { spaceModelPreference: { findFirst } } as unknown as PrismaClient;
+    const prisma = {
+      spaceMember: ownedBy("user"),
+      spaceModelPreference: { findFirst },
+    } as unknown as PrismaClient;
 
     await findDefaultModelCredential(prisma, { userId: "user", spaceId: "space" });
 
@@ -37,7 +44,10 @@ describe("findDefaultModelCredential", () => {
       isDefault: true,
       modelId: "null",
     });
-    const prisma = { spaceModelPreference: { findFirst } } as unknown as PrismaClient;
+    const prisma = {
+      spaceMember: ownedBy("user"),
+      spaceModelPreference: { findFirst },
+    } as unknown as PrismaClient;
 
     await expect(
       findDefaultModelCredential(prisma, { userId: "user", spaceId: "space" }),
@@ -48,10 +58,30 @@ describe("findDefaultModelCredential", () => {
 });
 
 describe("findModelCredential", () => {
+  it("resolves a member's lookup to the Space owner's preferences and credentials", async () => {
+    const preferenceFindFirst = vi.fn().mockResolvedValue(null);
+    const credentialFindFirst = vi.fn().mockResolvedValue(null);
+    const prisma = {
+      spaceMember: ownedBy("owner"),
+      spaceModelPreference: { findFirst: preferenceFindFirst },
+      userModelCredential: { findFirst: credentialFindFirst },
+    } as unknown as PrismaClient;
+
+    await findModelCredential(prisma, { userId: "member", spaceId: "space" }, "xai");
+
+    expect(preferenceFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ userId: "owner" }) }),
+    );
+    expect(credentialFindFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { userId: "owner", provider: "xai" } }),
+    );
+  });
+
   it("falls back to the newest user credential when the space has no preference", async () => {
     const preferenceFindFirst = vi.fn().mockResolvedValue(null);
     const credentialFindFirst = vi.fn().mockResolvedValue(null);
     const prisma = {
+      spaceMember: ownedBy("user"),
       spaceModelPreference: { findFirst: preferenceFindFirst },
       userModelCredential: { findFirst: credentialFindFirst },
     } as unknown as PrismaClient;
@@ -85,6 +115,7 @@ describe("findModelCredential", () => {
     };
     const preferenceFindFirst = vi.fn().mockResolvedValue(matching);
     const prisma = {
+      spaceMember: ownedBy("user"),
       spaceModelPreference: { findFirst: preferenceFindFirst },
       userModelCredential: { findFirst: vi.fn() },
     } as unknown as PrismaClient;
@@ -152,6 +183,7 @@ describe("findModelCredential", () => {
     const preferenceFindMany = vi.fn().mockResolvedValue([defaultPreference, sparkPreference]);
     const credentialFindMany = vi.fn().mockResolvedValue([older, newer]);
     const prisma = {
+      spaceMember: ownedBy("user"),
       spaceModelPreference: { findMany: preferenceFindMany },
       userModelCredential: { findMany: credentialFindMany },
     } as unknown as PrismaClient;
@@ -343,10 +375,33 @@ describe("chooseModelCredential", () => {
 });
 
 describe("selectSpaceModelPreference", () => {
+  it("writes a member's model choice onto the Space owner's preference", async () => {
+    const updateMany = vi.fn().mockResolvedValue({ count: 0 });
+    const upsert = vi.fn().mockResolvedValue({ id: "preference" });
+    const prisma = {
+      spaceMember: ownedBy("owner"),
+      spaceModelPreference: { updateMany, upsert },
+    } as unknown as PrismaClient;
+
+    await selectSpaceModelPreference(prisma, { userId: "member", spaceId: "space" }, "c", "m");
+
+    expect(upsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          spaceId_userId_credentialId: { spaceId: "space", userId: "owner", credentialId: "c" },
+        },
+        create: expect.objectContaining({ userId: "owner" }),
+      }),
+    );
+  });
+
   it("clears only a different active default before selecting the credential", async () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const upsert = vi.fn().mockResolvedValue({ id: "preference" });
-    const prisma = { spaceModelPreference: { updateMany, upsert } } as unknown as PrismaClient;
+    const prisma = {
+      spaceMember: ownedBy("user"),
+      spaceModelPreference: { updateMany, upsert },
+    } as unknown as PrismaClient;
 
     await selectSpaceModelPreference(
       prisma,
@@ -377,7 +432,10 @@ describe("selectSpaceModelPreference", () => {
     async (modelId) => {
       const updateMany = vi.fn().mockResolvedValue({ count: 0 });
       const upsert = vi.fn().mockResolvedValue({ id: "preference" });
-      const prisma = { spaceModelPreference: { updateMany, upsert } } as unknown as PrismaClient;
+      const prisma = {
+        spaceMember: ownedBy("user"),
+        spaceModelPreference: { updateMany, upsert },
+      } as unknown as PrismaClient;
 
       await selectSpaceModelPreference(
         prisma,

@@ -6,6 +6,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 const SERVER = {
   id: "server-1",
+  userId: "u1",
   slug: "demo",
   transport: "streamable_http",
   endpoint: "https://mcp.example.test/mcp",
@@ -861,7 +862,7 @@ describe("MCP connector session cache", () => {
     await connector.close();
   });
 
-  it("does not reuse one session across workspaces", async () => {
+  it("shares one session among a Space's members but not across workspaces", async () => {
     const state = { failNext: false, initializations: 0 };
     vi.stubGlobal("fetch", mcpFetch(state));
     const prisma = {
@@ -880,13 +881,13 @@ describe("MCP connector session cache", () => {
     expect(state.initializations).toBe(1);
 
     await connector.discoverTools(contextFor("w1", "u2"));
-    expect(state.initializations).toBe(2);
+    expect(state.initializations).toBe(1);
 
     await connector.discoverTools(contextFor("w2", "u1"));
-    expect(state.initializations).toBe(3);
+    expect(state.initializations).toBe(2);
 
     await connector.discoverTools(contextFor("w1", "u1"));
-    expect(state.initializations).toBe(3);
+    expect(state.initializations).toBe(2);
 
     await connector.close();
   });
@@ -972,6 +973,32 @@ describe("MCP connector private endpoints", () => {
     const tools = await connector.discoverTools({
       spaceId: "w1",
       userId: "u1",
+      botId: "bot-1",
+      signal: new AbortController().signal,
+    } as never);
+    expect(tools.map((tool) => tool.name)).toEqual(["mcp__demo__echo"]);
+    await connector.close();
+  });
+
+  it("lets a Space member reach a private server the deployment owner added", async () => {
+    const state = { failNext: false, initializations: 0 };
+    vi.stubGlobal("fetch", mcpFetch(state, "http://10.0.0.8:3927/mcp"));
+    const connector = new McpConnector(
+      {
+        botMcpServer: { findMany: vi.fn().mockResolvedValue([privateAssignment]) },
+        deploymentSettings: { findUnique: vi.fn(async () => ({ ownerUserId: "u1" })) },
+      } as never,
+      {} as never,
+      {
+        network: {
+          fetch: (input, init) => globalThis.fetch(input, init),
+          resolveHostname: async () => [{ address: "10.0.0.8", family: 4 }],
+        },
+      },
+    );
+    const tools = await connector.discoverTools({
+      spaceId: "w1",
+      userId: "member-2",
       botId: "bot-1",
       signal: new AbortController().signal,
     } as never);

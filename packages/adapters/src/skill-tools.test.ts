@@ -52,10 +52,7 @@ function makePrisma(rows: Array<Record<string, unknown>> = []) {
         }) => {
           const index = store.findIndex(
             (row) =>
-              row.id === where.id &&
-              row.spaceId === where.spaceId &&
-              row.userId === where.userId &&
-              row.source === where.source,
+              row.id === where.id && row.spaceId === where.spaceId && row.source === where.source,
           );
           if (index < 0) return { count: 0 };
           store[index] = { ...store[index], ...data, updatedAt: new Date() };
@@ -71,10 +68,7 @@ function makePrisma(rows: Array<Record<string, unknown>> = []) {
       deleteMany: vi.fn(async ({ where }: { where: Record<string, string> }) => {
         const index = store.findIndex(
           (row) =>
-            row.id === where.id &&
-            row.spaceId === where.spaceId &&
-            row.userId === where.userId &&
-            row.source === where.source,
+            row.id === where.id && row.spaceId === where.spaceId && row.source === where.source,
         );
         if (index < 0) return { count: 0 };
         store.splice(index, 1);
@@ -121,6 +115,29 @@ describe("skill tools", () => {
     expect(deleted).toEqual({ ok: true, name: "Daily standup" });
     expect(await skillReadFromTool(prisma as never, owner, { name: "Daily standup" })).toEqual({
       error: "Skill not found.",
+    });
+  });
+
+  it("lets another member of the Space read, update, and delete a saved skill", async () => {
+    const member = { spaceId: owner.spaceId, userId: "user-2" };
+    await skillCreateFromTool(prisma as never, owner, {
+      name: "Daily standup",
+      description: "Prepare standup notes",
+      body: "1. Summarize yesterday.",
+    });
+
+    expect(
+      await skillReadFromTool(prisma as never, member, { name: "Daily standup" }),
+    ).toMatchObject({ name: "Daily standup", readOnly: false });
+    expect(
+      await skillUpdateFromTool(prisma as never, member, {
+        name: "Daily standup",
+        description: "Edited by a member",
+      }),
+    ).toMatchObject({ ok: true, description: "Edited by a member" });
+    expect(await skillDeleteFromTool(prisma as never, member, { name: "Daily standup" })).toEqual({
+      ok: true,
+      name: "Daily standup",
     });
   });
 

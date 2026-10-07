@@ -455,9 +455,41 @@ describe("thread message pages", () => {
       where: { threadId: "thread-1", seq: { lt: 6 } },
       orderBy: { seq: "desc" },
       take: 3,
+      include: { author: { select: { id: true, name: true } } },
     });
     expect(page.messages.map((message) => message.seq)).toEqual([4, 5]);
     expect(page.olderCursor).toBe(4);
+  });
+
+  it("names the member who wrote a user message", async () => {
+    const findMany = vi.fn(async () => [
+      {
+        id: "message-1",
+        threadId: "thread-1",
+        seq: 1,
+        role: "user",
+        blocks: [{ kind: "text", text: "hi" }],
+        runId: null,
+        author: { id: "user-2", name: "Grace" },
+        createdAt: new Date("2026-08-16T00:00:01.000Z"),
+      },
+      {
+        id: "message-0",
+        threadId: "thread-1",
+        seq: 0,
+        role: "bot",
+        blocks: [{ kind: "text", text: "hello" }],
+        runId: null,
+        author: null,
+        createdAt: new Date("2026-08-16T00:00:00.000Z"),
+      },
+    ]);
+    const prisma = { message: { findMany } } as unknown as PrismaClient;
+
+    const page = await loadMessagePage(prisma, "thread-1", undefined, 2);
+
+    expect(page.messages[0]).not.toHaveProperty("author");
+    expect(page.messages[1]?.author).toEqual({ id: "user-2", name: "Grace" });
   });
 
   it("ends pagination when the database returns no lookahead row", async () => {
@@ -528,6 +560,7 @@ describe("thread message pages", () => {
       where: { threadId: "thread-1", seq: { gte: 3, lte: 7 } },
       orderBy: { seq: "asc" },
       take: 4,
+      include: { author: { select: { id: true, name: true } } },
     });
   });
 

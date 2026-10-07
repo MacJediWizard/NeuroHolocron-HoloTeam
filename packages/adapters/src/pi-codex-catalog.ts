@@ -1,7 +1,7 @@
 import type { OAuthCredential } from "@earendil-works/pi-ai";
 import type { ThinkingLevel } from "@rakazo/contracts";
 import { ThinkingLevelSchema } from "@rakazo/contracts";
-import type { PrismaClient } from "@rakazo/db";
+import { ownerScope, type PrismaClient } from "@rakazo/db";
 import type { ModelCredentialAuthKind } from "./pi-catalog-availability.js";
 import type { PiCatalogEntry } from "./pi-models.js";
 import { listPiCatalog } from "./pi-models.js";
@@ -445,7 +445,7 @@ export async function codexLiveListsModel(
 export async function codexLiveCatalogsForSpace(
   prisma: PrismaClient,
   secretStore: Pick<EncryptedSecretStore, "load">,
-  scope: { userId: string; spaceId: string },
+  actorScope: { userId: string; spaceId: string },
   auth: CodexCatalogSpaceAuth,
   catalog: CodexLiveCatalog,
   opts?: { onExpiredToken?: (secretId: string) => void },
@@ -453,6 +453,8 @@ export async function codexLiveCatalogsForSpace(
   const live = new Map<string, CodexCatalogModel[]>();
   const secretIds = oauthCodexSecretIds(auth);
   if (secretIds.length === 0) return live;
+  // The model secrets and their catalog cache belong to the Space owner.
+  const scope = await ownerScope(prisma, actorScope);
   const secrets = await prisma.secret.findMany({
     where: { id: { in: secretIds }, userId: scope.userId, spaceId: null },
     select: { id: true, ciphertext: true },

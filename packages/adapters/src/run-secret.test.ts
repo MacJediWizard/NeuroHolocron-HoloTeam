@@ -206,7 +206,6 @@ describe("tryCompleteConnectionWithCode", () => {
       where: {
         id: "conn-1",
         spaceId: "workspace-1",
-        userId: "user-1",
         status: { in: ["pending", "connected"] },
       },
     });

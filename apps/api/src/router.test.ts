@@ -15,10 +15,19 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RouterDeps } from "./router.js";
 import { createRouter, enqueueBotIntroRun, HEARTBEAT_MS, SESSION_RECHECK_MS } from "./router.js";
 
+/** The test actor owns its Space, so owner-resolved credential reads land on its own rows. */
+function ownerMembership(userId = "user-1") {
+  return {
+    findMany: vi.fn().mockResolvedValue([{ userId, role: "owner" }]),
+    findUnique: vi.fn().mockResolvedValue({ role: "owner" }),
+  };
+}
+
 describe("account preferences", () => {
   function preferencesDeps(avatarStyle: string) {
     const update = vi.fn().mockResolvedValue({});
     const prisma = {
+      spaceMember: ownerMembership(),
       user: {
         update,
         findUniqueOrThrow: vi.fn().mockResolvedValue({
@@ -135,6 +144,7 @@ describe("account preferences", () => {
 describe("billing", () => {
   function billingDeps(isDeploymentOwner: boolean, billing?: RouterDeps["billing"]) {
     const prisma = {
+      spaceMember: ownerMembership(),
       user: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           email: "user@rakazo.test",
@@ -191,6 +201,7 @@ describe("model setup gate", () => {
     deploymentModelCredentialCipher?: string;
   }) {
     const prisma = {
+      spaceMember: ownerMembership(),
       user: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           email: "user@rakazo.test",
@@ -346,6 +357,7 @@ describe("thread answer delivery", () => {
     const sink = createTestSink();
     installLogger(createLogger({ service: "rakazo-api", sinks: [sink] }));
     const prisma = {
+      spaceMember: ownerMembership(),
       bot: {
         findFirst: vi.fn().mockResolvedValue({
           id: "bot-1",
@@ -445,6 +457,7 @@ describe("thread stream authorization", () => {
       }
     };
     const prisma = {
+      spaceMember: ownerMembership(),
       bot: {
         findFirst: vi.fn().mockResolvedValue({
           id: "bot-1",
@@ -543,6 +556,7 @@ describe("MCP server deletion", () => {
     const deleteServer = vi.fn().mockResolvedValue({ id: "server-1" });
     const deleteSecrets = vi.fn().mockResolvedValue({ count: 0 });
     const prisma = {
+      spaceMember: ownerMembership(),
       mcpServer: {
         findFirst: vi.fn().mockResolvedValue({ id: "server-1", secretId: "old-secret" }),
         delete: deleteServer,
@@ -587,7 +601,6 @@ describe("MCP server deletion", () => {
       where: {
         id: "old-secret",
         spaceId: "workspace-1",
-        userId: "user-1",
       },
     });
   });
@@ -606,6 +619,7 @@ describe("MCP loopback endpoints", () => {
       updatedAt: new Date(0),
     }));
     const prisma = {
+      spaceMember: ownerMembership(),
       mcpServer: {
         create,
         findFirst: vi
@@ -714,6 +728,7 @@ describe("private API connectors", () => {
       createdAt: new Date(0),
     }));
     const prisma = {
+      spaceMember: ownerMembership(),
       capabilityInstall: { create },
       $transaction: vi.fn(async (run: (tx: unknown) => Promise<unknown>) => run(prisma)),
     } as unknown as PrismaClient;
@@ -799,8 +814,10 @@ describe("connections.begin", () => {
     const updateMany = vi.fn().mockResolvedValue({ count: 1 });
     const create = vi.fn();
     const prisma = {
+      spaceMember: ownerMembership(),
       $transaction: vi.fn(async (fn: (tx: unknown) => Promise<unknown>) => {
         const tx = {
+          spaceMember: ownerMembership(),
           $executeRaw: vi.fn().mockResolvedValue(undefined),
           connection: {
             findMany: vi.fn().mockResolvedValue([{ id: "conn-old", status: "revoked" }]),
@@ -880,6 +897,7 @@ describe("connections.complete", () => {
       createdAt: new Date("2026-08-26T00:00:00.000Z"),
     });
     const prisma = {
+      spaceMember: ownerMembership(),
       connection: {
         findFirst: vi.fn().mockResolvedValue({
           id: "conn-1",
@@ -904,6 +922,7 @@ describe("connections.complete", () => {
           createdAt: new Date("2026-08-26T00:00:00.000Z"),
         };
         const tx = {
+          spaceMember: ownerMembership(),
           $executeRaw: vi.fn().mockResolvedValue(undefined),
           connection: {
             findFirst: vi.fn().mockResolvedValueOnce(row).mockResolvedValueOnce(null),
@@ -968,6 +987,7 @@ describe("connections.complete", () => {
 describe("updater owner gate", () => {
   function updaterDeps() {
     const prisma = {
+      spaceMember: ownerMembership(),
       user: {
         findUniqueOrThrow: vi.fn().mockResolvedValue({
           email: "user@rakazo.test",
@@ -1091,6 +1111,7 @@ describe("computer screen url", () => {
 
   const callScreenUrl = async (connectScreen: () => Promise<unknown>, updateMany = vi.fn()) => {
     const prisma = {
+      spaceMember: ownerMembership(),
       bot: {
         findFirst: vi.fn().mockResolvedValue({
           id: "bot-1",
@@ -1219,6 +1240,7 @@ describe("computer terminal and file transfer", () => {
       writeFile: vi.fn().mockResolvedValue(undefined),
     };
     const prisma = {
+      spaceMember: ownerMembership(),
       bot: {
         findFirst: vi.fn().mockResolvedValue({
           id: "bot-1",
@@ -1506,7 +1528,7 @@ describe("interrupted computer reservation release", () => {
       where: {
         id: "update-1",
         status: "interrupted",
-        computer: { spaceId: "space-1", bots: { some: { userId: "user-1", archivedAt: null } } },
+        computer: { spaceId: "space-1", bots: { some: { archivedAt: null } } },
       },
     });
     expect(computerUpdate.updateMany).toHaveBeenCalledWith({
@@ -1552,12 +1574,14 @@ describe("model credential persistence", () => {
       upsert,
     };
     const tx = {
+      spaceMember: ownerMembership(),
       userModelCredential,
       secret: { create: vi.fn().mockResolvedValue({}) },
       spaceModelPreference,
     };
     const deps = {
       prisma: {
+        spaceMember: ownerMembership(),
         userModelCredential,
         spaceModelPreference,
         $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
@@ -1735,6 +1759,7 @@ describe("bot intro run", () => {
     const spaceModelPreference = { findFirst: vi.fn().mockResolvedValue(preference) };
     const deps = {
       prisma: {
+        spaceMember: ownerMembership(),
         $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
         spaceModelPreference,
         deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
@@ -1834,6 +1859,7 @@ describe("codex catalog auth", () => {
   function catalogDeps() {
     const load = vi.fn((ciphertext: string) => (ciphertext === "cipher-oauth" ? oauth : apiKey));
     const prisma = {
+      spaceMember: ownerMembership(),
       userModelCredential: {
         findMany: vi.fn().mockResolvedValue([
           { provider: "openai-codex", secretId: "secret-api" },
@@ -1992,7 +2018,7 @@ describe("codex live catalog", () => {
             },
           };
     const deps = {
-      prisma,
+      prisma: { spaceMember: ownerMembership(), ...prisma },
       secrets: { load },
       env: {
         defaultProvider: "fake",
@@ -2088,6 +2114,7 @@ describe("codex live catalog", () => {
     };
     const credentialB = { ...credentialA, id: "cred-b", secretId: "secret-b" };
     const prisma = {
+      spaceMember: ownerMembership(),
       userModelCredential: { findMany: vi.fn().mockResolvedValue([credentialA, credentialB]) },
       spaceModelPreference: {
         findMany: vi.fn().mockResolvedValue([
@@ -2157,6 +2184,7 @@ describe("codex live catalog", () => {
       accountId: "acct-live-test",
     });
     const prisma = {
+      spaceMember: ownerMembership(),
       userModelCredential: {
         findMany: vi
           .fn()
@@ -2216,6 +2244,7 @@ describe("codex live catalog", () => {
     };
     const upsert = vi.fn(async () => ({ id: "pref-spark" }));
     const tx = {
+      spaceMember: ownerMembership(),
       userModelCredential: { findMany: vi.fn().mockResolvedValue([oauthCredential]) },
       spaceModelPreference: {
         findMany: vi.fn().mockResolvedValue([]),
@@ -2227,7 +2256,10 @@ describe("codex live catalog", () => {
       },
     };
     const deps = {
-      prisma: { $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)) },
+      prisma: {
+        spaceMember: tx.spaceMember,
+        $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
+      },
       secrets: { load: vi.fn(() => oauth("acct-live-test")) },
       env: {
         defaultProvider: "fake",
@@ -2272,6 +2304,7 @@ describe("codex live catalog", () => {
       updatedAt: stamp,
     };
     const tx = {
+      spaceMember: ownerMembership(),
       userModelCredential: { findMany: vi.fn().mockResolvedValue([oauthCredential]) },
       spaceModelPreference: {
         findMany: vi.fn().mockResolvedValue([]),
@@ -2283,7 +2316,10 @@ describe("codex live catalog", () => {
       },
     };
     const deps = {
-      prisma: { $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)) },
+      prisma: {
+        spaceMember: tx.spaceMember,
+        $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
+      },
       secrets: { load: vi.fn(() => oauth("acct-live-test")) },
       env: {
         defaultProvider: "fake",
@@ -2323,6 +2359,7 @@ describe("codex live catalog", () => {
     };
     const upsert = vi.fn(async () => ({ id: "pref-spark" }));
     const tx = {
+      spaceMember: ownerMembership(),
       userModelCredential: { findMany: vi.fn().mockResolvedValue([oauthCredential]) },
       spaceModelPreference: {
         findMany: vi.fn().mockResolvedValue([]),
@@ -2336,6 +2373,7 @@ describe("codex live catalog", () => {
     const transaction = vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx));
     // The same delegates serve the pre-transaction warm read on deps.prisma.
     const prisma = {
+      spaceMember: ownerMembership(),
       $transaction: transaction,
       userModelCredential: tx.userModelCredential,
       spaceModelPreference: { findMany: tx.spaceModelPreference.findMany },
@@ -2448,6 +2486,7 @@ describe("model set default auth", () => {
     });
     const upsert = vi.fn(async () => ({ id: "pref-spark" }));
     const tx = {
+      spaceMember: ownerMembership(),
       userModelCredential: {
         findMany: vi.fn().mockResolvedValue([oauthCredential, apiCredential]),
       },
@@ -2477,6 +2516,7 @@ describe("model set default auth", () => {
     const handler = new RPCHandler(
       createRouter({
         prisma: {
+          spaceMember: ownerMembership(),
           $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
         },
         secrets: { load },
@@ -2549,6 +2589,7 @@ describe("model set default auth", () => {
     const upsert = vi.fn(async () => ({ id: "pref-luna" }));
     const updateMany = vi.fn(async () => ({ count: 1 }));
     const tx = {
+      spaceMember: ownerMembership(),
       userModelCredential: {
         findMany: vi.fn().mockResolvedValue([oauthCredential, apiCredential]),
       },
@@ -2571,6 +2612,7 @@ describe("model set default auth", () => {
     const handler = new RPCHandler(
       createRouter({
         prisma: {
+          spaceMember: ownerMembership(),
           $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
         },
         secrets: { load },
@@ -2640,6 +2682,7 @@ describe("model set default auth", () => {
     };
     const upsert = vi.fn(async () => ({ id: "pref-luna" }));
     const tx = {
+      spaceMember: ownerMembership(),
       userModelCredential: {
         findMany: vi.fn().mockResolvedValue([oauthCredential, apiCredential]),
       },
@@ -2673,6 +2716,7 @@ describe("model set default auth", () => {
     const handler = new RPCHandler(
       createRouter({
         prisma: {
+          spaceMember: ownerMembership(),
           $transaction: vi.fn(async (fn: (client: typeof tx) => unknown) => fn(tx)),
         },
         secrets: { load },
@@ -2809,11 +2853,13 @@ describe("bot model auth on save", () => {
       description: bot.description,
     }));
     const tx = {
+      spaceMember: ownerMembership(),
       bot: { update: botUpdate },
       thread: { update: vi.fn(async () => ({ nextEventSeq: 2 })) },
       event: { create: vi.fn(async () => ({ seq: 1 })) },
     };
     const prisma = {
+      spaceMember: ownerMembership(),
       bot: {
         findFirst: vi.fn(async () => bot),
         findMany: vi.fn(async () => [{ ...bot, name: "Ada renamed" }]),
@@ -2956,14 +3002,17 @@ describe("bot restore computer quota", () => {
     };
     const computer = {
       count: vi.fn(async (args: { where: { id?: string } }) => (args.where.id ? 0 : inUse)),
+      findUniqueOrThrow: vi.fn(async () => ({ spaceId: "space-1" })),
     };
+    const spaceMember = ownerMembership();
     const $queryRaw = vi.fn(async () => [{ lock: "1" }]);
     const prisma = {
+      spaceMember,
       bot: botApi,
       computer,
       $queryRaw,
       $transaction: vi.fn(async (callback: (tx: unknown) => Promise<unknown>) =>
-        callback({ $queryRaw, computer, bot: botApi }),
+        callback({ $queryRaw, computer, spaceMember, bot: botApi }),
       ),
     };
     const handler = new RPCHandler(
@@ -3058,6 +3107,7 @@ describe("routines.update", () => {
     });
     const enqueue = vi.fn(async () => undefined);
     const prisma = {
+      spaceMember: ownerMembership(),
       routine: {
         findFirst: vi.fn(async (args: { where: { bot?: { archivedAt: null } } }) =>
           botArchived && args.where.bot?.archivedAt === null ? null : routine,
@@ -3130,6 +3180,7 @@ describe("threads.endCall", () => {
     const created: { blocks?: unknown; clientNonce?: string }[] = [];
     const events: { type: string; payload: Record<string, unknown> }[] = [];
     const tx = {
+      spaceMember: ownerMembership(),
       thread: { update: vi.fn().mockResolvedValue({ nextMessageSeq: 3, nextEventSeq: 5 }) },
       message: {
         create: vi.fn(async ({ data }: { data: { blocks: unknown; clientNonce?: string } }) => {
@@ -3152,6 +3203,7 @@ describe("threads.endCall", () => {
       }),
     } as never;
     const prisma = {
+      spaceMember: ownerMembership(),
       bot: {
         findFirst: vi
           .fn()
@@ -3237,6 +3289,7 @@ describe("groups.archive", () => {
     const groupUpdate = vi.fn();
     // As in production: the run's computer is known only through its execution lease.
     const tx = {
+      spaceMember: ownerMembership(),
       $queryRaw: vi.fn().mockResolvedValue([{ id: "group-1" }]),
       chatGroup: {
         findFirst: vi.fn().mockResolvedValue({
@@ -3281,6 +3334,7 @@ describe("groups.archive", () => {
       event: { deleteMany: vi.fn() },
     };
     const prisma = {
+      spaceMember: ownerMembership(),
       $transaction: vi.fn(async (callback: (client: typeof tx) => unknown) => callback(tx)),
       computerExecutionLease: {
         updateMany: vi.fn(async () => {
@@ -3360,5 +3414,67 @@ describe("groups.archive", () => {
       }),
     );
     expect(calls).toEqual(["cancel run work", "release screen", "expire lease"]);
+  });
+});
+
+describe("shared Space model credentials", () => {
+  const member = {
+    spaceId: "workspace-1",
+    userId: "member-1",
+    email: "member@rakazo.test",
+    isDeploymentOwner: false,
+  } satisfies Actor;
+
+  function memberDeps() {
+    const prisma = {
+      spaceMember: {
+        findMany: vi.fn().mockResolvedValue([{ userId: "owner-1", role: "owner" }]),
+        findUnique: vi.fn().mockResolvedValue({ role: "member" }),
+      },
+      userModelCredential: { findMany: vi.fn().mockResolvedValue([]) },
+      secret: { findMany: vi.fn().mockResolvedValue([]) },
+    };
+    const oauthLogins = { cancelProvider: vi.fn() };
+    const deps = {
+      prisma,
+      oauthLogins,
+      env: { webOrigin: "http://127.0.0.1:5173", sandboxProvider: "fake" },
+    } as unknown as RouterDeps;
+    const handler = new RPCHandler(createRouter(deps));
+    const call = (path: string, json: unknown) =>
+      handler.handle(
+        new Request(`http://127.0.0.1/rpc/models/${path}`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ json }),
+        }),
+        { prefix: "/rpc", context: { actor: member } },
+      );
+    return { prisma, oauthLogins, call };
+  }
+
+  it("forbids a member from connecting or disconnecting the owner's model credentials", async () => {
+    const { prisma, oauthLogins, call } = memberDeps();
+    const connect = await call("connect", {
+      provider: "anthropic",
+      apiKey: "sk-ant-fake-12345678",
+    });
+    expect(connect.response?.status).toBe(403);
+    const disconnect = await call("disconnect", { provider: "anthropic" });
+    expect(disconnect.response?.status).toBe(403);
+    expect(oauthLogins.cancelProvider).not.toHaveBeenCalled();
+    expect(prisma.userModelCredential.findMany).not.toHaveBeenCalled();
+  });
+
+  it("lists the Space owner's model credentials to a member", async () => {
+    const { prisma, call } = memberDeps();
+    const { response } = await call("credentials", null);
+    expect(response?.status).toBe(200);
+    expect(prisma.userModelCredential.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { userId: "owner-1" },
+        include: { preferences: { where: { userId: "owner-1", spaceId: "workspace-1" } } },
+      }),
+    );
   });
 });

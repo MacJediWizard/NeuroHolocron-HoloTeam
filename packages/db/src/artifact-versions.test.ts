@@ -29,13 +29,14 @@ describe("resolveNextArtifactVersion", () => {
       expect.objectContaining({
         where: expect.objectContaining({
           spaceId: "space-1",
-          userId: "user-1",
           botId: "bot-1",
           groupId: null,
           name: { equals: "Q3 Content Calendar", mode: "insensitive" },
         }),
       }),
     );
+    // Members of a Space publish into one shared family.
+    expect(findFirst.mock.calls[0]?.[0].where).not.toHaveProperty("userId");
   });
 
   it("versions off the root when the only prior match is itself the root", async () => {
@@ -116,7 +117,7 @@ describe("withResolvedArtifactVersion", () => {
     const lockSql = client.queryRaw.mock.calls[0]?.[0] as { strings: string[]; values: unknown[] };
     expect(lockSql.strings.join(" ")).toContain("pg_advisory_xact_lock");
     expect(lockSql.values).toContain(
-      ["space-1", "user-1", "bot-1", "", "q3 content calendar"].join("\u001f"),
+      ["space-1", "bot-1", "", "q3 content calendar"].join("\u001f"),
     );
   });
 
