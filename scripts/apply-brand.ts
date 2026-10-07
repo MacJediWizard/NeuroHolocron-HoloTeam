@@ -79,9 +79,16 @@ for (const name of readdirSync(path.join(root, "infra/compose"))) {
 }
 // Upstream keeps adding marketing pages, guides, and posts, so the whole site is covered.
 const WWW_TEXT = /\.(astro|json|md|mjs|svg|ts|webmanifest)$/;
-for (const entry of readdirSync(path.join(root, "apps/www"), { recursive: true, withFileTypes: true })) {
+for (const entry of readdirSync(path.join(root, "apps/www"), {
+  recursive: true,
+  withFileTypes: true,
+})) {
   const file = path.relative(root, path.join(entry.parentPath, entry.name));
-  if (entry.isFile() && WWW_TEXT.test(entry.name) && !/(^|\/)(node_modules|dist|\.astro)\//.test(file)) {
+  if (
+    entry.isFile() &&
+    WWW_TEXT.test(entry.name) &&
+    !/(^|\/)(node_modules|dist|\.astro)\//.test(file)
+  ) {
     FILES.push(file);
   }
 }
