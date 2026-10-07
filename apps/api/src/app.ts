@@ -31,11 +31,11 @@ import {
   createRunExecutor,
   createRunSandbox,
   createRunSecretWriter,
+  createSecretStore,
   createWebProvider,
   deletePushToken,
   destroyBot,
   EmailEmulator,
-  EncryptedSecretStore,
   ExpoPushProvider,
   endSessionPushToken,
   GraphileJobPublisher,
@@ -193,7 +193,7 @@ export async function createApp(
           publisher: created.pool,
         })
       : new InMemoryRealtimeFanout());
-  const secrets = new EncryptedSecretStore(env.encryptionKey);
+  const secrets = await createSecretStore(process.env, env.encryptionKey, realtime);
   const events = createThreadEvents(prisma, realtime, {
     runSecretWriter: createRunSecretWriter(secrets),
   });

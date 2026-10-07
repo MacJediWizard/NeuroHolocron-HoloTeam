@@ -584,6 +584,8 @@ export class McpOAuthBroker {
         signal: new AbortController().signal,
       },
       sessionId,
+      // Handshake state lives for minutes; it stays in the database.
+      { ephemeral: true },
     );
     await this.prisma.mcpOAuthSession.create({
       data: {

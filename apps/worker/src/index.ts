@@ -16,9 +16,9 @@ import {
   createRunExecutor,
   createRunSandbox,
   createRunSecretWriter,
+  createSecretStore,
   createWebProvider,
   databaseCapacityBackoffMs,
-  EncryptedSecretStore,
   ExpoPushProvider,
   GraphileJobPublisher,
   GraphileJobWorkerHost,
@@ -76,7 +76,7 @@ async function main() {
     connectionString: process.env.REALTIME_DATABASE_URL ?? databaseUrl,
     publisher: pool,
   });
-  const secrets = new EncryptedSecretStore(resolveEncryptionKey(process.env));
+  const secrets = await createSecretStore(process.env, resolveEncryptionKey(process.env), realtime);
   const events = createThreadEvents(prisma, realtime, {
     runSecretWriter: createRunSecretWriter(secrets),
   });
