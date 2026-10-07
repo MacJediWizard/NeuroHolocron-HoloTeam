@@ -53,7 +53,8 @@ export function scoped<T extends { spaceId: string }>(actor: Actor, record: T | 
 
 type OwnerLookup = Pick<PrismaClient, "spaceMember">;
 
-function hasOwnerRole(role: string | undefined): boolean {
+/** Roles are comma-separated, so "owner,admin" is an owner too. */
+export function hasOwnerRole(role: string | undefined): boolean {
   return role?.split(",").some((part) => part.trim() === "owner") ?? false;
 }
 

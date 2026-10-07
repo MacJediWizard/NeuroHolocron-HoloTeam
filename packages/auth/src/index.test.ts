@@ -331,7 +331,8 @@ describe("operator OIDC provider", () => {
       groupSpaces: [{ group: "orca", spaceId: "space-1" }],
       onGroupSpaceMissing: vi.fn(),
     };
-    const signIn = async (token: string | null) => {
+    const oidcCallback = { path: "/callback/:id", params: { id: OIDC_PROVIDER_ID } };
+    const signIn = async (token: string | null, route: object = oidcCallback) => {
       const groupPrisma = {
         deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
         spaceMember: { findFirst: vi.fn().mockResolvedValue({ id: "membership" }) },
@@ -346,7 +347,10 @@ describe("operator OIDC provider", () => {
       };
       const beforeSession = createAuth(groupPrisma as never, { ...baseEnv, oidc }).options
         .databaseHooks?.session?.create?.before;
-      await beforeSession?.({ userId: "user" } as never, { context: { internalAdapter } } as never);
+      await beforeSession?.(
+        { userId: "user" } as never,
+        { ...route, context: { internalAdapter } } as never,
+      );
     };
 
     afterEach(() => syncGroupSpaces.mockClear());
@@ -367,6 +371,14 @@ describe("operator OIDC provider", () => {
     it("changes nothing when the token has no groups claim", async () => {
       await signIn(idToken({ sub: "user" }));
       await signIn(null);
+
+      expect(syncGroupSpaces).not.toHaveBeenCalled();
+    });
+
+    it("syncs only on the OIDC callback, not on other sign-ins", async () => {
+      const token = idToken({ sub: "user", groups: ["orca"] });
+      await signIn(token, { path: "/sign-in/email" });
+      await signIn(token, { path: "/callback/:id", params: { id: "github" } });
 
       expect(syncGroupSpaces).not.toHaveBeenCalled();
     });

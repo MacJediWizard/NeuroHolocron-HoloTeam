@@ -89,6 +89,7 @@ import {
   provisionMessagingIdentity,
   pushSessionExpiresAt,
   requireMembership,
+  transferOwnedSpaces,
 } from "@rakazo/db";
 import type { Logger } from "@rakazo/logging";
 import {
@@ -395,8 +396,10 @@ export async function createApp(
     beforeDeleteUser: async (userId) => {
       // First, so a provider failure aborts deletion before anything is destroyed.
       await billing?.cancelForDeletedUser(userId);
-      // Work in Spaces the user only joined stays with the Space owner, so the
-      // bots left below are the ones in Spaces this user owns.
+      // Shared Spaces the user owns pass to another member; then work in Spaces
+      // the user only joined stays with the Space owner, so the bots left below
+      // are the ones in Spaces nobody else belongs to.
+      await transferOwnedSpaces(prisma, userId);
       await handOverSharedRows(prisma, userId);
       const bots = await prisma.bot.findMany({
         where: { userId },

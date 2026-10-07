@@ -1862,7 +1862,9 @@ export function ShellPage() {
   );
   const replyTargetName = activeReplyTarget
     ? activeReplyTarget.role === "user"
-      ? t`You`
+      ? activeReplyTarget.author && activeReplyTarget.author.id !== userId
+        ? activeReplyTarget.author.name
+        : t`You`
       : (resolveTranscriptMemberName(activeReplyTarget.botId) ?? active?.name ?? t`Bot`)
     : undefined;
   const composerMentionTargets = useMemo(

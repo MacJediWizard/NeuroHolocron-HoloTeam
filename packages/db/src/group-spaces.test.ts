@@ -1,10 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "./client.js";
-import { handOverSharedRows, parseGroupSpaces, syncGroupSpaces } from "./group-spaces.js";
+import {
+  handOverSharedRows,
+  parseGroupSpaces,
+  syncGroupSpaces,
+  transferOwnedSpaces,
+} from "./group-spaces.js";
 
 function makePrisma(options: {
   spaces: Array<{ id: string; organizationId: string }>;
   remaining?: number;
+  spaceRole?: string;
+  orgRole?: string;
 }) {
   const prisma = {
     space: {
@@ -15,8 +22,10 @@ function makePrisma(options: {
     member: {
       create: vi.fn(async (_input: { data: Record<string, unknown> }) => ({})),
       deleteMany: vi.fn(async (_input: { where: Record<string, unknown> }) => ({ count: 1 })),
+      findFirst: vi.fn(async () => ({ id: "org-member", role: options.orgRole ?? "member" })),
     },
     spaceMember: {
+      findUnique: vi.fn(async () => ({ role: options.spaceRole ?? "member" })),
       create: vi.fn(async (_input: { data: Record<string, unknown> }) => ({})),
       deleteMany: vi.fn(async (_input: { where: Record<string, unknown> }) => ({ count: 1 })),
       count: vi.fn(async () => options.remaining ?? 0),
@@ -105,11 +114,31 @@ describe("syncGroupSpaces", () => {
 
     expect(prisma.member.create).not.toHaveBeenCalled();
     expect(prisma.spaceMember.deleteMany).toHaveBeenCalledWith({
-      where: { spaceId: "space-1", userId: "user-2", role: { not: "owner" } },
+      where: { spaceId: "space-1", userId: "user-2" },
     });
-    expect(prisma.member.deleteMany).toHaveBeenCalledWith({
-      where: { organizationId: "org-1", userId: "user-2", role: { not: "owner" } },
+    expect(prisma.member.deleteMany).toHaveBeenCalledWith({ where: { id: "org-member" } });
+  });
+
+  it("keeps an owner whose role lists more than owner", async () => {
+    const prisma = makePrisma({
+      spaces: [{ id: "space-1", organizationId: "org-1" }],
+      spaceRole: "admin,owner",
     });
+    await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", [], mapping);
+
+    expect(prisma.spaceMember.deleteMany).not.toHaveBeenCalled();
+    expect(prisma.member.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps an organization owner after their last Space membership goes", async () => {
+    const prisma = makePrisma({
+      spaces: [{ id: "space-1", organizationId: "org-1" }],
+      orgRole: "owner,admin",
+    });
+    await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", [], mapping);
+
+    expect(prisma.spaceMember.deleteMany).toHaveBeenCalledOnce();
+    expect(prisma.member.deleteMany).not.toHaveBeenCalled();
   });
 
   it("keeps the organization membership while another Space in it remains", async () => {
@@ -236,5 +265,45 @@ describe("handOverSharedRows", () => {
     await handOverSharedRows(prisma, "owner");
 
     for (const model of models) expect(tx[model].updateMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("transferOwnedSpaces", () => {
+  const makeOwnerPrisma = (successor: { id: string } | null) => {
+    const prisma = {
+      spaceMember: {
+        findMany: vi.fn(async () => [
+          { id: "m-own", spaceId: "shared", role: "admin,owner" },
+          { id: "m-joined", spaceId: "joined", role: "member" },
+        ]),
+        findFirst: vi.fn(async () => successor),
+        update: vi.fn(async () => ({})),
+      },
+      $transaction: vi.fn(async (run: (tx: unknown) => Promise<unknown>) => run(prisma)),
+    };
+    return prisma;
+  };
+
+  it("makes the longest-standing other member the owner of each owned Space", async () => {
+    const prisma = makeOwnerPrisma({ id: "m-next" });
+    await transferOwnedSpaces(prisma as unknown as PrismaClient, "owner");
+
+    expect(prisma.spaceMember.findFirst).toHaveBeenCalledOnce();
+    expect(prisma.spaceMember.findFirst).toHaveBeenCalledWith({
+      where: { spaceId: "shared", userId: { not: "owner" } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true },
+    });
+    expect(prisma.spaceMember.update.mock.calls).toEqual([
+      [{ where: { id: "m-next" }, data: { role: "owner" } }],
+      [{ where: { id: "m-own" }, data: { role: "member" } }],
+    ]);
+  });
+
+  it("leaves a Space with no other member alone", async () => {
+    const prisma = makeOwnerPrisma(null);
+    await transferOwnedSpaces(prisma as unknown as PrismaClient, "owner");
+
+    expect(prisma.spaceMember.update).not.toHaveBeenCalled();
   });
 });

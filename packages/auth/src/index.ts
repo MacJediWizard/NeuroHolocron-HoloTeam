@@ -455,7 +455,9 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
               }
               await ctx.context.internalAdapter.updateUser(user.id, { emailVerified: true });
             }
-            if (env.oidc?.groupSpaces?.length && ctx) {
+            // Only a fresh OIDC sign-in carries current groups; other sign-ins
+            // would replay the stored ID token's stale claims.
+            if (env.oidc?.groupSpaces?.length && ctx && isOidcCallback(ctx)) {
               const account = (await ctx.context.internalAdapter.findAccounts(user.id)).find(
                 (candidate) => candidate.providerId === OIDC_PROVIDER_ID,
               );
@@ -558,6 +560,12 @@ export function idTokenGroups(idToken: string | null | undefined, claim: string)
   const value = (claims as Record<string, unknown> | null)?.[claim];
   if (!Array.isArray(value)) return undefined;
   return value.filter((group): group is string => typeof group === "string");
+}
+
+/** The OIDC provider's sign-in callback (`/callback/:id`, or `/oauth2/callback/:providerId`). */
+function isOidcCallback(ctx: { path?: string; params?: Record<string, unknown> }): boolean {
+  const provider = ctx.params?.id ?? ctx.params?.providerId;
+  return Boolean(ctx.path?.includes("/callback/")) && provider === OIDC_PROVIDER_ID;
 }
 
 function oidcPlugin(provider: OidcProvider) {

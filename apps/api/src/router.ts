@@ -5343,7 +5343,11 @@ export function createRouter(deps: RouterDeps) {
         };
         const [memory, routines, files, history] = await Promise.all([
           deps.prisma.memoryDocument.findMany({
-            where: { botId: input.botId, spaceId: context.actor.spaceId },
+            where: {
+              botId: input.botId,
+              spaceId: context.actor.spaceId,
+              ...visibleMemoryDocuments(context.actor),
+            },
           }),
           deps.prisma.routine.findMany({
             where: { botId: input.botId, spaceId: context.actor.spaceId },

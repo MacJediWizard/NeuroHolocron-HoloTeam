@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import type { PrismaClient } from "./client.js";
-import { isSpaceOwner, spaceOwnerUserId } from "./scope.js";
+import { hasOwnerRole, isSpaceOwner, spaceOwnerUserId } from "./scope.js";
 
 /** An identity provider group whose members share one Space. */
 export interface GroupSpace {
@@ -128,19 +128,51 @@ async function leaveSpace(
   space: { id: string; organizationId: string },
 ): Promise<void> {
   await prisma.$transaction(async (tx) => {
-    await tx.spaceMember.deleteMany({
-      where: { spaceId: space.id, userId, role: { not: "owner" } },
-    });
+    // An owner is never removed by group sync, whatever else their role lists.
+    if (await isSpaceOwner(tx, { spaceId: space.id, userId })) return;
+    await tx.spaceMember.deleteMany({ where: { spaceId: space.id, userId } });
     // Without a Space left in the organization, the organization membership goes too.
     const remaining = await tx.spaceMember.count({
       where: { organizationId: space.organizationId, userId },
     });
     if (remaining === 0) {
-      await tx.member.deleteMany({
-        where: { organizationId: space.organizationId, userId, role: { not: "owner" } },
+      const membership = await tx.member.findFirst({
+        where: { organizationId: space.organizationId, userId },
+        select: { id: true, role: true },
       });
+      if (membership && !hasOwnerRole(membership.role)) {
+        await tx.member.deleteMany({ where: { id: membership.id } });
+      }
     }
   });
+}
+
+/**
+ * Before an account is deleted, makes the longest-standing other member the owner
+ * of each Space the user owns, so those Spaces keep an owner. A Space with no other
+ * member is left alone and goes with the account.
+ */
+export async function transferOwnedSpaces(
+  prisma: Pick<PrismaClient, "$transaction" | "spaceMember">,
+  userId: string,
+): Promise<void> {
+  const memberships = await prisma.spaceMember.findMany({
+    where: { userId },
+    select: { id: true, spaceId: true, role: true },
+  });
+  for (const membership of memberships) {
+    if (!hasOwnerRole(membership.role)) continue;
+    await prisma.$transaction(async (tx) => {
+      const successor = await tx.spaceMember.findFirst({
+        where: { spaceId: membership.spaceId, userId: { not: userId } },
+        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+        select: { id: true },
+      });
+      if (!successor) return;
+      await tx.spaceMember.update({ where: { id: successor.id }, data: { role: "owner" } });
+      await tx.spaceMember.update({ where: { id: membership.id }, data: { role: "member" } });
+    });
+  }
 }
 
 /**
