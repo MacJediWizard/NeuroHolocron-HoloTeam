@@ -129,9 +129,6 @@ export async function discardThreadArtifacts(
     where: { id: { in: [...input.artifactIds] }, spaceId: input.spaceId },
     select: { id: true, storageKey: true },
   });
-  await deps.prisma.artifact.deleteMany({
-    where: { id: { in: rows.map((row) => row.id) }, spaceId: input.spaceId },
-  });
   const context = {
     operationId: input.operationId,
     traceId: input.operationId,
@@ -140,9 +137,25 @@ export async function discardThreadArtifacts(
     botId: input.botId,
     signal: new AbortController().signal,
   };
-  await Promise.all(
-    rows.map((row) => deps.artifacts.remove(row.storageKey, context).catch(() => undefined)),
+  // Remove the stored bytes first and drop only the rows whose bytes are gone,
+  // so a failed removal never leaves storage without a row that points at it.
+  const removed = await Promise.all(
+    rows.map((row) =>
+      deps.artifacts.remove(row.storageKey, context).then(
+        () => row.id,
+        () => undefined,
+      ),
+    ),
   );
+  const removedIds = removed.filter((id): id is string => Boolean(id));
+  if (removedIds.length) {
+    await deps.prisma.artifact.deleteMany({
+      where: { id: { in: removedIds }, spaceId: input.spaceId },
+    });
+  }
+  if (removedIds.length < rows.length) {
+    throw new Error("could not remove every stored file for an undelivered message");
+  }
 }
 
 export async function materializeCurrentTurnFiles(
