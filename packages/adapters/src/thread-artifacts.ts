@@ -110,6 +110,41 @@ export async function attachWorkspaceFileToThread(
   };
 }
 
+/** Remove artifacts created for a message that was never delivered. */
+export async function discardThreadArtifacts(
+  deps: {
+    prisma: PrismaClient;
+    artifacts: ArtifactStore;
+  },
+  input: {
+    spaceId: string;
+    userId: string;
+    botId: string;
+    operationId: string;
+    artifactIds: readonly string[];
+  },
+): Promise<void> {
+  if (!input.artifactIds.length) return;
+  const rows = await deps.prisma.artifact.findMany({
+    where: { id: { in: [...input.artifactIds] }, spaceId: input.spaceId },
+    select: { id: true, storageKey: true },
+  });
+  await deps.prisma.artifact.deleteMany({
+    where: { id: { in: rows.map((row) => row.id) }, spaceId: input.spaceId },
+  });
+  const context = {
+    operationId: input.operationId,
+    traceId: input.operationId,
+    spaceId: input.spaceId,
+    userId: input.userId,
+    botId: input.botId,
+    signal: new AbortController().signal,
+  };
+  await Promise.all(
+    rows.map((row) => deps.artifacts.remove(row.storageKey, context).catch(() => undefined)),
+  );
+}
+
 export async function materializeCurrentTurnFiles(
   deps: {
     prisma: PrismaClient;

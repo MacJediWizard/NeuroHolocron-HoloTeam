@@ -345,6 +345,7 @@ import { getActiveTeachingSession, parsePlaybook } from "./teaching-session.js";
 import {
   attachWorkspaceFileToThread,
   currentTurnFilesInstruction,
+  discardThreadArtifacts,
   materializeCurrentTurnFiles,
 } from "./thread-artifacts.js";
 import { advanceToolCallLoopGuard } from "./tool-loop.js";
@@ -5866,60 +5867,87 @@ export function createRunExecutor(deps: ExecutorDeps) {
             if (filePaths.length > ATTACHMENT_MAX_COUNT) {
               return finish({ error: `send at most ${ATTACHMENT_MAX_COUNT} files per message` });
             }
-            const attachments: Extract<MessageBlock, { kind: "image" | "file" }>[] = [];
+            // Read every file before storing any, so a missing file sends nothing.
+            const files: { filePath: string; bytes: Uint8Array }[] = [];
             for (const filePath of filePaths) {
               if (!deps.artifacts) return finish({ error: "artifact storage unavailable" });
-              let bytes: Uint8Array;
               try {
-                bytes = await deps.sandbox.readFile(
-                  computer,
-                  resolveBotWorkspacePath(computerMode, bot.id, filePath),
-                  context,
-                  { maxBytes: ATTACHMENT_MAX_BYTES },
-                );
+                files.push({
+                  filePath,
+                  bytes: await deps.sandbox.readFile(
+                    computer,
+                    resolveBotWorkspacePath(computerMode, bot.id, filePath),
+                    context,
+                    { maxBytes: ATTACHMENT_MAX_BYTES },
+                  ),
+                });
               } catch {
                 return finish({ error: `file not found or unreadable: ${filePath}` });
               }
-              try {
-                const attached = await attachWorkspaceFileToThread(
-                  { prisma: deps.prisma, artifacts: deps.artifacts },
-                  {
-                    spaceId: run.spaceId,
-                    userId: run.userId,
-                    botId: bot.id,
-                    groupId: thread.groupId ?? undefined,
-                    runId: run.id,
-                    filePath,
-                    bytes,
-                    operationId: executionId,
-                  },
-                );
-                attachments.push(attached.block);
-              } catch (error) {
-                return finish({
-                  error: `${filePath}: ${error instanceof Error ? error.message : "could not attach file"}`,
-                });
-              }
             }
-            const sent = await messageBot(
-              deps,
-              { ...run, sourceMessageId: run.sourceMessageId },
-              { id: bot.id, name: bot.name },
-              {
-                bot_id: args.bot_id ? String(args.bot_id) : undefined,
-                confirm_name: args.confirm_name ? String(args.confirm_name) : undefined,
-                message: redactSecrets(String(args.message ?? ""), runSecrets),
-                intent: args.intent as
-                  | "request"
-                  | "result"
-                  | "question"
-                  | "status"
-                  | "fyi"
-                  | undefined,
-                deliveryKey: effectKey,
-                attachments,
-              },
-            );
+            const artifactStore = deps.artifacts;
+            const artifactOwner = {
+              spaceId: run.spaceId,
+              userId: run.userId,
+              botId: bot.id,
+              operationId: executionId,
+            };
+            let attachError: Error | undefined;
+            const attach =
+              files.length && artifactStore
+                ? async () => {
+                    const store = { prisma: deps.prisma, artifacts: artifactStore };
+                    const created: string[] = [];
+                    const discard = () =>
+                      discardThreadArtifacts(store, { ...artifactOwner, artifactIds: created });
+                    const blocks: Extract<MessageBlock, { kind: "image" | "file" }>[] = [];
+                    for (const file of files) {
+                      try {
+                        const attached = await attachWorkspaceFileToThread(store, {
+                          ...artifactOwner,
+                          groupId: thread.groupId ?? undefined,
+                          runId: run.id,
+                          filePath: file.filePath,
+                          bytes: file.bytes,
+                        });
+                        created.push(attached.artifactId);
+                        blocks.push(attached.block);
+                      } catch (error) {
+                        await discard().catch(() => undefined);
+                        attachError = new Error(
+                          `${file.filePath}: ${error instanceof Error ? error.message : "could not attach file"}`,
+                        );
+                        throw attachError;
+                      }
+                    }
+                    return { blocks, discard };
+                  }
+                : undefined;
+            let sent: Awaited<ReturnType<typeof messageBot>>;
+            try {
+              sent = await messageBot(
+                deps,
+                { ...run, sourceMessageId: run.sourceMessageId },
+                { id: bot.id, name: bot.name },
+                {
+                  bot_id: args.bot_id ? String(args.bot_id) : undefined,
+                  confirm_name: args.confirm_name ? String(args.confirm_name) : undefined,
+                  message: redactSecrets(String(args.message ?? ""), runSecrets),
+                  intent: args.intent as
+                    | "request"
+                    | "result"
+                    | "question"
+                    | "status"
+                    | "fyi"
+                    | undefined,
+                  deliveryKey: effectKey,
+                  attach,
+                },
+              );
+            } catch (error) {
+              if (!attachError || error !== attachError) throw error;
+              return finish({ error: attachError.message });
+            }
             if (!sent.ok) return finish({ error: sent.error });
             return finish({ ok: true, botId: sent.botId, name: sent.name, note: sent.note });
           }

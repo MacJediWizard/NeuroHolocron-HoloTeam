@@ -59,6 +59,11 @@ export async function loadBotMessageContext(
   return { ...context, repliesToRequest };
 }
 
+export type PreparedBotMessageAttachments = {
+  blocks: readonly Extract<MessageBlock, { kind: "image" | "file" }>[];
+  discard: () => Promise<void>;
+};
+
 export async function messageBot(
   deps: Pick<ExecutorDeps, "prisma" | "events" | "jobs">,
   run: {
@@ -76,8 +81,12 @@ export async function messageBot(
     message: string;
     intent?: BotMessageIntent;
     deliveryKey?: string;
-    /** Files sent with the message; they land on the recipient's computer like a chat attachment. */
-    attachments?: readonly Extract<MessageBlock, { kind: "image" | "file" }>[];
+    /**
+     * Stores the files sent with the message; they land on the recipient's
+     * computer like a chat attachment. It runs only once the delivery is known
+     * to be valid, and `discard` removes the files if it does not commit.
+     */
+    attach?: () => Promise<PreparedBotMessageAttachments>;
   },
   options?: { allowTerminalSource?: boolean },
 ) {
@@ -136,7 +145,13 @@ export async function messageBot(
       note: `Already sent to ${target.name} in this turn; it was not sent again.`,
     }) as const;
 
-  const attachments = input.attachments ?? [];
+  const prepared = input.attach ? await input.attach() : undefined;
+  const attachments = prepared?.blocks ?? [];
+  const discardAttachments = async () => {
+    await prepared?.discard().catch((error) => {
+      getLogger().error("bot message attachment cleanup", error);
+    });
+  };
   const wakePrompt = buildBotMessageWakePrompt({ from: sender, text: message, intent });
   const outboundBlock: MessageBlock = {
     kind: "bot_message_sent",
@@ -293,10 +308,15 @@ export async function messageBot(
         where: { threadId_clientNonce: { threadId: targetThreadId, clientNonce: deliveryKey } },
         select: { id: true },
       });
-      if (winner) return replayed();
+      if (winner) {
+        await discardAttachments();
+        return replayed();
+      }
     }
+    await discardAttachments();
     throw error;
   }
+  if ("replayed" in committed || !committed.ok) await discardAttachments();
   if ("replayed" in committed) return replayed();
   if (!committed.ok) return committed;
 
