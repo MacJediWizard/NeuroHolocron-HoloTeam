@@ -51,3 +51,21 @@ test("a failed capabilities request offers a retry that restores SSO", async ({
   await expect(page.getByRole("button", { name: "Continue with Company SSO" })).toBeVisible();
   await expect(alert).toHaveCount(0);
 });
+
+test("sign-in shows no password form until the options load", async ({ page }) => {
+  await page.route("**/api/auth/get-session**", (route) => route.fulfill({ json: null }));
+  let release = () => {};
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route("**/api/auth/capabilities", async (route) => {
+    await held;
+    await route.fulfill({ json: ssoOnly });
+  });
+  await page.goto("/sign-in");
+  await expect(page.getByRole("status").filter({ hasText: "Loading…" })).toBeVisible();
+  await expect(page.getByLabel("Email")).toHaveCount(0);
+  release();
+  await expect(page.getByRole("button", { name: "Continue with Company SSO" })).toBeVisible();
+  await expect(page.getByLabel("Email")).toHaveCount(0);
+});

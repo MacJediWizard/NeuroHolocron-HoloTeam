@@ -4,6 +4,7 @@ import { Redirect, useFocusEffect, useLocalSearchParams, useRouter } from "expo-
 import { useCallback, useEffect, useState } from "react";
 import {
   AccessibilityInfo,
+  ActivityIndicator,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -211,6 +212,12 @@ export default function SignIn() {
                     </Text>
                   </Pressable>
                 </View>
+              ) : !reset && !resetSent ? (
+                <ActivityIndicator
+                  accessibilityLabel={t("Loading…")}
+                  color={tokens.mutedForeground}
+                  style={{ marginTop: 28 }}
+                />
               ) : resetSent ? (
                 <View style={{ alignItems: "center", marginTop: 28 }}>
                   <Pressable
