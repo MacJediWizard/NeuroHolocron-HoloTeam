@@ -3,6 +3,7 @@ import {
   resolveDeploymentModel,
   resolveSandboxProvider,
 } from "@rakazo/adapters";
+import type { OidcProvider } from "@rakazo/auth";
 import {
   resolveAuthSecret,
   resolveEncryptionKey,
@@ -25,6 +26,8 @@ export interface AppEnv {
   apiHost: string;
   signupsEnabled: string | undefined;
   signupAllowlist: string | undefined;
+  oidc: OidcProvider | undefined;
+  passwordAuth: boolean;
   encryptionKey: string;
   dataDir: string;
   /** Opt-in Pi JSONL session recording under DATA_DIR/pi-sessions. Default off. */
@@ -106,6 +109,11 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
   const deploymentModel = resolveDeploymentModel(source);
   const updaterUrl = optional(source.RAKAZO_UPDATER_URL);
   const updaterToken = optional(source.RAKAZO_UPDATER_TOKEN);
+  const oidc = resolveOidc(source);
+  const passwordAuth = source.AUTH_PASSWORD_ENABLED?.trim() !== "false";
+  if (!passwordAuth && !oidc) {
+    throw new Error("AUTH_PASSWORD_ENABLED=false needs OIDC_ISSUER, or nobody can sign in");
+  }
   return {
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
@@ -119,6 +127,8 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     apiHost: source.API_HOST ?? "127.0.0.1",
     signupsEnabled: source.SIGNUPS_ENABLED,
     signupAllowlist: source.SIGNUP_ALLOWLIST,
+    oidc,
+    passwordAuth,
     encryptionKey: resolveEncryptionKey(source),
     dataDir: source.DATA_DIR ?? "./data",
     piSessionRecording: source.PI_SESSION_RECORDING === "true",
@@ -188,6 +198,17 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     updaterToken,
     imageTag: optional(source.RAKAZO_IMAGE_TAG),
   };
+}
+
+function resolveOidc(source: NodeJS.ProcessEnv): OidcProvider | undefined {
+  const issuer = optional(source.OIDC_ISSUER);
+  const clientId = optional(source.OIDC_CLIENT_ID);
+  const clientSecret = optional(source.OIDC_CLIENT_SECRET);
+  if (!issuer && !clientId && !clientSecret) return undefined;
+  if (!issuer || !clientId || !clientSecret) {
+    throw new Error("OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set together");
+  }
+  return { issuer, clientId, clientSecret, name: optional(source.OIDC_NAME) ?? "SSO" };
 }
 
 function required(source: NodeJS.ProcessEnv, key: string): string {

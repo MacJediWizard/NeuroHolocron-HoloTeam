@@ -1,9 +1,12 @@
 import { readBoundedJsonResponse } from "@rakazo/core";
 
 export interface AuthCapabilities {
+  /** False when the server only allows single sign-on. Older servers omit it. */
+  passwordAuth?: boolean;
   passwordReset: boolean;
   resetUrl: string | null;
   billing?: boolean;
+  sso?: { providerId: string; name: string } | null;
 }
 
 const TIMEOUT_MS = 8_000;

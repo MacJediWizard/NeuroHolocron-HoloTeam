@@ -120,6 +120,7 @@ services:
       - ../../.env
     environment:
       BETTER_AUTH_SECRET: ""
+      OIDC_CLIENT_SECRET: ""
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-rakazo}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-rakazo}
       DATA_DIR: /data
