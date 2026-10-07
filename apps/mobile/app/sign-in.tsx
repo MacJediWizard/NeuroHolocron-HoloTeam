@@ -46,6 +46,8 @@ export default function SignIn() {
   const [hasSession, setHasSession] = useState(false);
   const [apiBase, setApiBase] = useState(() => currentApiBase());
   const [reset, setReset] = useState<PasswordResetCapabilities | null>(null);
+  const [capabilitiesFailed, setCapabilitiesFailed] = useState(false);
+  const [capabilitiesAttempt, setCapabilitiesAttempt] = useState(0);
   const [resetSent, setResetSent] = useState(false);
 
   useFocusEffect(
@@ -64,15 +66,19 @@ export default function SignIn() {
   useEffect(() => {
     let active = true;
     setReset(null);
+    setCapabilitiesFailed(false);
     void passwordResetCapabilities()
       .then((capabilities) => {
         if (active) setReset(capabilities);
       })
-      .catch(() => undefined);
+      // Without them an SSO-only server would get a password form it refuses.
+      .catch(() => {
+        if (active) setCapabilitiesFailed(true);
+      });
     return () => {
       active = false;
     };
-  }, [apiBase]);
+  }, [apiBase, capabilitiesAttempt]);
 
   useEffect(() => {
     if (resetSent) AccessibilityInfo.announceForAccessibility(t("Check your email"));
@@ -186,6 +192,24 @@ export default function SignIn() {
                     provider: reset?.sso?.name ?? t("single sign-on"),
                   })}
                 </Text>
+              ) : capabilitiesFailed ? (
+                <View accessibilityRole="alert" style={{ alignItems: "center", marginTop: 28 }}>
+                  <Text
+                    style={{ color: tokens.mutedForeground, fontSize: 15, textAlign: "center" }}
+                  >
+                    {t("Could not load sign-in options")}
+                  </Text>
+                  <Pressable
+                    accessibilityRole="button"
+                    hitSlop={12}
+                    onPress={() => setCapabilitiesAttempt((attempt) => attempt + 1)}
+                    style={{ marginTop: 16 }}
+                  >
+                    <Text style={{ color: tokens.foreground, fontSize: 15, fontWeight: "600" }}>
+                      {t("Try again")}
+                    </Text>
+                  </Pressable>
+                </View>
               ) : resetSent ? (
                 <View style={{ alignItems: "center", marginTop: 28 }}>
                   <Pressable

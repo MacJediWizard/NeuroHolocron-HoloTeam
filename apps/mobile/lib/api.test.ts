@@ -153,6 +153,20 @@ describe("mobile API authentication", () => {
     });
   });
 
+  it("treats a server without the capabilities endpoint as password-only and rejects other failures", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("not found", { status: 404 }))
+      .mockResolvedValueOnce(new Response("unavailable", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(passwordResetCapabilities()).resolves.toEqual({
+      passwordReset: false,
+      resetUrl: null,
+    });
+    await expect(passwordResetCapabilities()).rejects.toThrow("Could not load sign-in options");
+  });
+
   it("changes a password with the bearer session and revokes other sessions", async () => {
     vi.mocked(SecureStore.getItemAsync).mockResolvedValue("session-token");
     const fetchMock = vi.fn(async () => jsonResponse({ status: true }));

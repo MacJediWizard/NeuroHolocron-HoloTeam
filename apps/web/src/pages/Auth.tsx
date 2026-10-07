@@ -30,8 +30,10 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
   const [reset, setReset] = useState<AuthCapabilities | null>(null);
   const [capabilitiesFailed, setCapabilitiesFailed] = useState(false);
   const [capabilitiesAttempt, setCapabilitiesAttempt] = useState(0);
+  // Unknown options would show a form an SSO-only server refuses, so only the retry shows.
+  const optionsUnavailable = capabilitiesFailed && !reset;
   // Older servers omit passwordAuth; treat that as enabled.
-  const passwordAuth = reset?.passwordAuth !== false;
+  const passwordAuth = !optionsUnavailable && reset?.passwordAuth !== false;
   const sso = reset?.sso ?? null;
   const passwordFieldId = mode === "in" ? "current-password" : "new-password";
   const title = sent ? (
@@ -146,7 +148,7 @@ export function AuthPage({ mode }: { mode: AuthMode }) {
         </div>
       ) : (
         <>
-          {capabilitiesFailed && !reset ? (
+          {optionsUnavailable ? (
             <div
               role="alert"
               className="mb-6 flex w-full items-center justify-between gap-3 rounded-xl border px-4 py-3 text-sm"

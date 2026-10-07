@@ -487,7 +487,9 @@ export async function passwordResetCapabilities(): Promise<PasswordResetCapabili
     { headers: { origin: "rakazo://" } },
     { passwordReset: false, resetUrl: null },
   );
-  if (!response.ok) throw new Error("Could not load password recovery settings");
+  // Servers older than this endpoint sign in with a password only.
+  if (response.status === 404) return { passwordReset: false, resetUrl: null };
+  if (!response.ok) throw new Error("Could not load sign-in options");
   return body;
 }
 
