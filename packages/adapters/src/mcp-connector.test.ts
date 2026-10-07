@@ -718,6 +718,7 @@ describe("MCP connector session cache", () => {
           .mockReturnValue(
             JSON.stringify({ secret: "local-token", headers: { "X-Api-Key": "local-key" } }),
           ),
+        revision: vi.fn().mockReturnValue("r1"),
       } as never,
     );
 
@@ -730,6 +731,45 @@ describe("MCP connector session cache", () => {
 
     expect(state.headers[0]?.authorization).toBe("Bearer local-token");
     expect(state.headers[0]?.["x-api-key"]).toBe("local-key");
+    await connector.close();
+  });
+
+  it("reconnects when the stored credential is rotated outside the app", async () => {
+    const state = { failNext: false, initializations: 0, headers: [] as Record<string, string>[] };
+    const localAssignment = {
+      ...ASSIGNMENT,
+      server: { ...SERVER, endpoint: "http://localhost:8123/api/mcp", secretId: "secret-1" },
+    };
+    vi.stubGlobal("fetch", mcpFetch(state, "http://localhost:8123/api/mcp"));
+    const prisma = {
+      botMcpServer: { findMany: vi.fn().mockResolvedValue([localAssignment]) },
+      secret: { findFirst: vi.fn().mockResolvedValue({ id: "secret-1", ciphertext: "reference" }) },
+      deploymentSettings: { findUnique: vi.fn(async () => ({ ownerUserId: "u1" })) },
+    };
+    const stored = { token: "old-token", revision: "r1" };
+    const connector = new McpConnector(
+      prisma as never,
+      {
+        load: () => JSON.stringify({ secret: stored.token }),
+        revision: () => stored.revision,
+      } as never,
+    );
+    const context = {
+      spaceId: "w1",
+      userId: "u1",
+      botId: "bot-1",
+      signal: new AbortController().signal,
+    } as never;
+
+    await connector.discoverTools(context);
+    await connector.discoverTools(context);
+    expect(state.initializations).toBe(1);
+
+    // The row and server revision are unchanged; only the external value moved.
+    Object.assign(stored, { token: "new-token", revision: "r2" });
+    await connector.discoverTools(context);
+    expect(state.initializations).toBe(2);
+    expect(state.headers.at(-1)?.authorization).toBe("Bearer new-token");
     await connector.close();
   });
 

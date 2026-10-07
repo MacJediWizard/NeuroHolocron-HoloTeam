@@ -27,7 +27,13 @@ import { actorMayUsePrivateEndpoint } from "./private-endpoint.js";
 import type { RemoteTransportDependencies } from "./remote-mcp.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
-type SessionEntry = { session: McpSession; revision: number; material: OAuthMaterial };
+type SessionEntry = {
+  session: McpSession;
+  revision: number;
+  material: OAuthMaterial;
+  /** The credential the session connected with, to notice a rotation in an external store. */
+  secret?: { ciphertext: string; id: string; revision: string };
+};
 type PendingSession = { revision: number; promise: Promise<McpSession> };
 
 /** Runtime MCP connector. Authorization is re-checked against the bot assignment on every call. */
@@ -303,7 +309,8 @@ export class McpConnector implements ConnectorProvider {
   private async sessionFor(server: McpServer, context: AdapterContext): Promise<McpSession> {
     const sessionKey = this.sessionKey(server, context);
     const existing = this.sessions.get(sessionKey);
-    if (existing && existing.revision === server.revision) return existing.session;
+    if (existing && existing.revision === server.revision && this.secretCurrent(existing))
+      return existing.session;
     const pending = this.connecting.get(sessionKey);
     if (pending?.revision === server.revision) return pending.promise;
     if (pending) {
@@ -313,8 +320,8 @@ export class McpConnector implements ConnectorProvider {
     }
     if (existing) await this.evict(sessionKey);
 
-    const promise = this.connectSession(server, context).then(({ session, material }) => {
-      this.sessions.set(sessionKey, { session, revision: server.revision, material });
+    const promise = this.connectSession(server, context).then(({ session, material, secret }) => {
+      this.sessions.set(sessionKey, { session, revision: server.revision, material, secret });
       return session;
     });
     this.connecting.set(sessionKey, { revision: server.revision, promise });
@@ -325,10 +332,15 @@ export class McpConnector implements ConnectorProvider {
     }
   }
 
+  private secretCurrent(entry: SessionEntry): boolean {
+    const { secret } = entry;
+    return !secret || this.secrets.revision(secret.ciphertext, secret.id) === secret.revision;
+  }
+
   private async connectSession(
     server: McpServer,
     context: AdapterContext,
-  ): Promise<{ session: McpSession; material: OAuthMaterial }> {
+  ): Promise<{ session: McpSession; material: OAuthMaterial; secret?: SessionEntry["secret"] }> {
     const session = new McpSession({ name: `rakazo-${server.slug}` });
     // Hoisted so a throw after the secret is decoded can still hand the material out.
     let material: OAuthMaterial | undefined;
@@ -395,7 +407,19 @@ export class McpConnector implements ConnectorProvider {
           signal: context.signal,
         });
       }
-      return { session, material };
+      return {
+        session,
+        material,
+        ...(secret
+          ? {
+              secret: {
+                ciphertext: secret.ciphertext,
+                id: secret.id,
+                revision: this.secrets.revision(secret.ciphertext, secret.id),
+              },
+            }
+          : {}),
+      };
     } catch (error) {
       await session.close().catch(() => undefined);
       // Redact here, while the material is still in hand. This one rejection is handed

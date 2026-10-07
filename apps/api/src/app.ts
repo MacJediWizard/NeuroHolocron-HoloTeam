@@ -43,6 +43,7 @@ import {
   InMemoryRealtimeFanout,
   InstalledConnectorProvider,
   IntegrationProviderSettings,
+  infisicalReferencedKeys,
   isComposioEnabled,
   isMessagingSurfaceEnabled,
   isPipedreamEnabled,
@@ -193,7 +194,9 @@ export async function createApp(
           publisher: created.pool,
         })
       : new InMemoryRealtimeFanout());
-  const secrets = await createSecretStore(process.env, env.encryptionKey, realtime);
+  const secrets = await createSecretStore(process.env, env.encryptionKey, realtime, {
+    referencedKeys: () => infisicalReferencedKeys(prisma),
+  });
   const events = createThreadEvents(prisma, realtime, {
     runSecretWriter: createRunSecretWriter(secrets),
   });
@@ -951,6 +954,7 @@ export async function createApp(
       await email?.drain?.();
       await reconciler?.stop();
       await jobs.close();
+      await secrets.close();
       await realtime.close();
       await connector.stop();
       await mcp.close();
