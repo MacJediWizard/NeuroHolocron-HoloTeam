@@ -14,6 +14,8 @@
 
 This repo is a fork of upstream Rakazo (`upstream` remote); `origin` is the fork. The product name is **Legiara**; it and the app ids, domain, operator, and source repo (`SOURCE_REPO`, which self-update, published images, the installer, and the desktop update feed all follow) are set once in `packages/contracts/src/brand.js`. Internal ids (`@rakazo/*`, `RAKAZO_*`, storage keys, DB names) stay as upstream so merges stay clean. After an upstream merge run `pnpm brand:apply`; `pnpm brand:check` fails if upstream brand text came back. Lines containing `brand:keep` (upstream credit) are never rewritten. Icons come from `packages/ui-tokens/assets/brand-icon.png` via `pnpm brand:icons`; re-run it after a merge that touches icon files. Code that Node or Electron loads without a bundler (desktop main, vite.config imports) must import `@rakazo/contracts/brand`, not `@rakazo/contracts`.
 
+Fork-only features (OIDC sign-in, the Infisical secret store behind `SECRET_STORE=infisical`, fork CI switches), the upstream-sync procedure, and fork release notes are in `docs/fork.md`; keep them updated there, not in `CHANGELOG.md` or `AGENTS.md`, which upstream rewrites. Secret storage goes through the secret-store interface in `packages/adapters` (`infisical-secret-store.ts`); never read or write in-app secrets around it.
+
 ## Architecture
 
 pnpm + Turborepo monorepo; one product across web, Electron desktop, and Expo mobile.

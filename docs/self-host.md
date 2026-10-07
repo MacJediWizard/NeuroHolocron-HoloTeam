@@ -200,6 +200,13 @@ space even when not on the signup allowlist, and its email is trusted as verifie
 access in the provider. `AUTH_PASSWORD_ENABLED=false` hides the email form and refuses password
 sign-in; the API will not start with it unless OIDC is configured.
 
+### Secret store (Infisical)
+
+Credentials that users save in the app are encrypted with `ENCRYPTION_KEY` and stored in Postgres by
+default. To keep them in an Infisical folder instead, set `SECRET_STORE=infisical` and the
+`INFISICAL_*` keys, then migrate existing rows with `pnpm --filter @rakazo/api secrets:infisical`.
+See [Keeping in-app secrets in Infisical](./self-host-secrets.md#keeping-in-app-secrets-in-infisical-optional).
+
 ### Verification and password recovery email
 
 Password changes for signed-in users require no email configuration. Forgotten-password recovery
