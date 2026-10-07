@@ -14,18 +14,22 @@ import {
 import type { ThreadItem } from "@rakazo/core";
 import {
   abortableDelay,
+  appendNewerThreadPage,
   attachmentsForThread,
   buildComposerMentionOptions,
   type ComposerMention,
   cloudAgentHttpsUrl,
   formatFileSize,
   formatMessageTime,
+  forwardProbeAfterPage,
   groupVoiceChats,
   isApprovalAskBlock,
   isRunTerminalEvent,
   isSecretAskBlock,
   latestAnswerableAskMessageId,
+  leaveThreadWindow,
   mentionChipKey,
+  openThreadWindow,
   plainTextFromMarkdown,
   projectMessageReactions,
   resolveComposerSendPlan,
@@ -34,6 +38,7 @@ import {
   type SlashActionId,
   selectedAskActionLabel,
   serializeComposerPrompt,
+  threadWindowMessages,
   truncateSlashDescription,
   userVisibleMessages,
   withLiveStreamingProgress,
@@ -83,6 +88,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppConnectCard } from "../components/AppConnectCard";
 import { AskActions } from "../components/AskActions";
 import { BotAvatar } from "../components/bot-avatar";
+import { ChoiceCard } from "../components/ChoiceCard";
+import { ComputerCard } from "../components/ComputerCard";
 import type { ImageArtifactPreviewTarget } from "../components/image-artifact-viewer";
 import { InlineImageAttachment } from "../components/inline-image-attachment";
 import { McpApprovalCard } from "../components/McpApprovalCard";
@@ -90,6 +97,8 @@ import {
   MarkdownArtifactPreview,
   type MarkdownArtifactPreviewTarget,
 } from "../components/markdown-artifact-preview";
+import { MessageContextMenu } from "../components/message-context-menu";
+import { NativeActionButton } from "../components/native-action-button";
 import { NativeSymbol } from "../components/native-symbol";
 import { SelectTextSheet } from "../components/select-text-sheet";
 import { VoiceChatCard } from "../components/VoiceChatCard";
@@ -120,6 +129,7 @@ import { type MobileArtifactTarget, openMobileArtifact } from "../lib/artifact-o
 import { nextAutoSpeakAction } from "../lib/auto-speak";
 import { confirmDeleteBot } from "../lib/bot-lifecycle";
 import { setCallProviderTranscribe, startCall, useCallSession } from "../lib/call-session";
+import { transparentColor } from "../lib/color";
 import { loadDeviceVoiceEnabled } from "../lib/device-voice";
 import { available as dictationAvailable } from "../lib/dictation";
 import { cancelFocusPrompt, focusPromptThreadActive } from "../lib/focus-prompt";
@@ -132,7 +142,9 @@ import {
   setOpenNotificationThread,
 } from "../lib/live-notifications";
 import { presentMessageActionSheet } from "../lib/message-action-sheet";
+import { buildMessageContextMenu, messageMenuReaction } from "../lib/message-context-menu";
 import {
+  applyLocalChoiceDismissals,
   hasVisibleMessagePresentation,
   isCenteredAgentEvent,
   messagePresentationSegments,
@@ -157,12 +169,13 @@ import {
   subscribeResponseStreaming,
 } from "../lib/response-streaming";
 import { selectableTextFromMarkdown } from "../lib/selectable-text";
+import { ThreadJumpAnchor } from "../lib/thread-jump";
 import {
   type ThreadScrollAction,
   ThreadScrollBehavior,
   type ThreadScrollState,
 } from "../lib/thread-scroll";
-import { getVoicePlaybackState, speakQueue, speakText, subscribeVoicePlayback } from "../lib/voice";
+import { speakQueue, speakText } from "../lib/voice";
 import { probeProviderTranscribe, resolveVoiceCallPlan } from "../lib/voice-call-entry";
 
 type PendingAttachment = PickedAttachment & { threadKey: string };
@@ -303,6 +316,7 @@ export default function ThreadRoute() {
 
 function createThreadHeaderStyles() {
   const tokens = mobileTokens();
+  const transparentBackground = transparentColor(tokens.background);
   return StyleSheet.create({
     titleCapsule: {
       flexDirection: "row",
@@ -327,7 +341,15 @@ function createThreadHeaderStyles() {
       top: 0,
       left: 0,
       right: 0,
-      experimental_backgroundImage: `linear-gradient(to bottom, ${tokens.background} 0%, ${tokens.background} 58%, ${tokens.background}00 100%)`,
+      experimental_backgroundImage: `linear-gradient(to bottom, ${tokens.background} 0%, ${tokens.background} 58%, ${transparentBackground} 100%)`,
+    },
+    composerFade: {
+      position: "absolute",
+      bottom: "100%",
+      left: -20,
+      right: -20,
+      height: 24,
+      experimental_backgroundImage: `linear-gradient(to top, ${tokens.background} 0%, ${transparentBackground} 100%)`,
     },
   });
 }
@@ -371,10 +393,12 @@ function Thread() {
     groupId?: string;
     messageId: string;
     threadId: string;
-    messages: readonly MobileMessage[];
-    olderCursor: number | null;
+    newerCursor: number | null;
+    coveredThroughSeq?: number;
+    probeSeq?: number;
   } | null>(null);
   const jumpScrollTarget = useRef<string | null>(null);
+  const jumpAnchor = useRef(new ThreadJumpAnchor());
   const activeBotId = useRef(botId);
   activeBotId.current = botId;
   const activeGroupId = useRef(groupId);
@@ -395,6 +419,8 @@ function Thread() {
     expandedHistoryThread.current = null;
     pinnedAroundRef.current = null;
     jumpScrollTarget.current = null;
+    jumpAnchor.current.release();
+    joinPinnedAfterLayout.current = null;
     loadingOlderContent.current = false;
     setThreadScrollState(scrollBehavior.current.state());
   }, [threadKey]);
@@ -449,17 +475,31 @@ function Thread() {
   const [error, setError] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [selectableText, setSelectableText] = useState<string | null>(null);
+  const [loadingNewer, setLoadingNewer] = useState(false);
+  const loadingNewerContent = useRef(false);
+  // A failed newer page waits for the next drag instead of retrying on every scroll event.
+  const newerLoadFailed = useRef(false);
+  const pinnedScrollMetrics = useRef({ offset: 0, viewport: 0, content: 0 });
+  const joinPinnedAfterLayout = useRef<number | null>(null);
   const [markdownPreview, setMarkdownPreview] = useState<MarkdownArtifactPreviewTarget | null>(
     null,
   );
+  const [dismissedChoiceQuestions, setDismissedChoiceQuestions] = useState<
+    ReadonlyMap<string, ReadonlySet<string>>
+  >(() => new Map());
   const reactionView = useMemo(
     () =>
       projectMessageReactions(
-        userVisibleMessages(snap?.messages ?? [], { includePeerReceipts: true }).filter((message) =>
-          hasVisibleMessagePresentation(message.blocks),
-        ),
+        userVisibleMessages(snap?.messages ?? [], { includePeerReceipts: true })
+          .map((message) => {
+            const dismissed = dismissedChoiceQuestions.get(message.id);
+            if (!dismissed) return message;
+            const blocks = applyLocalChoiceDismissals(message.blocks, dismissed);
+            return blocks === message.blocks ? message : { ...message, blocks: [...blocks] };
+          })
+          .filter((message) => hasVisibleMessagePresentation(message.blocks)),
       ),
-    [snap?.messages],
+    [dismissedChoiceQuestions, snap?.messages],
   );
   const visibleMessages = reactionView.visibleMessages;
   const latestMessageId = visibleMessages.at(-1)?.id ?? null;
@@ -523,6 +563,7 @@ function Thread() {
       : [];
   const currentBot = botId ? mentionBots.find((bot) => bot.id === botId) : undefined;
   const displayName = currentBot?.name ?? name;
+  const composerPrompt = displayName ? t("Message {name}", { name: displayName }) : t("Message…");
   const notificationThreadId = snap?.threadId ?? requestedThreadId ?? currentBot?.threadId;
   activeThreadId.current = notificationThreadId;
   const currentBotStatus = snap ? snap.run?.status : currentBot?.status;
@@ -918,22 +959,108 @@ function Thread() {
     if (target.groupId && activeGroupId.current !== target.groupId) return;
     if (target.botId && activeBotId.current !== target.botId) return;
     const targetInPage = page.messages.some((message) => message.id === target.messageId);
+    const opened = targetInPage ? openThreadWindow(snap, page) : null;
     expandedHistoryThread.current = targetInPage ? page.threadId : null;
-    pinnedAroundRef.current = targetInPage
+    pinnedAroundRef.current = opened
       ? {
           ...threadTarget,
           messageId: target.messageId,
           threadId: page.threadId,
-          messages: [...page.messages],
-          olderCursor: page.olderCursor,
+          newerCursor: opened.newerCursor,
         }
       : null;
+    jumpAnchor.current.begin(targetInPage ? target.messageId : null);
     jumpScrollTarget.current = targetInPage ? target.messageId : null;
-    commitSnap({
-      ...snap,
-      messages: targetInPage ? [...page.messages] : snap.messages,
-      olderCursor: targetInPage ? page.olderCursor : snap.olderCursor,
-    });
+    newerLoadFailed.current = false;
+    joinPinnedAfterLayout.current = null;
+    pinnedScrollMetrics.current = { offset: 0, viewport: 0, content: 0 };
+    commitSnap(opened?.snapshot ?? snap);
+  }
+
+  async function loadNewerMessages() {
+    const pinned = pinnedAroundRef.current;
+    if (
+      (!botId && !groupId) ||
+      pinned?.newerCursor == null ||
+      loadingNewerContent.current ||
+      newerLoadFailed.current
+    )
+      return;
+    loadingNewerContent.current = true;
+    setLoadingNewer(true);
+    const epoch = historyEpoch.current;
+    const probe = pinned.probeSeq ?? pinned.newerCursor + 1;
+    let visibleUnchanged = false;
+    try {
+      // Pages come back centered on the seq, so the one after the cursor overlaps what is loaded.
+      const page = await rpc<MobileMessagePage & { coveredThroughSeq?: number }>(
+        "threads/messages",
+        {
+          ...(groupId ? { groupId } : { botId: botId! }),
+          around: { seq: probe },
+        },
+      );
+      if (epoch !== historyEpoch.current || pinnedAroundRef.current !== pinned || !snapRef.current)
+        return;
+      const visibleBefore = threadWindowMessages(
+        snapRef.current.messages,
+        pinned.newerCursor,
+      ).length;
+      const reported = page.coveredThroughSeq ?? null;
+      const carried =
+        reported == null ? undefined : Math.max(pinned.coveredThroughSeq ?? reported, reported);
+      const next = appendNewerThreadPage(
+        snapRef.current,
+        pinned.newerCursor,
+        page,
+        reported == null ? null : carried,
+      );
+      const step = forwardProbeAfterPage({
+        probe,
+        newerCursor: pinned.newerCursor,
+        nextCursor: next.newerCursor,
+        reportedCoverage: reported,
+        carriedCoverage: pinned.coveredThroughSeq,
+      });
+      if (step.stalled) newerLoadFailed.current = true;
+      visibleUnchanged =
+        threadWindowMessages(next.snapshot.messages, next.newerCursor).length === visibleBefore;
+      pinnedAroundRef.current = {
+        ...pinned,
+        newerCursor: next.newerCursor,
+        coveredThroughSeq: step.coverage,
+        probeSeq: step.probe,
+      };
+      commitSnap(next.snapshot);
+      if (next.newerCursor == null) {
+        joinPinnedAfterLayout.current = pinnedScrollMetrics.current.content;
+      }
+    } catch (err) {
+      if (epoch !== historyEpoch.current || pinnedAroundRef.current !== pinned) return;
+      newerLoadFailed.current = true;
+      setError(err instanceof Error ? err.message : t("Could not open message"));
+    } finally {
+      loadingNewerContent.current = false;
+      setLoadingNewer(false);
+      if (visibleUnchanged) loadNewerNearEnd();
+    }
+  }
+
+  function showLatest() {
+    const pinned = pinnedAroundRef.current;
+    pinnedAroundRef.current = null;
+    joinPinnedAfterLayout.current = null;
+    jumpScrollTarget.current = null;
+    jumpAnchor.current.release();
+    expandedHistoryThread.current = null;
+    // The live list mounts at the latest message.
+    scrollBehavior.current.jumpToLatest();
+    setThreadScrollState(scrollBehavior.current.state());
+    commitSnap(
+      snapRef.current && pinned
+        ? leaveThreadWindow(snapRef.current, pinned.newerCursor)
+        : snapRef.current,
+    );
   }
 
   async function loadOlderMessages() {
@@ -941,13 +1068,14 @@ function Thread() {
     loadingOlderContent.current = true;
     setLoadingOlder(true);
     const epoch = historyEpoch.current;
+    const pinned = pinnedAroundRef.current;
     try {
       const page = await rpc<MobileMessagePage>("threads/messages", {
         ...(groupId ? { groupId } : { botId: botId! }),
         before: snap.olderCursor,
         includePeerReceipts: true,
       });
-      if (epoch !== historyEpoch.current) {
+      if (epoch !== historyEpoch.current || pinnedAroundRef.current !== pinned) {
         loadingOlderContent.current = false;
         return;
       }
@@ -1044,6 +1172,7 @@ function Thread() {
     if (!messageId) {
       pinnedAroundRef.current = null;
       jumpScrollTarget.current = null;
+      jumpAnchor.current.release();
     }
     expandedHistoryThread.current = null;
     historyEpoch.current += 1;
@@ -1092,6 +1221,8 @@ function Thread() {
                 if (event.type === "thread.cleared") {
                   expandedHistoryThread.current = null;
                   pinnedAroundRef.current = null;
+                  jumpScrollTarget.current = null;
+                  jumpAnchor.current.release();
                   historyEpoch.current += 1;
                 }
                 commitSnap(applyMobileThreadEvent(snapRef.current, event));
@@ -1159,7 +1290,20 @@ function Thread() {
   }, [botId, groupId, navigation, snap?.run?.status]);
 
   useEffect(() => {
-    if ((!botId && !groupId) || !messageId) return;
+    if (!botId && !groupId) return;
+    // A conversation hit is the thread itself: stay on the live tail, not an older page.
+    if (!messageId) {
+      const pinned = pinnedAroundRef.current != null || jumpAnchor.current.holds();
+      jumpAnchor.current.release();
+      jumpScrollTarget.current = null;
+      pinnedAroundRef.current = null;
+      if (pinned) {
+        expandedHistoryThread.current = null;
+        commitSnap(snapRef.current);
+      }
+      return;
+    }
+    jumpAnchor.current.begin(messageId);
     void applyMessageJump(groupId ? { groupId, messageId } : { botId: botId!, messageId }).catch(
       (err) => {
         setError(err instanceof Error ? err.message : t("Could not open message"));
@@ -1233,6 +1377,16 @@ function Thread() {
       params: action === "settings-usage" ? { focus: "usage" } : undefined,
     });
   }
+
+  const composerPillStyle = {
+    width: 36,
+    height: 28,
+    borderRadius: 14,
+    marginBottom: 8,
+    backgroundColor: tokens.primary,
+    alignItems: "center",
+    justifyContent: "center",
+  } as const;
 
   const canSend =
     Boolean(draft.trim()) ||
@@ -1357,6 +1511,8 @@ function Thread() {
         return;
       }
       if (isCurrentTarget(botTarget, groupTarget)) {
+        // A sent message lands at the latest end, past an older page opened from search.
+        if (pinnedAroundRef.current) showLatest();
         void refresh().catch(() => undefined);
       }
     } catch (err) {
@@ -1420,6 +1576,12 @@ function Thread() {
   const openBot = useCallback(
     (id: string, botName: string) =>
       router.push({ pathname: "/thread", params: { botId: id, name: botName } }),
+    [router],
+  );
+
+  const openComputer = useCallback(
+    (id: string, botName: string) =>
+      router.push({ pathname: "/computer", params: { botId: id, name: botName } }),
     [router],
   );
 
@@ -1559,6 +1721,7 @@ function Thread() {
         ((pinnedTarget.botId && pinnedTarget.botId === botId) ||
           (pinnedTarget.groupId && pinnedTarget.groupId === groupId))),
   );
+  const pinnedNewerCursor = showPinnedPage ? (pinnedTarget?.newerCursor ?? null) : null;
 
   function performScroll(action: ThreadScrollAction) {
     if (!action || showPinnedPage) return;
@@ -1566,6 +1729,55 @@ function Thread() {
       offset: 0,
       animated: action === "smooth" && !reducedMotion,
     });
+  }
+
+  function pinnedDistanceFromEnd(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    return contentSize.height - layoutMeasurement.height - contentOffset.y;
+  }
+
+  function pinnedNearEnd() {
+    const { offset, viewport, content } = pinnedScrollMetrics.current;
+    return viewport > 0 && content - viewport - offset <= 80;
+  }
+
+  function scrollPinnedTo(offset: number) {
+    pinnedScroll.current?.scrollTo({ y: offset, animated: false });
+    pinnedScrollMetrics.current.offset = offset;
+  }
+
+  function loadNewerNearEnd() {
+    // Wait until the matched row has a real offset. Prefetching from the top
+    // of the page changes the content size and lands back on an older reply.
+    // A hit that is not drawn (filtered out of the transcript) must not hold
+    // that wait, or newer pages never load.
+    const targetId = jumpScrollTarget.current ?? pinnedAroundRef.current?.messageId;
+    const targetDrawn =
+      targetId != null &&
+      threadWindowMessages(visibleMessages, pinnedNewerCursor).some(
+        (message) => message.id === targetId,
+      );
+    if (jumpAnchor.current.holds() && !targetDrawn) {
+      jumpAnchor.current.release();
+      jumpScrollTarget.current = null;
+    } else if (jumpAnchor.current.blocksPaging(targetDrawn, headerHeight + 24)) {
+      return;
+    }
+    const { offset, viewport, content } = pinnedScrollMetrics.current;
+    // Fetch the next page while a screen of this one is still left to read; a page shorter
+    // than the screen never scrolls, so layout and content changes check too.
+    if (viewport > 0 && content - viewport - offset < viewport) void loadNewerMessages();
+  }
+
+  function updatePinnedScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
+    // Once the page reaches the latest message, the end of it is the live thread.
+    if (
+      pinnedNewerCursor === null &&
+      !jumpScrollTarget.current &&
+      pinnedDistanceFromEnd(event) <= 80
+    ) {
+      showLatest();
+    }
   }
 
   function updateUserScroll(event: NativeSyntheticEvent<NativeScrollEvent>) {
@@ -1592,22 +1804,38 @@ function Thread() {
     }
   }
 
-  function messageActionProps(message: MobileMessage): MessageActionProps {
+  function messageActionProps(message: MobileMessage): {
+    actionProps: MessageActionProps;
+    menu: ReturnType<typeof buildMessageContextMenu>;
+    onMenuAction: (id: string) => void;
+  } {
     const messageText = selectableMobileMessageText(message);
+    const includeQuote =
+      !message.id.startsWith("progress:") &&
+      quotableMessageSegments(message.role, message.blocks).length > 0;
+    const includeReact = canReactToThreadMessage(message);
+    // The call already reads replies aloud; a second voice would talk over it.
+    const includeSpeak = message.role === "bot" && !onCall && Boolean(blockText(message));
+    const includeSelect = messageText.trim().length > 0;
+    const reply = () => {
+      setReplyTarget(message);
+      setReplyQuote(null);
+    };
+    const quote = () => setQuoteTarget(message);
+    const speakMessage = () => void speak(message);
+    const select = () =>
+      setSelectableText(
+        message.role === "user" ? messageText : selectableTextFromMarkdown(messageText),
+      );
+    const copy = () => {
+      const text = copyableMobileMessageText(message);
+      if (text) void Clipboard.setStringAsync(text).catch(() => undefined);
+    };
+    const react = (reaction: MessageReaction) => void reactToMessage(message, reaction);
     const actions = [
-      {
-        name: "reply",
-        text: t("Reply"),
-        onPress: () => {
-          setReplyTarget(message);
-          setReplyQuote(null);
-        },
-      },
-      ...(!message.id.startsWith("progress:") &&
-      quotableMessageSegments(message.role, message.blocks).length > 0
-        ? [{ name: "quote", text: t("Quote"), onPress: () => setQuoteTarget(message) }]
-        : []),
-      ...(canReactToThreadMessage(message)
+      { name: "reply", text: t("Reply"), onPress: reply },
+      ...(includeQuote ? [{ name: "quote", text: t("Quote"), onPress: quote }] : []),
+      ...(includeReact
         ? [
             {
               name: "react",
@@ -1618,59 +1846,73 @@ function Thread() {
                   more: t("More"),
                   colorScheme,
                   actions: MESSAGE_REACTIONS.map((emoji) => ({
-                    name: emoji,
                     text: emoji,
-                    onPress: () => void reactToMessage(message, emoji),
+                    onPress: () => react(emoji),
                   })),
                 }),
             },
           ]
         : []),
-      // The call already reads replies aloud; a second voice would talk over it.
-      ...(message.role === "bot" && !onCall && blockText(message)
-        ? [{ name: "speak", text: t("Speak message"), onPress: () => void speak(message) }]
-        : []),
-      ...(messageText.trim()
-        ? [
-            {
-              name: "select",
-              text: t("Select text"),
-              onPress: () =>
-                setSelectableText(
-                  message.role === "user" ? messageText : selectableTextFromMarkdown(messageText),
-                ),
-            },
-          ]
-        : []),
-      {
-        name: "copy",
-        text: t("Copy"),
-        onPress: () => {
-          const text = copyableMobileMessageText(message);
-          if (text) void Clipboard.setStringAsync(text).catch(() => undefined);
-        },
-      },
+      ...(includeSpeak ? [{ name: "speak", text: t("Speak message"), onPress: speakMessage }] : []),
+      ...(includeSelect ? [{ name: "select", text: t("Select text"), onPress: select }] : []),
+      { name: "copy", text: t("Copy"), onPress: copy },
     ];
+    const menu = buildMessageContextMenu({
+      labels: {
+        reply: t("Reply"),
+        copy: t("Copy"),
+        react: t("React"),
+        quote: t("Quote"),
+        speak: t("Speak message"),
+        select: t("Select text"),
+      },
+      reactions: MESSAGE_REACTIONS,
+      include: {
+        quote: includeQuote,
+        react: includeReact,
+        speak: includeSpeak,
+        select: includeSelect,
+      },
+    });
+    const openSheet = () =>
+      presentMessageActionSheet({
+        actions,
+        title: message.createdAt
+          ? formatMessageTime(message.createdAt, dateLocaleForUi())
+          : undefined,
+        cancel: t("Cancel"),
+        more: t("More"),
+        colorScheme,
+      });
     return {
-      onLongPress: () =>
-        presentMessageActionSheet({
-          actions,
-          title: message.createdAt
-            ? formatMessageTime(message.createdAt, dateLocaleForUi())
-            : undefined,
-          cancel: t("Cancel"),
-          more: t("More"),
-          colorScheme,
-        }),
-      accessibilityActions: actions.map((action) => ({ name: action.name, label: action.text })),
-      onAccessibilityAction: (event) => {
-        actions.find((action) => action.name === event.nativeEvent.actionName)?.onPress();
+      menu,
+      onMenuAction: (id) => {
+        const reaction = messageMenuReaction(id);
+        if (reaction && (MESSAGE_REACTIONS as readonly string[]).includes(reaction)) {
+          react(reaction as MessageReaction);
+          return;
+        }
+        if (id === "reply") reply();
+        if (id === "copy") copy();
+        if (id === "quote") quote();
+        if (id === "speak") speakMessage();
+        if (id === "select") select();
+      },
+      actionProps: {
+        onLongPress: Platform.OS === "ios" ? undefined : openSheet,
+        accessibilityActions: actions.map((action) => ({ name: action.name, label: action.text })),
+        onAccessibilityAction: (event) => {
+          actions.find((action) => action.name === event.nativeEvent.actionName)?.onPress();
+        },
       },
     };
   }
 
-  function renderMessageRow(message: MobileMessage, options?: { enableJump?: boolean }) {
-    const actionProps = messageActionProps(message);
+  function renderMessageRow(
+    message: MobileMessage,
+    options?: { enableJump?: boolean; index?: number },
+  ) {
+    const { actionProps, menu, onMenuAction } = messageActionProps(message);
     const messageReactions = reactionView.reactions.get(message.id);
     const activityBotId =
       !inGroup && message.role === "bot" && message.id.startsWith("progress:")
@@ -1690,13 +1932,18 @@ function Thread() {
         onLayout={
           options?.enableJump
             ? (event) => {
-                if (jumpScrollTarget.current !== message.id) return;
                 // Opaque header used to own this space; clear the transparent bar + fade.
-                const y = Math.max(0, event.nativeEvent.layout.y - (headerHeight + 24));
+                const offset = jumpAnchor.current.onMessageLayout(
+                  message.id,
+                  event.nativeEvent.layout.y,
+                  options.index ?? 0,
+                  headerHeight + 24,
+                );
+                if (offset == null) return;
+                scrollPinnedTo(offset);
                 requestAnimationFrame(() => {
-                  if (jumpScrollTarget.current !== message.id) return;
-                  pinnedScroll.current?.scrollTo({ y, animated: true });
-                  jumpScrollTarget.current = null;
+                  const again = jumpAnchor.current.align(headerHeight + 24);
+                  if (again != null) scrollPinnedTo(again);
                 });
               }
             : undefined
@@ -1732,7 +1979,12 @@ function Thread() {
             flexShrink: 1,
           }}
         >
-          <Pressable accessible={false} onLongPress={actionProps.onLongPress}>
+          <MessageContextMenu
+            actions={menu}
+            colorScheme={colorScheme}
+            onAction={onMenuAction}
+            onLongPress={actionProps.onLongPress}
+          >
             <MessageBubble
               botId={botId ?? snap?.members?.[0]?.botId ?? ""}
               groupId={groupId}
@@ -1746,8 +1998,19 @@ function Thread() {
               canAnswer={message.id === answerableAskMessageId}
               onAnswer={answerMessage}
               onOpenBot={openBot}
+              onOpenComputer={openComputer}
+              onChoiceDismissed={(question) => {
+                setDismissedChoiceQuestions((current) => {
+                  const existing = current.get(message.id);
+                  if (existing?.has(question)) return current;
+                  const next = new Map(current);
+                  const questions = new Set(existing);
+                  questions.add(question);
+                  next.set(message.id, questions);
+                  return next;
+                });
+              }}
               onPreviewMarkdown={setMarkdownPreview}
-              onPlay={onCall ? undefined : () => speak(message)}
               onPreviewImage={(target) =>
                 router.push({
                   pathname: "/image",
@@ -1756,7 +2019,7 @@ function Thread() {
               }
               actionProps={actionProps}
             />
-          </Pressable>
+          </MessageContextMenu>
           {messageReactions ? (
             <View
               style={{
@@ -1876,18 +2139,65 @@ function Thread() {
           {runError}
         </Text>
       ) : null}
-      <View style={{ flex: 1, position: "relative" }}>
+      {/* The floor keeps a tall suggestion list from sliding under the transparent header. */}
+      <View style={{ flex: 1, minHeight: headerHeight, position: "relative" }}>
         {showPinnedPage ? (
           <ScrollView
             key={jumpScrollTarget.current ?? pinnedTarget?.messageId ?? threadKey}
             ref={pinnedScroll}
             style={{ flex: 1 }}
-            contentContainerStyle={{ paddingTop: headerHeight + 8 }}
+            contentContainerStyle={{ paddingTop: headerHeight + 8, paddingBottom: 16 }}
             maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+            scrollEventThrottle={16}
+            onLayout={(event) => {
+              pinnedScrollMetrics.current.viewport = event.nativeEvent.layout.height;
+              loadNewerNearEnd();
+            }}
+            onContentSizeChange={(_, height) => {
+              pinnedScrollMetrics.current.content = height;
+              const jumpOffset = jumpAnchor.current.align(headerHeight + 24);
+              if (jumpOffset != null) scrollPinnedTo(jumpOffset);
+              const armedAt = joinPinnedAfterLayout.current;
+              if (armedAt != null && height !== armedAt) {
+                joinPinnedAfterLayout.current = null;
+                if (
+                  !jumpAnchor.current.holds() &&
+                  pinnedAroundRef.current?.newerCursor == null &&
+                  pinnedNearEnd()
+                ) {
+                  showLatest();
+                  return;
+                }
+              }
+              loadNewerNearEnd();
+            }}
+            onScroll={(event) => {
+              const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+              pinnedScrollMetrics.current = {
+                offset: contentOffset.y,
+                viewport: layoutMeasurement.height,
+                content: contentSize.height,
+              };
+              loadNewerNearEnd();
+            }}
+            onScrollBeginDrag={() => {
+              newerLoadFailed.current = false;
+              if (!jumpAnchor.current.holds()) return;
+              jumpAnchor.current.release();
+              jumpScrollTarget.current = null;
+            }}
+            onScrollEndDrag={updatePinnedScroll}
+            onMomentumScrollEnd={updatePinnedScroll}
           >
             {loadEarlierControl}
-            {visibleMessages.map((message) => renderMessageRow(message, { enableJump: true }))}
-            {workingFooter}
+            {threadWindowMessages(visibleMessages, pinnedNewerCursor).map((message, index) =>
+              renderMessageRow(message, { enableJump: true, index }),
+            )}
+            {pinnedNewerCursor === null ? (
+              workingFooter
+            ) : loadingNewer ? (
+              <ActivityIndicator color={tokens.mutedForeground} style={{ marginVertical: 12 }} />
+            ) : null}
           </ScrollView>
         ) : (
           <FlatList
@@ -1899,7 +2209,7 @@ function Thread() {
             extraData={answerableAskMessageId}
             style={{ flex: 1 }}
             // Inverted, so the bottom padding is the visual top, clear of the transparent header.
-            contentContainerStyle={{ paddingBottom: headerHeight + 8 }}
+            contentContainerStyle={{ paddingBottom: headerHeight + 8, paddingTop: 16 }}
             maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
             scrollEventThrottle={16}
             onScrollBeginDrag={() => {
@@ -1943,13 +2253,17 @@ function Thread() {
             }
           />
         )}
-        {!showPinnedPage && threadScrollState.detached ? (
+        {showPinnedPage || threadScrollState.detached ? (
           <Pressable
             accessibilityRole="button"
             accessibilityLabel={
               threadScrollState.unread ? t("Jump to latest, new messages") : t("Jump to latest")
             }
             onPress={() => {
+              if (showPinnedPage) {
+                showLatest();
+                return;
+              }
               performScroll(scrollBehavior.current.jumpToLatest());
               setThreadScrollState(scrollBehavior.current.state());
             }}
@@ -1992,7 +2306,15 @@ function Thread() {
       </View>
       {/* Fades messages out under the transparent header; the alpha stop keeps the page hue. */}
       <View pointerEvents="none" style={[styles.headerFade, { height: headerHeight + 24 }]} />
-      <View style={{ paddingBottom: keyboardVisible ? 12 : Math.max(insets.bottom + 12, 24) }}>
+      {/* Shrinks (the suggestion lists scroll) so the input and Send stay above the keyboard. */}
+      <View
+        style={{
+          flexShrink: 1,
+          paddingBottom: keyboardVisible ? 12 : Math.max(insets.bottom + 12, 24),
+        }}
+      >
+        {/* Fades messages out above the composer, like the header fade. */}
+        <View pointerEvents="none" style={styles.composerFade} />
         {replyTarget ? (
           <View
             style={{
@@ -2087,9 +2409,12 @@ function Thread() {
           </View>
         ) : null}
         {mentionOptions.length ? (
-          <View
+          <ScrollView
             testID="mention-picker"
+            keyboardShouldPersistTaps="handled"
             style={{
+              flexGrow: 0,
+              flexShrink: 1,
               marginTop: 12,
               borderRadius: 14,
               borderWidth: 1,
@@ -2129,12 +2454,15 @@ function Thread() {
                 </View>
               </Pressable>
             ))}
-          </View>
+          </ScrollView>
         ) : null}
         {slashSkillOptions.length || slashActionOptions.length ? (
-          <View
+          <ScrollView
             testID="slash-picker"
+            keyboardShouldPersistTaps="handled"
             style={{
+              flexGrow: 0,
+              flexShrink: 1,
               marginTop: 12,
               borderRadius: 14,
               borderWidth: 1,
@@ -2195,16 +2523,9 @@ function Thread() {
                 <Text style={{ color: tokens.foreground, fontSize: 14 }}>{t(action.label)}</Text>
               </Pressable>
             ))}
-          </View>
+          </ScrollView>
         ) : null}
-        <View
-          style={{
-            flexDirection: "row",
-            gap: 8,
-            marginTop: 16,
-            alignItems: "flex-end",
-          }}
-        >
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 10, marginTop: 8 }}>
           <Pressable
             accessibilityLabel={t("Attach file")}
             onPress={showAttachMenu}
@@ -2212,7 +2533,8 @@ function Thread() {
               width: 44,
               height: 44,
               borderRadius: 22,
-              borderWidth: 1,
+              backgroundColor: tokens.card,
+              borderWidth: StyleSheet.hairlineWidth,
               borderColor: tokens.border,
               alignItems: "center",
               justifyContent: "center",
@@ -2223,180 +2545,191 @@ function Thread() {
           <View
             style={{
               flex: 1,
-              flexDirection: "row",
-              flexWrap: "wrap",
-              alignItems: "center",
-              gap: 6,
-              backgroundColor: tokens.card,
-              borderRadius: 20,
-              paddingHorizontal: 10,
-              paddingVertical: 8,
               minHeight: 44,
+              borderRadius: 22,
+              backgroundColor: tokens.card,
+              borderWidth: StyleSheet.hairlineWidth,
+              borderColor: tokens.border,
+              flexDirection: "row",
+              alignItems: "flex-end",
+              paddingStart: 16,
+              paddingEnd: 4,
             }}
           >
-            {selectedSkill ? (
-              <View
-                testID="skill-chip"
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 6,
-                  backgroundColor: tokens.muted,
-                  borderRadius: 999,
-                  paddingHorizontal: 10,
-                  paddingVertical: 5,
-                  maxWidth: "100%",
-                }}
-              >
-                <NativeSymbol
-                  ios="cube"
-                  android="cube-outline"
-                  size={13}
-                  color={tokens.mutedForeground}
-                />
-                <Text
-                  numberOfLines={1}
-                  style={{ color: tokens.foreground, fontSize: 13, flexShrink: 1 }}
-                >
-                  {selectedSkill.name}
-                </Text>
-                <Pressable
-                  accessibilityLabel={t("Remove skill {name}", { name: selectedSkill.name })}
-                  hitSlop={8}
-                  onPress={() => setSelectedSkill(null)}
-                >
-                  <NativeSymbol
-                    ios="xmark"
-                    android="close"
-                    size={12}
-                    color={tokens.mutedForeground}
-                  />
-                </Pressable>
-              </View>
-            ) : null}
-            {selectedMentions.map((mention) => (
-              <View
-                key={mentionChipKey(mention)}
-                testID="mention-chip"
-                style={{
-                  flexDirection: "row",
-                  alignItems: "center",
-                  gap: 6,
-                  backgroundColor: tokens.muted,
-                  borderRadius: 999,
-                  paddingHorizontal: 10,
-                  paddingVertical: 5,
-                  maxWidth: "100%",
-                }}
-              >
-                <MentionChipIcon mention={mention} />
-                <Text
-                  numberOfLines={1}
-                  style={{ color: tokens.foreground, fontSize: 13, flexShrink: 1 }}
-                >
-                  {mention.name}
-                </Text>
-                <Pressable
-                  accessibilityLabel={t("Remove mention {name}", { name: mention.name })}
-                  hitSlop={8}
-                  onPress={() =>
-                    setSelectedMentions((current) =>
-                      current.filter(
-                        (selected) => mentionChipKey(selected) !== mentionChipKey(mention),
-                      ),
-                    )
-                  }
-                >
-                  <NativeSymbol
-                    ios="xmark"
-                    android="close"
-                    size={12}
-                    color={tokens.mutedForeground}
-                  />
-                </Pressable>
-              </View>
-            ))}
-            <TextInput
-              value={draft}
-              onChangeText={updateDraft}
-              accessibilityLabel={
-                displayName ? t("Message {name}", { name: displayName }) : t("Message")
-              }
-              onKeyPress={(event) => {
-                if (
-                  event.nativeEvent.key === "Backspace" &&
-                  draft.length === 0 &&
-                  (selectedSkill !== null || selectedMentions.length > 0)
-                ) {
-                  removeLastChip();
-                }
-              }}
-              placeholder={
-                selectedSkill || selectedMentions.length
-                  ? undefined
-                  : displayName
-                    ? t("Message {name}", { name: displayName })
-                    : t("Message…")
-              }
-              placeholderTextColor={tokens.mutedForeground}
-              keyboardAppearance={colorScheme}
-              multiline
-              textAlignVertical="center"
-              blurOnSubmit={false}
+            <View
               style={{
-                flexGrow: 1,
-                flexShrink: 1,
-                minWidth: 96,
-                color: tokens.foreground,
-                paddingVertical: 2,
-                maxHeight: 100,
-                writingDirection: "auto",
-              }}
-            />
-          </View>
-          {botId && !onCall && draft.trim().length === 0 ? (
-            <Pressable
-              accessibilityLabel={t("Call")}
-              onPress={() => void startVoiceCall()}
-              style={{
-                width: 44,
-                height: 44,
-                borderRadius: 22,
-                borderWidth: 1,
-                borderColor: tokens.border,
+                flex: 1,
+                flexDirection: "row",
+                flexWrap: "wrap",
                 alignItems: "center",
-                justifyContent: "center",
+                gap: 6,
               }}
             >
-              <NativeSymbol
-                ios="waveform"
-                android="pulse-outline"
-                size={18}
-                color={tokens.mutedForeground}
-              />
-            </Pressable>
-          ) : null}
-          <Pressable
-            accessibilityLabel={t("Send")}
-            disabled={sending || !canSend}
-            onPress={() => void send()}
-            style={{
-              backgroundColor: tokens.primary,
-              borderRadius: 22,
-              width: 44,
-              height: 44,
-              alignItems: "center",
-              justifyContent: "center",
-              opacity: sending || !canSend ? 0.5 : 1,
-            }}
-          >
-            <NativeSymbol
-              ios="arrow.up"
-              android="arrow-up"
-              size={18}
-              color={tokens.primaryForeground}
-            />
-          </Pressable>
+              {selectedSkill ? (
+                <View
+                  testID="skill-chip"
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 6,
+                    backgroundColor: tokens.muted,
+                    borderRadius: 999,
+                    paddingHorizontal: 10,
+                    paddingVertical: 5,
+                    maxWidth: "100%",
+                  }}
+                >
+                  <NativeSymbol
+                    ios="cube"
+                    android="cube-outline"
+                    size={13}
+                    color={tokens.mutedForeground}
+                  />
+                  <Text
+                    numberOfLines={1}
+                    style={{ color: tokens.foreground, fontSize: 13, flexShrink: 1 }}
+                  >
+                    {selectedSkill.name}
+                  </Text>
+                  <Pressable
+                    accessibilityLabel={t("Remove skill {name}", { name: selectedSkill.name })}
+                    hitSlop={8}
+                    onPress={() => setSelectedSkill(null)}
+                  >
+                    <NativeSymbol
+                      ios="xmark"
+                      android="close"
+                      size={12}
+                      color={tokens.mutedForeground}
+                    />
+                  </Pressable>
+                </View>
+              ) : null}
+              {selectedMentions.map((mention) => (
+                <View
+                  key={mentionChipKey(mention)}
+                  testID="mention-chip"
+                  style={{
+                    flexDirection: "row",
+                    alignItems: "center",
+                    gap: 6,
+                    backgroundColor: tokens.muted,
+                    borderRadius: 999,
+                    paddingHorizontal: 10,
+                    paddingVertical: 5,
+                    maxWidth: "100%",
+                  }}
+                >
+                  <MentionChipIcon mention={mention} />
+                  <Text
+                    numberOfLines={1}
+                    style={{ color: tokens.foreground, fontSize: 13, flexShrink: 1 }}
+                  >
+                    {mention.name}
+                  </Text>
+                  <Pressable
+                    accessibilityLabel={t("Remove mention {name}", { name: mention.name })}
+                    hitSlop={8}
+                    onPress={() =>
+                      setSelectedMentions((current) =>
+                        current.filter(
+                          (selected) => mentionChipKey(selected) !== mentionChipKey(mention),
+                        ),
+                      )
+                    }
+                  >
+                    <NativeSymbol
+                      ios="xmark"
+                      android="close"
+                      size={12}
+                      color={tokens.mutedForeground}
+                    />
+                  </Pressable>
+                </View>
+              ))}
+              <View style={{ flexGrow: 1, flexShrink: 1, minWidth: 96 }}>
+                {!draft && !selectedSkill && !selectedMentions.length ? (
+                  <Text
+                    numberOfLines={1}
+                    importantForAccessibility="no"
+                    accessibilityElementsHidden
+                    accessible={false}
+                    pointerEvents="none"
+                    style={{
+                      position: "absolute",
+                      top: 11,
+                      start: 0,
+                      end: 0,
+                      fontSize: 17,
+                      lineHeight: 22,
+                      color: tokens.mutedForeground,
+                    }}
+                  >
+                    {composerPrompt}
+                  </Text>
+                ) : null}
+                <TextInput
+                  value={draft}
+                  onChangeText={updateDraft}
+                  accessibilityLabel={composerPrompt}
+                  onKeyPress={(event) => {
+                    if (
+                      event.nativeEvent.key === "Backspace" &&
+                      draft.length === 0 &&
+                      (selectedSkill !== null || selectedMentions.length > 0)
+                    ) {
+                      removeLastChip();
+                    }
+                  }}
+                  keyboardAppearance={colorScheme}
+                  multiline
+                  textAlignVertical="top"
+                  blurOnSubmit={false}
+                  style={{
+                    color: tokens.foreground,
+                    fontSize: 17,
+                    lineHeight: 22,
+                    paddingTop: 11,
+                    paddingBottom: 11,
+                    maxHeight: 132,
+                    writingDirection: "auto",
+                  }}
+                />
+              </View>
+            </View>
+            {!canSend && botId && !onCall ? (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("Call")}
+                hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                onPress={() => void startVoiceCall()}
+                style={composerPillStyle}
+              >
+                <NativeSymbol
+                  ios="waveform"
+                  android="pulse-outline"
+                  size={15}
+                  color={tokens.primaryForeground}
+                />
+              </Pressable>
+            ) : (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={t("Send")}
+                disabled={sending || !canSend}
+                hitSlop={{ top: 8, bottom: 8, left: 4, right: 4 }}
+                onPress={() => void send()}
+                style={[composerPillStyle, { opacity: sending || !canSend ? 0.5 : 1 }]}
+              >
+                <NativeSymbol
+                  ios="arrow.up"
+                  android="arrow-up"
+                  size={15}
+                  color={tokens.primaryForeground}
+                />
+              </Pressable>
+            )}
+          </View>
           {working ? (
             <Pressable
               accessibilityLabel={t("Stop")}
@@ -2593,26 +2926,14 @@ function QuoteSheet({
             paddingBottom: 12,
           }}
         >
-          <Pressable accessibilityRole="button" onPress={onCancel} hitSlop={8}>
-            <Text style={{ color: tokens.mutedForeground, fontSize: 17 }}>{t("Cancel")}</Text>
-          </Pressable>
-          <Pressable
-            accessibilityRole="button"
-            accessibilityState={{ disabled: !excerpt }}
+          <NativeActionButton label={t("Cancel")} onPress={onCancel} prominence="plain" />
+          <NativeActionButton
             disabled={!excerpt}
+            fill={false}
+            label={t("Quote")}
             onPress={() => onQuote(excerpt)}
-            hitSlop={8}
-          >
-            <Text
-              style={{
-                color: excerpt ? tokens.primary : tokens.mutedForeground,
-                fontSize: 17,
-                fontWeight: "600",
-              }}
-            >
-              {t("Quote")}
-            </Text>
-          </Pressable>
+            prominence={excerpt ? "primary" : "plain"}
+          />
         </View>
         <ScrollView style={{ flex: 1, paddingHorizontal: 20 }}>
           {segments.map((text, index) => (
@@ -2756,8 +3077,9 @@ const MessageBubble = memo(function MessageBubble({
   canAnswer,
   onAnswer,
   onOpenBot,
+  onOpenComputer,
+  onChoiceDismissed,
   onPreviewMarkdown,
-  onPlay,
   onPreviewImage,
   actionProps,
 }: {
@@ -2771,8 +3093,9 @@ const MessageBubble = memo(function MessageBubble({
   canAnswer: boolean;
   onAnswer: (message: MobileMessage, answer: string, username?: string) => Promise<void>;
   onOpenBot: (botId: string, name: string) => void;
+  onOpenComputer: (botId: string, name: string) => void;
+  onChoiceDismissed?: (question: string) => void;
   onPreviewMarkdown: (target: MarkdownArtifactPreviewTarget) => void;
-  onPlay?: () => void;
   onPreviewImage: (target: ImageArtifactPreviewTarget) => void;
   actionProps: MessageActionProps;
 }) {
@@ -2782,6 +3105,7 @@ const MessageBubble = memo(function MessageBubble({
   const [peerExpanded, setPeerExpanded] = useState(false);
   const artifactTarget: MobileArtifactTarget = groupId ? { groupId } : { botId };
   const cardBotId = message.botId ?? botId;
+  const computerBotId = message.botId ?? (groupId ? undefined : botId);
   const appConnectBlocks = message.blocks.filter(
     (block): block is Extract<MessageBlock, { kind: "app_connect" }> =>
       block.kind === "app_connect",
@@ -3384,7 +3708,12 @@ const MessageBubble = memo(function MessageBubble({
   const speakerColor =
     message.role === "bot" ? speakerColorFor(bots, members, message.botId) : undefined;
   const firstContent = segments.findIndex((segment) => segment.kind === "content");
-  const lastContent = segments.map((segment) => segment.kind).lastIndexOf("content");
+  const choiceBlocks = message.blocks.filter(
+    (block): block is Extract<MessageBlock, { kind: "choice" }> => block.kind === "choice",
+  );
+  const computerBlocks = message.blocks.filter(
+    (block): block is Extract<MessageBlock, { kind: "computer" }> => block.kind === "computer",
+  );
   return (
     <View style={{ gap: 8, width: "100%" }}>
       {segments.map((segment, index) => (
@@ -3394,8 +3723,28 @@ const MessageBubble = memo(function MessageBubble({
           speaker={index === firstContent ? speaker : undefined}
           speakerColor={index === firstContent ? speakerColor : undefined}
           replyPreview={index === firstContent ? replyPreview : undefined}
-          onPlay={message.role === "bot" && index === lastContent ? onPlay : undefined}
           actionProps={actionProps}
+        />
+      ))}
+      {choiceBlocks.map((block, index) => (
+        <ChoiceCard
+          key={`choice-${index}`}
+          botId={cardBotId}
+          block={block}
+          onDismissed={onChoiceDismissed ? () => onChoiceDismissed(block.question) : undefined}
+          accessibilityActions={actionProps.accessibilityActions}
+          onAccessibilityAction={actionProps.onAccessibilityAction}
+        />
+      ))}
+      {computerBlocks.map((block, index) => (
+        <ComputerCard
+          key={`computer-${index}`}
+          block={block}
+          onOpen={
+            computerBotId ? () => onOpenComputer(computerBotId, speaker ?? t("Bot")) : undefined
+          }
+          accessibilityActions={actionProps.accessibilityActions}
+          onAccessibilityAction={actionProps.onAccessibilityAction}
         />
       ))}
       {appConnectBlocks.map((block, index) => (
@@ -3411,38 +3760,21 @@ const MessageBubble = memo(function MessageBubble({
   );
 });
 
-const messagePlayStyles = StyleSheet.create({
-  button: {
-    alignSelf: "flex-end",
-    marginTop: 6,
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-});
-
 function MessageTextCard({
   message,
   speaker,
   speakerColor,
   replyPreview,
-  onPlay,
   actionProps,
 }: {
   message: MobileMessage;
   speaker?: string;
   speakerColor?: string;
   replyPreview?: MobileMessage;
-  onPlay?: () => void;
   actionProps: MessageActionProps;
 }) {
   const colorScheme = useResolvedAppearance();
   const tokens = mobileTokens();
-  const { t } = useI18n();
-  const playback = useSyncExternalStore(subscribeVoicePlayback, getVoicePlaybackState);
-  const isSpeakingThis = playback.messageId === message.id && playback.status !== "idle";
   const contentText = blockText(message);
   if (!contentText) return null;
   return (
@@ -3503,24 +3835,6 @@ function MessageTextCard({
           </ChatMarkdown>
         )
       }
-      {onPlay ? (
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel={t("Play")}
-          accessibilityState={{ disabled: isSpeakingThis }}
-          disabled={isSpeakingThis}
-          onPress={onPlay}
-          hitSlop={6}
-          style={[messagePlayStyles.button, { opacity: isSpeakingThis ? 0.4 : 1 }]}
-        >
-          <NativeSymbol
-            ios={isSpeakingThis ? "waveform" : "play.fill"}
-            android={isSpeakingThis ? "pulse-outline" : "play"}
-            size={13}
-            color={tokens.mutedForeground}
-          />
-        </Pressable>
-      ) : null}
     </Pressable>
   );
 }

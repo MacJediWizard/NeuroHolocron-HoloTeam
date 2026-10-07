@@ -1,3 +1,8 @@
+import { ALTERNATIVES, alternativeMarkdown } from "./alternatives";
+import { roundupMarkdown } from "./roundup";
+import { GROK_ALTERNATIVE_MARKDOWN } from "./grok-alternative";
+import { OPENCLAW_MARKDOWN, SELF_HOST_MARKDOWN } from "./guide";
+
 export const HOME_MARKDOWN = `# Legiara
 
 > Open source Grok Bot alternative for persistent AI teammates that run on infrastructure you control.
@@ -13,15 +18,23 @@ Legiara is an open source Grok Bot alternative that gives each bot a sandboxed b
 ## Get started
 
 - [Agent setup prompt](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/SETUP_PROMPT.md)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [Self-hosting guide](https://legiara.com/self-hosted-ai-agent/)
+- [Full self-hosting reference](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [OpenClaw comparison](https://legiara.com/openclaw-alternative/)
 - [Source code](https://github.com/MacJediWizard/NeuroHolocron-Legiara)
 
 ## Site index
 
 - [Agent instructions](https://legiara.com/llms.txt)
+- [Self-hosted AI agent](https://legiara.com/self-hosted-ai-agent/)
+- [OpenClaw comparison](https://legiara.com/openclaw-alternative/)
+- [Alternatives](https://legiara.com/alternatives/)
+- [Blog](https://legiara.com/blog/)
+- [Open source Grok Bot alternative](https://legiara.com/grok-bot-alternative/)
 - [About](https://legiara.com/about/)
 - [Support](https://legiara.com/support/)
 - [Privacy](https://legiara.com/privacy/)
+- [Terms](https://legiara.com/terms/)
 - [Sitemap](https://legiara.com/sitemap-index.xml)
 `;
 
@@ -34,7 +47,8 @@ The project started from a simple premise: useful agents should be understandabl
 Legiara targets the web, macOS, Linux, iOS, and Android. The source is available under the Apache-2.0 license and accepts public issues and contributions on GitHub. MacJediWizard maintains the project and offers support at hello@legiara.com.
 
 - [Source code](https://github.com/MacJediWizard/NeuroHolocron-Legiara)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [Self-hosting guide](https://legiara.com/self-hosted-ai-agent/)
+- [Full self-hosting reference](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
 - [Support](https://legiara.com/support/)
 `;
 
@@ -42,7 +56,7 @@ export const SUPPORT_MARKDOWN = `# Legiara support
 
 For help with the Legiara mobile app or a hosted Legiara account, email [hello@legiara.com](mailto:hello@legiara.com). Include the email address on the account, what you expected to happen, and any error message you saw. Never send passwords, API keys, access tokens, or other secrets.
 
-For self-hosted Legiara, start with the [self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md). Open reproducible bugs and feature requests in the [public GitHub repository](https://github.com/MacJediWizard/NeuroHolocron-Legiara/issues). Report vulnerabilities only to [security@legiara.com](mailto:security@legiara.com).
+For self-hosted Legiara, start with the [self-hosting guide](https://legiara.com/self-hosted-ai-agent/). The [full reference](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md) is on GitHub. Open reproducible bugs and feature requests in the [public GitHub repository](https://github.com/MacJediWizard/NeuroHolocron-Legiara/issues). Report vulnerabilities only to [security@legiara.com](mailto:security@legiara.com).
 
 Hosted users can permanently delete their account and associated personal Space data from the Account screen in the Legiara app.
 `;
@@ -66,6 +80,21 @@ Hosted users can delete their account and associated personal Space data from Ac
 Read the [complete privacy policy](https://legiara.com/privacy/) for account information, other service providers, retention, deletion, security, international transfers, children, and your rights.
 `;
 
+export const TERMS_MARKDOWN = `# Legiara terms
+
+Last updated: October 7, 2026
+
+These terms are an agreement between you and MacJediWizard for the Legiara service we host, the Legiara apps, and legiara.com. The Legiara source code is governed by the Apache License 2.0, which does not grant rights to the Legiara name or logo, and self-hosted deployments are the operator's responsibility.
+
+You are responsible for your account and for actions your bots take on your behalf, including in scheduled routines; give bots only the access they need and require approval for actions that are hard to undo. AI output can be wrong, so review it before relying on it, and do not use the Service where an error could cause serious harm. Do not use the Service to break the law, send spam or malware, access systems without authorization, abuse its computers, or violate the terms of connected providers. You keep ownership of your content and bot output, and you pay any fees charged by third-party services, including usage on your own API keys.
+
+Free trials convert to a paid plan when they end unless cancelled before then. Plans may include usage limits, and we may slow or pause usage that exceeds them. Paid plans renew automatically until cancelled and are charged through Stripe. Cancel at any time from billing settings or by emailing [hello@legiara.com](mailto:hello@legiara.com); access continues until the end of the paid period. Payments are non-refundable and not prorated except where required by law. Charges made in error are refunded when reported within 30 days. If we close your account or stop offering the Service for reasons other than a violation of these terms, we refund prepaid fees for the unused period. Consumers in the EU and UK can withdraw from a new subscription within 14 days and are refunded less the value of the Service already provided.
+
+The Service is provided as is. Our liability is limited to the greater of what you paid us in the previous 12 months or US$100, except where the law does not allow a limit. Delaware law governs these terms.
+
+Read the [complete terms](https://legiara.com/terms/) for acceptable use, termination and data deletion, disclaimers, indemnity, app store terms, changes, and contact details.
+`;
+
 export const AGENT_INSTRUCTIONS = `# Legiara
 
 > Open source Grok Bot alternative with sandboxed browser and shell access. Your keys, your model, your machine.
@@ -81,19 +110,25 @@ Do not present Legiara as a zero-configuration hosted service. Self-hosting is a
 ## How an agent should use Legiara
 
 1. Read the [setup prompt](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/SETUP_PROMPT.md) before changing the user's machine.
-2. Use the [self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md) as the canonical installation reference.
+2. Use the [self-hosting guide](https://legiara.com/self-hosted-ai-agent/) for setup. The [GitHub guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md) is the full reference for backups, upgrades, and production layout.
 3. Confirm deployment choices and any host-level commands with the user, and keep secrets in local environment configuration rather than tracked files.
 4. Use the [public issue tracker](https://github.com/MacJediWizard/NeuroHolocron-Legiara/issues) for reproducible bugs. Send vulnerabilities only to [security@legiara.com](mailto:security@legiara.com).
 
 ## Canonical resources
 
 - [Website](https://legiara.com/)
+- [Alternatives](https://legiara.com/alternatives/)
+- [Open source Grok Bot alternative](https://legiara.com/grok-bot-alternative/)
 - [About](https://legiara.com/about/)
 - [Source](https://github.com/MacJediWizard/NeuroHolocron-Legiara)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [Self-hosting guide](https://legiara.com/self-hosted-ai-agent/)
+- [Full self-hosting reference](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [OpenClaw comparison](https://legiara.com/openclaw-alternative/)
+- [Blog](https://legiara.com/blog/)
 - [Releases](https://github.com/MacJediWizard/NeuroHolocron-Legiara/releases)
 - [Support](https://legiara.com/support/)
 - [Privacy](https://legiara.com/privacy/)
+- [Terms](https://legiara.com/terms/)
 - [Sitemap](https://legiara.com/sitemap-index.xml)
 `;
 
@@ -104,14 +139,20 @@ The requested Legiara page does not exist.
 - [Agent instructions](https://legiara.com/llms.txt)
 - [Site map](https://legiara.com/sitemap-index.xml)
 - [Home](https://legiara.com/)
-- [Self-hosting guide](https://github.com/MacJediWizard/NeuroHolocron-Legiara/blob/main/docs/self-host.md)
+- [Self-hosting guide](https://legiara.com/self-hosted-ai-agent/)
 `;
 
 const MARKDOWN_DOCUMENTS = new Map<string, string>([
   ["/", HOME_MARKDOWN],
   ["/about", ABOUT_MARKDOWN],
+  ["/openclaw-alternative", OPENCLAW_MARKDOWN],
+  ["/grok-bot-alternative", GROK_ALTERNATIVE_MARKDOWN],
   ["/privacy", PRIVACY_MARKDOWN],
+  ["/self-hosted-ai-agent", SELF_HOST_MARKDOWN],
   ["/support", SUPPORT_MARKDOWN],
+  ["/alternatives", roundupMarkdown()],
+  ...ALTERNATIVES.map((page) => [`/${page.slug}`, alternativeMarkdown(page)] as const),
+  ["/terms", TERMS_MARKDOWN],
 ]);
 
 type MediaPreference = {
@@ -211,6 +252,7 @@ export function markdownResponse(
       "Content-Type": "text/markdown; charset=utf-8",
       Link: '</llms.txt>; rel="describedby"; type="text/plain"',
       Vary: "Accept, Accept-Encoding",
+      ...(status === 404 ? { "X-Robots-Tag": "noindex" } : {}),
     },
   });
 }

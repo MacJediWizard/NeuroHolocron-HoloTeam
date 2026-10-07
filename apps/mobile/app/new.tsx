@@ -7,8 +7,10 @@ import {
 } from "@rakazo/contracts";
 import { Stack, useRouter } from "expo-router";
 import { useState } from "react";
-import { Pressable, ScrollView, Text, TextInput } from "react-native";
+import { ScrollView, Text, TextInput } from "react-native";
 import { ComputerModePicker } from "../components/computer-mode-picker";
+import { NativeActionButton } from "../components/native-action-button";
+import { cancelHeaderOptions } from "../components/sheet-header";
 import { type MobileBot, rpc } from "../lib/api";
 import { allowFocusPrompt, scheduleFocusPrompt } from "../lib/focus-prompt";
 import { useI18n } from "../lib/i18n";
@@ -68,21 +70,7 @@ export default function NewBot() {
 
   return (
     <>
-      <Stack.Screen
-        options={{
-          headerLeft: () => (
-            <Pressable
-              onPress={close}
-              hitSlop={8}
-              style={{ paddingEnd: 20, paddingVertical: 8 }}
-              accessibilityRole="button"
-              accessibilityLabel={t("Cancel")}
-            >
-              <Text style={{ color: tokens.foreground, fontSize: 17 }}>{t("Cancel")}</Text>
-            </Pressable>
-          ),
-        }}
-      />
+      <Stack.Screen options={cancelHeaderOptions(t("Cancel"), close)} />
       <ScrollView
         style={{ flex: 1, backgroundColor: tokens.background }}
         contentContainerStyle={{ padding: 24 }}
@@ -143,22 +131,12 @@ export default function NewBot() {
         />
         <ComputerModePicker value={computerMode} onChange={setComputerMode} />
         {error ? <Text style={{ color: tokens.destructive, marginTop: 16 }}>{error}</Text> : null}
-        <Pressable
-          onPress={() => void create()}
+        <NativeActionButton
           disabled={!name.trim() || pending}
-          style={{
-            marginTop: 24,
-            backgroundColor: tokens.primary,
-            borderRadius: 11,
-            padding: 16,
-            alignItems: "center",
-            opacity: !name.trim() || pending ? 0.4 : 1,
-          }}
-        >
-          <Text style={{ color: tokens.primaryForeground, fontSize: 16 }}>
-            {pending ? t("Creating…") : t("Create")}
-          </Text>
-        </Pressable>
+          label={pending ? t("Creating…") : t("Create")}
+          onPress={() => void create()}
+          style={{ marginTop: 24 }}
+        />
       </ScrollView>
     </>
   );

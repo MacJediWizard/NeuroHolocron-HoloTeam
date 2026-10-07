@@ -15,9 +15,11 @@ import {
 } from "@rakazo/core";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useMemo, useState } from "react";
-import { Pressable, ScrollView, Switch, Text, TextInput, View } from "react-native";
+import { Pressable, ScrollView, Text, TextInput, View } from "react-native";
 import { BotAvatar } from "../components/bot-avatar";
 import { ComputerModePicker } from "../components/computer-mode-picker";
+import { NativeActionButton } from "../components/native-action-button";
+import { NativeSwitch } from "../components/native-switch";
 import {
   type MobileBot,
   type MobileMe,
@@ -370,10 +372,10 @@ export default function BotSettingsScreen() {
           <Text style={{ color: tokens.mutedForeground, fontSize: 14, flex: 1 }}>
             {t("Read replies aloud")}
           </Text>
-          <Switch
+          <NativeSwitch
             accessibilityLabel={t("Read replies aloud")}
-            value={autoSpeak}
             onValueChange={setAutoSpeak}
+            value={autoSpeak}
           />
         </View>
         <Pressable
@@ -458,22 +460,12 @@ export default function BotSettingsScreen() {
           </View>
         ) : null}
         {error ? <Text style={{ color: tokens.destructive, marginTop: 16 }}>{error}</Text> : null}
-        <Pressable
-          onPress={() => void save()}
+        <NativeActionButton
           disabled={!name.trim() || pending || !bot}
-          style={{
-            marginTop: 24,
-            backgroundColor: tokens.primary,
-            borderRadius: 11,
-            padding: 16,
-            alignItems: "center",
-            opacity: !name.trim() || pending || !bot ? 0.4 : 1,
-          }}
-        >
-          <Text style={{ color: tokens.primaryForeground, fontSize: 16 }}>
-            {pending ? t("Saving…") : t("Save")}
-          </Text>
-        </Pressable>
+          label={pending ? t("Saving…") : t("Save")}
+          onPress={() => void save()}
+          style={{ marginTop: 24 }}
+        />
       </ScrollView>
     </>
   );

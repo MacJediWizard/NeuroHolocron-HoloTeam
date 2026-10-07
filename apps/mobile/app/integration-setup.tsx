@@ -11,6 +11,7 @@ import {
   TextInput,
   View,
 } from "react-native";
+import { NativeActionButton } from "../components/native-action-button";
 import { rpc } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
 import { useI18n } from "../lib/i18n";
@@ -72,14 +73,13 @@ export default function IntegrationSetup() {
   }
   function button(label: string, onPress: () => void, disabled = false) {
     return (
-      <Pressable
-        accessibilityRole="button"
+      <NativeActionButton
         disabled={disabled}
+        fill
+        label={label}
         onPress={onPress}
-        style={[styles.button, disabled && { opacity: 0.5 }]}
-      >
-        <Text style={styles.buttonText}>{label}</Text>
-      </Pressable>
+        prominence="secondary"
+      />
     );
   }
   if (!state) return error ? <Text accessibilityRole="alert">{error}</Text> : <ActivityIndicator />;
@@ -210,8 +210,6 @@ function createStyles() {
       padding: 12,
       color: tokens.foreground,
     },
-    button: { padding: 14, borderRadius: 10, backgroundColor: tokens.muted },
-    buttonText: { color: tokens.foreground, textAlign: "center", fontSize: 16 },
     error: { color: tokens.destructive },
   });
 }

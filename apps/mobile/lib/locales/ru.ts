@@ -48,7 +48,6 @@ export const RU_MESSAGES: Record<string, string> = {
   "Space default": "Пространство по умолчанию",
   "Stop all workers and confirm that provider operations have stopped before releasing this computer.":
     "Остановите всех воркеров и убедитесь, что операции провайдера остановлены, прежде чем освобождать этот компьютер.",
-  "Stored securely. Never shown here.": "Хранится безопасно. Здесь не отображается.",
   Thinking: "Рассуждение",
   "Update failed": "Обновление не выполнено",
   "Updating Team Computer": "Обновление компьютера команды",
@@ -172,8 +171,6 @@ export const RU_MESSAGES: Record<string, string> = {
   "Connect Executor": "Подключить Executor",
   "Connect MCP server {name}": "Подключение MCP-сервера {name}",
   "Connect Treg": "Подключить Treg",
-  "Connect this provider to use it as your personal model.":
-    "Подключите этого провайдера, чтобы использовать его в качестве своей личной модели.",
   Connected: "Подключено",
   "Connected · {label}": "Подключено · {label}",
   "Connected. Its tools are available from your next message.":
@@ -438,6 +435,7 @@ export const RU_MESSAGES: Record<string, string> = {
   "Resetting…": "Сброс…",
   Restore: "Восстановить",
   "Stream replies": "Потоковые ответы",
+  "Load web images automatically": "Автоматически загружать изображения из интернета",
   "Restore the last saved workspace. Unsaved work on the computer is lost.":
     "Восстановить последнее сохранённое рабочее пространство. Несохранённые данные на компьютере будут потеряны.",
   "Resume notifications": "Возобновить уведомления",

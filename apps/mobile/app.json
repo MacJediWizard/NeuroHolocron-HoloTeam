@@ -3,7 +3,7 @@
     "name": "Legiara",
     "slug": "legiara",
     "scheme": "rakazo",
-    "version": "1.0.3",
+    "version": "1.0.5",
     "orientation": "default",
     "userInterfaceStyle": "automatic",
     "icon": "./assets/icon.png",

