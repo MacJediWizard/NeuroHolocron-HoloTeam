@@ -2,6 +2,13 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, scryptSync }
 import type { AdapterContext, SecretRecord, SecretStore } from "@rakazo/adapter-kit";
 
 const VERSION_PREFIX = "v2:";
+
+export interface SecretPutOptions {
+  /** Short-lived material (one-time codes, OAuth handshakes) that external stores may keep local. */
+  ephemeral?: boolean;
+  /** Human-readable note an external store shows next to the value. */
+  label?: string;
+}
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 const TAG_BYTES = 16;
@@ -30,6 +37,7 @@ export class EncryptedSecretStore implements SecretStore {
     plaintext: string,
     _context: AdapterContext,
     recordId = randomBytes(12).toString("hex"),
+    _options: SecretPutOptions = {},
   ): Promise<SecretRecord> {
     return { id: recordId, ciphertext: this.seal(plaintext, recordId) };
   }

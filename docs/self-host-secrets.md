@@ -94,6 +94,43 @@ check that `SANDBOX_SUPERVISOR_TOKEN` is set and non-empty for the Docker
 computer path. A missing token is a setup failure, not an "optional tighten
 later" item.
 
+## Keeping in-app secrets in Infisical (optional)
+
+By default, credentials that users save in the app (model keys, MCP and
+webhook secrets, bot credentials, integration settings) are encrypted with
+`ENCRYPTION_KEY` and stored in Postgres. Set `SECRET_STORE=infisical` to keep
+them in an Infisical folder instead, so operators can view, rotate and audit
+them there. Rows then hold an `infisical:<key>` reference; the key name is
+`SECRET_<record id>` and the secret comment says what it is.
+
+| Key | Value |
+| --- | --- |
+| `SECRET_STORE` | `infisical` (anything else keeps the database store) |
+| `INFISICAL_SITE_URL` | Your Infisical URL |
+| `INFISICAL_CLIENT_ID` / `INFISICAL_CLIENT_SECRET` | Universal-auth machine identity |
+| `INFISICAL_PROJECT_ID` / `INFISICAL_ENVIRONMENT` | Project and environment slug |
+| `INFISICAL_SECRET_PATH` | A folder used only by the app, e.g. `/app` |
+| `INFISICAL_REFRESH_SECONDS` | Optional mirror refresh interval (default 30, minimum 5) |
+
+Give the identity create, edit, delete and read-value access to that folder
+only. The api and worker mirror the folder in memory, reload it every
+refresh interval and whenever any process writes, and fail to start if
+Infisical is unreachable at boot. One-time codes and MCP OAuth sessions stay
+encrypted in Postgres because they are short-lived. `ENCRYPTION_KEY` is still
+required: rows written before the switch keep decrypting with it.
+
+Move existing rows after deploying with the setting on:
+
+```bash
+pnpm --filter @rakazo/api secrets:infisical --dry-run   # lists row ids, no values
+pnpm --filter @rakazo/api secrets:infisical             # copies, then swaps each row to a reference
+pnpm --filter @rakazo/api secrets:infisical --prune     # also deletes folder keys no row references
+```
+
+The command is idempotent and prints row ids and labels only. Keep a
+database backup from before the first run; a row whose value is deleted
+from Infisical cannot be recovered from Postgres.
+
 ## Recovery without reprinting secrets
 
 - Lost UI password: use SMTP recovery if configured; otherwise operator

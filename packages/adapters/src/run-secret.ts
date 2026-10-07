@@ -122,13 +122,19 @@ export function createRunSecretWriter(secretStore: EncryptedSecretStore): RunSec
         });
         return;
       }
-      const stored = await secretStore.put(plaintext, {
-        operationId: runId,
-        traceId: runId,
-        spaceId,
-        userId,
-        signal: new AbortController().signal,
-      });
+      const stored = await secretStore.put(
+        plaintext,
+        {
+          operationId: runId,
+          traceId: runId,
+          spaceId,
+          userId,
+          signal: new AbortController().signal,
+        },
+        undefined,
+        // One-time codes are deleted after use, so they never leave the database.
+        { ephemeral: true },
+      );
       await tx.secret.create({
         data: {
           id: stored.id,
