@@ -7,15 +7,16 @@ import {
 } from "@rakazo/contracts";
 import type { PrismaClient } from "@rakazo/db";
 import { ComposioConnector } from "./composio-connector.js";
+import { isSecretReference } from "./infisical-secret-store.js";
 import { PipedreamConnector } from "./pipedream-connector.js";
 import type { EncryptedSecretStore } from "./secrets.js";
 
 /** Resolve persisted credentials on every operation so API and workers observe changes.
- * Cache adapters by ciphertext to preserve sessions without retaining old credentials. */
+ * Cache adapters by stored version to preserve sessions without retaining old credentials. */
 export class IntegrationProviderSettings {
   private readonly cache = new Map<
     string,
-    { ciphertext: string; adapter: ManagedConnectorProvider }
+    { version: string; adapter: ManagedConnectorProvider }
   >();
 
   constructor(
@@ -53,14 +54,18 @@ export class IntegrationProviderSettings {
       return this.fallbacks[id];
     }
     const cached = this.cache.get(id);
-    if (cached?.ciphertext === row.ciphertext) return cached.adapter;
-    const config = IntegrationProviderConfigSchema.parse(
-      JSON.parse(this.secrets.load(row.ciphertext, `integration-provider:${id}`)),
-    );
+    // A reference stays the same when the value is edited in the external store,
+    // so the resolved value is the version there. References resolve from memory.
+    const reference = isSecretReference(row.ciphertext);
+    if (!reference && cached?.version === row.ciphertext) return cached.adapter;
+    const plaintext = this.secrets.load(row.ciphertext, `integration-provider:${id}`);
+    const version = reference ? plaintext : row.ciphertext;
+    if (cached?.version === version) return cached.adapter;
+    const config = IntegrationProviderConfigSchema.parse(JSON.parse(plaintext));
     if (config.provider !== id)
       throw new Error("Integration provider configuration does not match");
     const adapter = this.create(config);
-    this.cache.set(id, { ciphertext: row.ciphertext, adapter });
+    this.cache.set(id, { version, adapter });
     return adapter;
   }
 
@@ -83,7 +88,11 @@ export class IntegrationProviderSettings {
       create: { id: config.provider, ciphertext: stored.ciphertext },
       update: { ciphertext: stored.ciphertext },
     });
-    this.cache.set(config.provider, { ciphertext: stored.ciphertext, adapter });
+    const plaintext = JSON.stringify(config);
+    this.cache.set(config.provider, {
+      version: isSecretReference(stored.ciphertext) ? plaintext : stored.ciphertext,
+      adapter,
+    });
   }
 
   providers(): ManagedConnectorProvider[] {
