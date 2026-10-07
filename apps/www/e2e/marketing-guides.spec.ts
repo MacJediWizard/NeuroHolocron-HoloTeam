@@ -110,7 +110,7 @@ test.describe("marketing guides", () => {
     await expect(page.locator("footer [aria-current='page']")).toHaveCount(1);
     await expect(page.getByRole("link", { name: "full self-hosting guide" })).toHaveAttribute(
       "href",
-      /github\.com\/elie222\/rakazo\/blob\/main\/docs\/self-host\.md$/,
+      /github\.com\/MacJediWizard\/NeuroHolocron-Legiara\/blob\/main\/docs\/self-host\.md$/,
     );
     await expect(page.getByRole("link", { name: "OpenClaw comparison" })).toHaveAttribute(
       "href",

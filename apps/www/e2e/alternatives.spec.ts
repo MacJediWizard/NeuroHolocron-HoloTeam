@@ -28,7 +28,7 @@ test.describe("alternatives", () => {
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(ALTERNATIVES_HUB.h1);
     await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
       "href",
-      /^https:\/\/rakazo\.com\/alternatives\/?$/,
+      /^https:\/\/legiara\.com\/alternatives\/?$/,
     );
     await expect(page.locator('link[rel="alternate"][hreflang]')).toHaveCount(0);
     await expect(page.locator('meta[property="og:title"]')).toHaveAttribute(
@@ -37,7 +37,7 @@ test.describe("alternatives", () => {
     );
     await expect(page.locator('meta[property="og:url"]')).toHaveAttribute(
       "content",
-      /^https:\/\/rakazo\.com\/alternatives\/?$/,
+      /^https:\/\/legiara\.com\/alternatives\/?$/,
     );
 
     for (const card of HUB_CARDS) {
@@ -92,7 +92,7 @@ test.describe("alternatives", () => {
       await expect(page.getByRole("heading", { level: 1 })).toHaveText(alternative.h1);
       await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
         "href",
-        new RegExp(`^https://rakazo\\.com/${alternative.slug}/?$`),
+        new RegExp(`^https://legiara\\.com/${alternative.slug}/?$`),
       );
       await expect(page.locator('meta[property="og:title"]')).toHaveAttribute(
         "content",
@@ -104,7 +104,7 @@ test.describe("alternatives", () => {
       );
       await expect(page.locator('meta[property="og:url"]')).toHaveAttribute(
         "content",
-        new RegExp(`^https://rakazo\\.com/${alternative.slug}/?$`),
+        new RegExp(`^https://legiara\\.com/${alternative.slug}/?$`),
       );
       await expect(page.locator('meta[property="og:image"]')).toHaveAttribute(
         "content",

@@ -30,11 +30,11 @@ test.describe("Grok Bot alternative", () => {
     );
     await expect(page.locator('meta[property="og:url"]')).toHaveAttribute(
       "content",
-      /^https:\/\/rakazo\.com\/grok-bot-alternative\/?$/,
+      /^https:\/\/legiara\.com\/grok-bot-alternative\/?$/,
     );
     await expect(page.locator('link[rel="canonical"]')).toHaveAttribute(
       "href",
-      /^https:\/\/rakazo\.com\/grok-bot-alternative\/?$/,
+      /^https:\/\/legiara\.com\/grok-bot-alternative\/?$/,
     );
     await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
     await expect(page.getByRole("heading", { level: 1 })).toHaveText(

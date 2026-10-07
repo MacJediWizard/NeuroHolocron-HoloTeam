@@ -63,6 +63,9 @@ const REWRITES: [RegExp, string][] = [
   [/\bdev\.rakazo\.desktop\b/g, DESKTOP_APP_ID],
   [/\bsupport@rakazo\.com\b/g, `hello@${BRAND_DOMAIN}`],
   [/\brakazo\.com\b/g, BRAND_DOMAIN],
+  // Test patterns spell the same URLs with escaped dots and slashes.
+  [/\brakazo(\\+)\.com\b/g, BRAND_DOMAIN.replaceAll(".", "$1.")],
+  [/\belie222(\\+)\/rakazo\b/g, `${OWNER}$1/${REPO}`],
   [/\bghcr\.io\/elie222\/rakazo\b/g, `ghcr.io/${SOURCE_REPO.toLowerCase()}`],
   // A clone of this repository lands in a folder named after it, not after upstream.
   [/^cd rakazo$/gm, `cd ${REPO}`],
