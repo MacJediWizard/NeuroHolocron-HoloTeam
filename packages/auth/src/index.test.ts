@@ -1,9 +1,19 @@
 import { PRODUCT_NAME } from "@rakazo/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { syncGroupSpaces } = vi.hoisted(() => ({
+  syncGroupSpaces: vi.fn(async () => ({ missingSpaceIds: [] as string[] })),
+}));
+vi.mock("@rakazo/db", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@rakazo/db")>()),
+  syncGroupSpaces,
+}));
+
 import {
   authRateLimitOptions,
   buildTrustedOrigins,
   createAuth,
+  idTokenGroups,
   isBlockedAuthPath,
   OIDC_PROVIDER_ID,
   oidcRegistered,
@@ -308,5 +318,64 @@ describe("operator OIDC provider", () => {
     const verified = contextFor(true);
     await onAccountCreated?.(account, verified.ctx);
     expect(verified.internalAdapter.deleteUserSessions).not.toHaveBeenCalled();
+  });
+
+  describe("group Spaces", () => {
+    const idToken = (claims: object) =>
+      `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+    const oidc = {
+      issuer: "https://id.example.test/",
+      clientId: "c",
+      clientSecret: "s",
+      name: "SSO",
+      groupSpaces: [{ group: "orca", spaceId: "space-1" }],
+      onGroupSpaceMissing: vi.fn(),
+    };
+    const signIn = async (token: string | null) => {
+      const groupPrisma = {
+        deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
+        spaceMember: { findFirst: vi.fn().mockResolvedValue({ id: "membership" }) },
+      };
+      const internalAdapter = {
+        findUserById: vi.fn(async () => ({
+          id: "user",
+          email: "member@example.com",
+          emailVerified: true,
+        })),
+        findAccounts: vi.fn(async () => [{ providerId: OIDC_PROVIDER_ID, idToken: token }]),
+      };
+      const beforeSession = createAuth(groupPrisma as never, { ...baseEnv, oidc }).options
+        .databaseHooks?.session?.create?.before;
+      await beforeSession?.({ userId: "user" } as never, { context: { internalAdapter } } as never);
+    };
+
+    afterEach(() => syncGroupSpaces.mockClear());
+
+    it("syncs Space membership from the ID token groups at sign-in", async () => {
+      syncGroupSpaces.mockResolvedValueOnce({ missingSpaceIds: ["space-1"] });
+      await signIn(idToken({ sub: "user", groups: ["orca", "staff"] }));
+
+      expect(syncGroupSpaces).toHaveBeenCalledWith(
+        expect.anything(),
+        "user",
+        ["orca", "staff"],
+        oidc.groupSpaces,
+      );
+      expect(oidc.onGroupSpaceMissing).toHaveBeenCalledWith(["space-1"]);
+    });
+
+    it("changes nothing when the token has no groups claim", async () => {
+      await signIn(idToken({ sub: "user" }));
+      await signIn(null);
+
+      expect(syncGroupSpaces).not.toHaveBeenCalled();
+    });
+
+    it("reads groups from the configured claim", () => {
+      expect(idTokenGroups(idToken({ roles: ["orca", 7] }), "roles")).toEqual(["orca"]);
+      expect(idTokenGroups(idToken({ roles: "orca" }), "roles")).toBeUndefined();
+      expect(idTokenGroups("not-a-jwt", "groups")).toBeUndefined();
+      expect(idTokenGroups("a.%%%.c", "groups")).toBeUndefined();
+    });
   });
 });

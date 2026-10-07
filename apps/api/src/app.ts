@@ -382,7 +382,11 @@ export async function createApp(
     webOrigin: env.webOrigin,
     signupsEnabled: env.signupsEnabled,
     signupAllowlist: env.signupAllowlist,
-    oidc: env.oidc,
+    oidc: env.oidc && {
+      ...env.oidc,
+      onGroupSpaceMissing: (spaceIds) =>
+        getLogger().error("OIDC_GROUP_SPACES names a Space that does not exist", { spaceIds }),
+    },
     passwordAuth: env.passwordAuth,
     email,
     onEmailError: (error) => getLogger().error("transactional email delivery failed", error),

@@ -10,6 +10,7 @@ import {
   resolveScreenProxySecret,
   resolveSupervisorToken,
 } from "@rakazo/core";
+import { parseGroupSpaces } from "@rakazo/db";
 
 export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapters";
 
@@ -204,11 +205,23 @@ function resolveOidc(source: NodeJS.ProcessEnv): OidcProvider | undefined {
   const issuer = optional(source.OIDC_ISSUER);
   const clientId = optional(source.OIDC_CLIENT_ID);
   const clientSecret = optional(source.OIDC_CLIENT_SECRET);
-  if (!issuer && !clientId && !clientSecret) return undefined;
+  if (!issuer && !clientId && !clientSecret) {
+    if (optional(source.OIDC_GROUP_SPACES)) {
+      throw new Error("OIDC_GROUP_SPACES needs OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET");
+    }
+    return undefined;
+  }
   if (!issuer || !clientId || !clientSecret) {
     throw new Error("OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set together");
   }
-  return { issuer, clientId, clientSecret, name: optional(source.OIDC_NAME) ?? "SSO" };
+  return {
+    issuer,
+    clientId,
+    clientSecret,
+    name: optional(source.OIDC_NAME) ?? "SSO",
+    groupSpaces: parseGroupSpaces(source.OIDC_GROUP_SPACES),
+    groupsClaim: optional(source.OIDC_GROUPS_CLAIM) ?? "groups",
+  };
 }
 
 function required(source: NodeJS.ProcessEnv, key: string): string {

@@ -8,7 +8,12 @@ import {
   parseAllowlist,
   signupPolicyFromEnv,
 } from "@rakazo/core";
-import { bootstrapUserSpace, type PrismaClient } from "@rakazo/db";
+import {
+  bootstrapUserSpace,
+  type GroupSpace,
+  type PrismaClient,
+  syncGroupSpaces,
+} from "@rakazo/db";
 import { betterAuth } from "better-auth";
 import { prismaAdapter } from "better-auth/adapters/prisma";
 import { APIError, createAuthMiddleware } from "better-auth/api";
@@ -25,6 +30,12 @@ export interface OidcProvider {
   clientSecret: string;
   /** Button label, e.g. the identity provider's name. */
   name: string;
+  /** Provider groups whose members share a Space; synced at every sign-in. */
+  groupSpaces?: GroupSpace[];
+  /** ID token claim that lists the user's groups. Default `groups`. */
+  groupsClaim?: string;
+  /** Reports group mappings that point at a Space that does not exist. */
+  onGroupSpaceMissing?: (spaceIds: string[]) => void;
 }
 
 export interface AuthEnv {
@@ -444,6 +455,22 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
               }
               await ctx.context.internalAdapter.updateUser(user.id, { emailVerified: true });
             }
+            if (env.oidc?.groupSpaces?.length && ctx) {
+              const account = (await ctx.context.internalAdapter.findAccounts(user.id)).find(
+                (candidate) => candidate.providerId === OIDC_PROVIDER_ID,
+              );
+              const groups = idTokenGroups(account?.idToken, env.oidc.groupsClaim ?? "groups");
+              // No groups claim says nothing about membership, so nothing changes.
+              if (groups) {
+                const { missingSpaceIds } = await syncGroupSpaces(
+                  prisma,
+                  user.id,
+                  groups,
+                  env.oidc.groupSpaces,
+                );
+                if (missingSpaceIds.length > 0) env.oidc.onGroupSpaceMissing?.(missingSpaceIds);
+              }
+            }
             // Unverified signup must not provision resources or claim the
             // deployment owner. Bootstrap only at the first admitted session.
             const membership = await prisma.spaceMember.findFirst({ where: { userId: user.id } });
@@ -513,6 +540,24 @@ export function createAuth(prisma: PrismaClient, env: AuthEnv) {
 export async function oidcRegistered(auth: ReturnType<typeof createAuth>): Promise<boolean> {
   const context = await auth.$context;
   return context.socialProviders.some((provider) => provider.id === OIDC_PROVIDER_ID);
+}
+
+/**
+ * Groups from an ID token Better Auth already verified and stored at this sign-in.
+ * Undefined when the token or the claim is missing.
+ */
+export function idTokenGroups(idToken: string | null | undefined, claim: string) {
+  const payload = idToken?.split(".")[1];
+  if (!payload) return undefined;
+  let claims: unknown;
+  try {
+    claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+  } catch {
+    return undefined;
+  }
+  const value = (claims as Record<string, unknown> | null)?.[claim];
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((group): group is string => typeof group === "string");
 }
 
 function oidcPlugin(provider: OidcProvider) {
