@@ -1011,49 +1011,67 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
 }
 
 async function ensureComputerImage() {
-  if (!imageReady) {
-    imageReady = (async () => {
-      try {
-        await docker.getImage(COMPUTER_IMAGE).inspect();
-        return;
-      } catch {
-        // build below
-      }
-      const dockerfile = path.join(computerContext, "Dockerfile");
-      if (!existsSync(dockerfile)) {
-        throw new Error(
-          `Missing ${COMPUTER_IMAGE}. Build it with: docker build -t ${COMPUTER_IMAGE} infra/sandboxes/computer`,
-        );
-      }
-      const stream = await docker.buildImage(
-        {
-          context: computerContext,
-          src: [
-            "Dockerfile",
-            "start.sh",
-            "user-env.sh",
-            "control.py",
-            "xcapture.c",
-            "rakazo-browser",
-            "rakazo-page-browser",
-            "rakazo-browser.desktop",
-            "embed.html",
-            "clipboard-bridge.js",
-            "mobile-keyboard.js",
-            "fluxbox.init",
-            "fluxbox.apps",
-            "fluxbox.menu",
-          ],
-        },
-        { t: COMPUTER_IMAGE },
-      );
-      await new Promise<void>((resolve, reject) => {
-        docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
-      });
-      await docker.getImage(COMPUTER_IMAGE).inspect();
-    })();
-  }
+  // Concurrent requests share one check; nothing is cached after it settles, so an image
+  // removed later (for example by `docker system prune`) is restored on the next request
+  // and a failed pull or build is retried instead of failing every request until restart.
+  imageReady ??= prepareComputerImage().finally(() => {
+    imageReady = undefined;
+  });
   await imageReady;
+}
+
+async function prepareComputerImage() {
+  try {
+    await docker.getImage(COMPUTER_IMAGE).inspect();
+    return;
+  } catch {
+    // pull or build below
+  }
+  let pullError: unknown;
+  try {
+    const stream = await docker.pull(COMPUTER_IMAGE);
+    await new Promise<void>((resolve, reject) => {
+      docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
+    });
+    await docker.getImage(COMPUTER_IMAGE).inspect();
+    return;
+  } catch (error) {
+    // Local tags such as rakazo/computer:local are not published; build them below.
+    pullError = error;
+  }
+  const dockerfile = path.join(computerContext, "Dockerfile");
+  if (!existsSync(dockerfile)) {
+    const reason = pullError instanceof Error ? ` (pull failed: ${pullError.message})` : "";
+    throw new Error(
+      `Missing ${COMPUTER_IMAGE}${reason}. Build it with: docker build -t ${COMPUTER_IMAGE} infra/sandboxes/computer`,
+    );
+  }
+  const stream = await docker.buildImage(
+    {
+      context: computerContext,
+      src: [
+        "Dockerfile",
+        "start.sh",
+        "user-env.sh",
+        "control.py",
+        "xcapture.c",
+        "rakazo-browser",
+        "rakazo-page-browser",
+        "rakazo-browser.desktop",
+        "embed.html",
+        "clipboard-bridge.js",
+        "mobile-keyboard.js",
+        "fluxbox.init",
+        "fluxbox.apps",
+        "fluxbox.menu",
+      ],
+    },
+    { t: COMPUTER_IMAGE },
+  );
+  await new Promise<void>((resolve, reject) => {
+    docker.modem.followProgress(stream, (err) => (err ? reject(err) : resolve()));
+  });
+  await docker.getImage(COMPUTER_IMAGE).inspect();
 }
 
 async function findBotContainer(botId: string, spaceId: string) {
