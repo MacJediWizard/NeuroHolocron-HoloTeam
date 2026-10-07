@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { PrismaClient } from "./client.js";
 import {
+  handOverAccount,
   handOverSharedRows,
   parseGroupSpaces,
   syncGroupSpaces,
@@ -206,6 +207,7 @@ describe("handOverSharedRows", () => {
       models.map((model) => [model, { updateMany: vi.fn(async () => ({ count: 1 })) }]),
     ) as Record<(typeof models)[number], { updateMany: ReturnType<typeof vi.fn> }>;
     const prisma = {
+      ...tx,
       spaceMember: {
         findMany: vi.fn(async (input: { where: { userId?: string; spaceId?: string } }) =>
           memberships.filter(
@@ -224,7 +226,6 @@ describe("handOverSharedRows", () => {
             ) ?? null,
         ),
       },
-      $transaction: vi.fn(async (run: (client: unknown) => Promise<unknown>) => run(tx)),
     };
     return { prisma: prisma as unknown as PrismaClient, tx };
   }
@@ -279,7 +280,6 @@ describe("transferOwnedSpaces", () => {
         findFirst: vi.fn(async () => successor),
         update: vi.fn(async () => ({})),
       },
-      $transaction: vi.fn(async (run: (tx: unknown) => Promise<unknown>) => run(prisma)),
     };
     return prisma;
   };
@@ -305,5 +305,40 @@ describe("transferOwnedSpaces", () => {
     await transferOwnedSpaces(prisma as unknown as PrismaClient, "owner");
 
     expect(prisma.spaceMember.update).not.toHaveBeenCalled();
+  });
+});
+
+describe("handOverAccount", () => {
+  it("transfers owned Spaces, then hands over shared rows, in one transaction", async () => {
+    const calls: string[] = [];
+    const tx = {
+      spaceMember: {
+        findMany: vi.fn(async () => {
+          calls.push("findMany");
+          return [];
+        }),
+      },
+    };
+    const prisma = {
+      $transaction: vi.fn(async (run: (client: unknown) => Promise<unknown>) => run(tx)),
+    };
+
+    await handOverAccount(prisma as unknown as PrismaClient, "owner");
+
+    expect(prisma.$transaction).toHaveBeenCalledOnce();
+    expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 60_000 });
+    // transferOwnedSpaces and handOverSharedRows each read the memberships through the transaction.
+    expect(calls).toEqual(["findMany", "findMany"]);
+  });
+
+  it("passes a step failure to the caller, so the deletion aborts", async () => {
+    const failure = new Error("boom");
+    const prisma = {
+      $transaction: vi.fn(async (run: (client: unknown) => Promise<unknown>) =>
+        run({ spaceMember: { findMany: vi.fn(async () => Promise.reject(failure)) } }),
+      ),
+    };
+
+    await expect(handOverAccount(prisma as unknown as PrismaClient, "owner")).rejects.toBe(failure);
   });
 });

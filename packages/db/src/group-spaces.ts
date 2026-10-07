@@ -147,82 +147,100 @@ async function leaveSpace(
   });
 }
 
+/** A client inside an interactive transaction. */
+type TransactionClient = Omit<
+  PrismaClient,
+  "$connect" | "$disconnect" | "$on" | "$transaction" | "$extends"
+>;
+
 /**
- * Before an account is deleted, makes the longest-standing other member the owner
- * of each Space the user owns, so those Spaces keep an owner. A Space with no other
- * member is left alone and goes with the account.
+ * Before an account is deleted, hands its Spaces over in one transaction: owned
+ * Spaces pass to another member, then shared rows in every Space the user no
+ * longer owns go to that Space's owner. Either all of it lands or none of it.
+ * Both steps do nothing when repeated, so a deletion that fails later can retry.
  */
-export async function transferOwnedSpaces(
-  prisma: Pick<PrismaClient, "$transaction" | "spaceMember">,
+export async function handOverAccount(
+  prisma: Pick<PrismaClient, "$transaction">,
   userId: string,
 ): Promise<void> {
-  const memberships = await prisma.spaceMember.findMany({
+  await prisma.$transaction(
+    async (tx) => {
+      await transferOwnedSpaces(tx, userId);
+      await handOverSharedRows(tx, userId);
+    },
+    { timeout: 60_000 },
+  );
+}
+
+/**
+ * Makes the longest-standing other member the owner of each Space the user owns,
+ * so those Spaces keep an owner. A Space with no other member is left alone and
+ * goes with the account.
+ */
+export async function transferOwnedSpaces(
+  tx: Pick<TransactionClient, "spaceMember">,
+  userId: string,
+): Promise<void> {
+  const memberships = await tx.spaceMember.findMany({
     where: { userId },
     select: { id: true, spaceId: true, role: true },
   });
   for (const membership of memberships) {
     if (!hasOwnerRole(membership.role)) continue;
-    await prisma.$transaction(async (tx) => {
-      const successor = await tx.spaceMember.findFirst({
-        where: { spaceId: membership.spaceId, userId: { not: userId } },
-        orderBy: [{ createdAt: "asc" }, { id: "asc" }],
-        select: { id: true },
-      });
-      if (!successor) return;
-      await tx.spaceMember.update({ where: { id: successor.id }, data: { role: "owner" } });
-      await tx.spaceMember.update({ where: { id: membership.id }, data: { role: "member" } });
+    const successor = await tx.spaceMember.findFirst({
+      where: { spaceId: membership.spaceId, userId: { not: userId } },
+      orderBy: [{ createdAt: "asc" }, { id: "asc" }],
+      select: { id: true },
     });
+    if (!successor) continue;
+    await tx.spaceMember.update({ where: { id: successor.id }, data: { role: "owner" } });
+    await tx.spaceMember.update({ where: { id: membership.id }, data: { role: "member" } });
   }
 }
 
 /**
- * Before an account is deleted, gives the Space owner every shared row the user
- * created in Spaces they do not own, so deleting the account leaves those Spaces
- * intact. Personal rows (credentials, preferences, user-scope memory) stay with
- * the user and are deleted with the account.
+ * Gives the Space owner every shared row the user created in Spaces they do not
+ * own, so deleting the account leaves those Spaces intact. Personal rows
+ * (credentials, preferences, user-scope memory) stay with the user and are
+ * deleted with the account.
  */
-export async function handOverSharedRows(
-  prisma: Pick<PrismaClient, "$transaction" | "spaceMember">,
-  userId: string,
-): Promise<void> {
-  const memberships = await prisma.spaceMember.findMany({
+export async function handOverSharedRows(tx: TransactionClient, userId: string): Promise<void> {
+  const memberships = await tx.spaceMember.findMany({
     where: { userId },
     select: { spaceId: true },
   });
   for (const { spaceId } of memberships) {
-    if (await isSpaceOwner(prisma, { spaceId, userId })) continue;
-    const owner = await spaceOwnerUserId(prisma, spaceId);
+    if (await isSpaceOwner(tx, { spaceId, userId })) continue;
+    const owner = await spaceOwnerUserId(tx, spaceId);
     const where = { spaceId, userId };
     const data = { userId: owner };
-    await prisma.$transaction(async (tx) => {
-      await tx.bot.updateMany({ where, data });
-      await tx.botSection.updateMany({ where, data });
-      await tx.chatGroup.updateMany({ where, data });
-      await tx.thread.updateMany({ where, data });
-      await tx.routine.updateMany({ where, data });
-      await tx.artifact.updateMany({ where, data });
-      await tx.mcpServer.updateMany({ where, data });
-      await tx.botSecret.updateMany({ where, data });
-      // Model and voice credential secrets have no spaceId, so they stay personal.
-      await tx.secret.updateMany({ where, data });
-      await tx.connection.updateMany({ where, data });
-      await tx.agentSkill.updateMany({ where, data });
-      await tx.taughtSkill.updateMany({ where, data });
-      await tx.scratchpadItem.updateMany({ where, data });
-      await tx.capabilityInstall.updateMany({ where, data });
-      await tx.memoryDocument.updateMany({ where: { ...where, scope: { not: "user" } }, data });
-      await tx.actionApprovalRule.updateMany({
-        where: { spaceId, createdByUserId: userId },
-        data: { createdByUserId: owner },
-      });
-      await tx.agentSecret.updateMany({
-        where: { spaceId, createdByUserId: userId },
-        data: { createdByUserId: owner },
-      });
-      await tx.computer.updateMany({ where, data });
-      await tx.browserProfile.updateMany({ where, data });
-      await tx.cloudAgent.updateMany({ where, data });
+    await tx.bot.updateMany({ where, data });
+    await tx.botSection.updateMany({ where, data });
+    await tx.chatGroup.updateMany({ where, data });
+    await tx.thread.updateMany({ where, data });
+    await tx.routine.updateMany({ where, data });
+    await tx.artifact.updateMany({ where, data });
+    await tx.mcpServer.updateMany({ where, data });
+    await tx.botSecret.updateMany({ where, data });
+    // Model and voice credential secrets have no spaceId, so they stay personal.
+    await tx.secret.updateMany({ where, data });
+    await tx.connection.updateMany({ where, data });
+    await tx.agentSkill.updateMany({ where, data });
+    await tx.taughtSkill.updateMany({ where, data });
+    await tx.scratchpadItem.updateMany({ where, data });
+    await tx.capabilityInstall.updateMany({ where, data });
+    await tx.memoryDocument.updateMany({ where: { ...where, scope: { not: "user" } }, data });
+    await tx.actionApprovalRule.updateMany({
+      where: { spaceId, createdByUserId: userId },
+      data: { createdByUserId: owner },
     });
+    await tx.agentSecret.updateMany({
+      where: { spaceId, createdByUserId: userId },
+      data: { createdByUserId: owner },
+    });
+    await tx.computer.updateMany({ where, data });
+    await tx.browserProfile.updateMany({ where, data });
+    await tx.cloudAgent.updateMany({ where, data });
   }
 }
 
