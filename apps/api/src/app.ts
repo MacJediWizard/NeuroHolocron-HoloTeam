@@ -65,7 +65,7 @@ import {
   sandboxProviderOptionsFromEnv,
   toTeamChatInbound,
 } from "@rakazo/adapters";
-import { createAuth, isBlockedAuthPath, loopbackTwinOrigins } from "@rakazo/auth";
+import { createAuth, isBlockedAuthPath, loopbackTwinOrigins, OIDC_PROVIDER_ID } from "@rakazo/auth";
 import { signupAllowlistBootUpdate, signupPolicyFromEnv } from "@rakazo/core";
 import type { Pool, PrismaClient } from "@rakazo/db";
 import {
@@ -355,6 +355,8 @@ export async function createApp(
     webOrigin: env.webOrigin,
     signupsEnabled: env.signupsEnabled,
     signupAllowlist: env.signupAllowlist,
+    oidc: env.oidc,
+    passwordAuth: env.passwordAuth,
     email,
     onEmailError: (error) => getLogger().error("transactional email delivery failed", error),
     extraOrigins: MOBILE_AUTH_ORIGINS,
@@ -527,8 +529,10 @@ export async function createApp(
   );
   app.get("/api/auth/capabilities", (c) =>
     c.json({
-      passwordReset: Boolean(email),
-      resetUrl: email ? new URL("/reset-password", env.webOrigin).href : null,
+      passwordAuth: env.passwordAuth,
+      passwordReset: env.passwordAuth && Boolean(email),
+      resetUrl: env.passwordAuth && email ? new URL("/reset-password", env.webOrigin).href : null,
+      sso: env.oidc ? { providerId: OIDC_PROVIDER_ID, name: env.oidc.name } : null,
     }),
   );
   if (localEmailEmulator && env.nodeEnv === "development") {

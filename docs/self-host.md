@@ -182,6 +182,24 @@ account before exposing the service. Further accounts still need SMTP.
 For a public deployment, configure SMTP and an allowlist before the API's first start.
 Keep an installation without email on a trusted local network.
 
+### Single sign-on (OIDC)
+
+Set all three to add a "Continue with" button that signs in through an OpenID Connect provider:
+
+```env
+OIDC_ISSUER=https://id.example.com/application/o/app/
+OIDC_CLIENT_ID=...
+OIDC_CLIENT_SECRET=...
+OIDC_NAME=Company SSO   # button label, default "SSO"
+AUTH_PASSWORD_ENABLED=false   # optional: SSO only
+```
+
+Register `${BETTER_AUTH_URL}/api/auth/callback/oidc` as the redirect URI and allow the
+`openid email profile` scopes. The provider decides who may sign in: a user it admits gets a
+space even when not on the signup allowlist, and its email is trusted as verified, so restrict
+access in the provider. `AUTH_PASSWORD_ENABLED=false` hides the email form and refuses password
+sign-in; the API will not start with it unless OIDC is configured.
+
 ### Verification and password recovery email
 
 Password changes for signed-in users require no email configuration. Forgotten-password recovery

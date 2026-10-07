@@ -1,10 +1,11 @@
 import { PRODUCT_NAME } from "@rakazo/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   authRateLimitOptions,
   buildTrustedOrigins,
   createAuth,
   isBlockedAuthPath,
+  OIDC_PROVIDER_ID,
   passwordResetEmail,
   resolveSignupPolicy,
 } from "./index.js";
@@ -175,5 +176,74 @@ describe("resolveSignupPolicy", () => {
         signupAllowlist: "environment-only@example.com",
       }),
     ).resolves.toEqual({ enabled: false, allowlist: ["approved@example.com"] });
+  });
+});
+
+describe("operator OIDC provider", () => {
+  const baseEnv = {
+    secret: "test-secret-that-is-long-enough-for-better-auth",
+    baseURL: "http://127.0.0.1:3100",
+    webOrigin: "http://127.0.0.1:5173",
+    signupsEnabled: undefined,
+    signupAllowlist: undefined,
+  };
+  const prisma = {
+    deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
+    // Holds the OAuth state between the redirect and the callback.
+    verification: {
+      create: vi.fn(async ({ data }: { data: object }) => ({ id: "state", ...data })),
+    },
+  };
+  const post = (path: string, body: unknown) =>
+    new Request(`http://127.0.0.1:3100/api/auth${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "http://127.0.0.1:5173" },
+      body: JSON.stringify(body),
+    });
+
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("refuses email sign-in when password auth is off", async () => {
+    const auth = createAuth(prisma as never, { ...baseEnv, passwordAuth: false });
+    const res = await auth.handler(
+      post("/sign-in/email", { email: "you@example.com", password: "password123" }),
+    );
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(res.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("sends sign-in to the issuer with the core social callback", async () => {
+    const issuer = "https://id.example.test/application/o/app/";
+    const fetchMock = vi.fn(async () =>
+      Response.json({
+        issuer,
+        authorization_endpoint: "https://id.example.test/application/o/authorize/",
+        token_endpoint: "https://id.example.test/application/o/token/",
+        userinfo_endpoint: "https://id.example.test/application/o/userinfo/",
+        jwks_uri: `${issuer}jwks/`,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const auth = createAuth(prisma as never, {
+      ...baseEnv,
+      oidc: { issuer, clientId: "client", clientSecret: "secret", name: "SSO" },
+    });
+
+    const res = await auth.handler(
+      post("/sign-in/social", {
+        provider: OIDC_PROVIDER_ID,
+        callbackURL: "http://127.0.0.1:5173/app",
+      }),
+    );
+
+    expect(res.status).toBe(200);
+    const url = new URL(((await res.json()) as { url: string }).url);
+    expect(`${url.origin}${url.pathname}`).toBe("https://id.example.test/application/o/authorize/");
+    expect(url.searchParams.get("client_id")).toBe("client");
+    expect(url.searchParams.get("redirect_uri")).toBe(
+      "http://127.0.0.1:3100/api/auth/callback/oidc",
+    );
+    expect(url.searchParams.get("scope")?.split(" ")).toEqual(["openid", "email", "profile"]);
+    expect(url.searchParams.get("code_challenge")).toBeTruthy();
   });
 });
