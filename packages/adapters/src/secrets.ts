@@ -121,6 +121,14 @@ export class EncryptedSecretStore implements SecretStore {
     return openSealed(sealed, await keyFromAsync(this.encryptionKey, sealed.salt), recordId);
   }
 
+  /** Changes whenever the stored value may have; caches compare it to decide on reloading. */
+  revision(ciphertext: string, _recordId: string): string {
+    return ciphertext;
+  }
+
+  /** Stops background work; the database store has none. */
+  async close(): Promise<void> {}
+
   redact(value: string): string {
     return value
       .replace(/sk-[a-zA-Z0-9-_]{8,}/g, "[redacted]")
