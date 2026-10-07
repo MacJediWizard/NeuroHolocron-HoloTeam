@@ -134,6 +134,34 @@ describe("messaging another bot", () => {
     expect(harness.enqueue).toHaveBeenCalledTimes(1);
   });
 
+  it("sends attached files to the recipient with the message", async () => {
+    const harness = deps();
+    const image = {
+      kind: "image" as const,
+      artifactId: "artifact-1",
+      mimeType: "image/png",
+      name: "hero.png",
+    };
+    const sent = await messageBot(harness.deps, run, sender, {
+      bot_id: "bot-target",
+      message: "set this as the featured image",
+      attachments: [image],
+    });
+
+    expect(sent).toMatchObject({ ok: true });
+    const created = harness.tx.message.create.mock.calls.map(
+      ([call]) => (call as { data: { threadId: string; blocks: unknown[] } }).data,
+    );
+    expect(created.find((data) => data.threadId === "thread-target")?.blocks).toEqual([
+      expect.objectContaining({ kind: "bot_message_received" }),
+      image,
+    ]);
+    expect(created.find((data) => data.threadId === "thread-sender")?.blocks).toEqual([
+      expect.objectContaining({ kind: "bot_message_sent" }),
+      image,
+    ]);
+  });
+
   it("tells the sender to continue independent work", async () => {
     const harness = deps();
     const sent = await messageBot(harness.deps, run, sender, {

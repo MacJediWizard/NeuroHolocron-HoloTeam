@@ -76,6 +76,8 @@ export async function messageBot(
     message: string;
     intent?: BotMessageIntent;
     deliveryKey?: string;
+    /** Files sent with the message; they land on the recipient's computer like a chat attachment. */
+    attachments?: readonly Extract<MessageBlock, { kind: "image" | "file" }>[];
   },
   options?: { allowTerminalSource?: boolean },
 ) {
@@ -134,6 +136,7 @@ export async function messageBot(
       note: `Already sent to ${target.name} in this turn; it was not sent again.`,
     }) as const;
 
+  const attachments = input.attachments ?? [];
   const wakePrompt = buildBotMessageWakePrompt({ from: sender, text: message, intent });
   const outboundBlock: MessageBlock = {
     kind: "bot_message_sent",
@@ -207,7 +210,7 @@ export async function messageBot(
         const outbound = await createThreadMessageInTransaction(tx, {
           threadId: run.threadId,
           role: "bot",
-          blocks: [outboundBlock],
+          blocks: [outboundBlock, ...attachments],
           botId: run.botId,
           runId: run.id,
           allowCancelledRun: options?.allowTerminalSource === true,
@@ -225,7 +228,7 @@ export async function messageBot(
         const inbound = await createThreadMessageInTransaction(tx, {
           threadId: targetThreadId,
           role: "user",
-          blocks: [inboundBlock],
+          blocks: [inboundBlock, ...attachments],
           replyToMessageId:
             sourceContext?.fromBotId === target.id && intent !== "fyi"
               ? sourceContext.returnToMessageId
@@ -263,7 +266,7 @@ export async function messageBot(
           botId: target.id,
           type: "thread.message.created",
           runId: nextRun.id,
-          payload: { messageId: inbound.id, role: "user", blocks: [inboundBlock] },
+          payload: { messageId: inbound.id, role: "user", blocks: [inboundBlock, ...attachments] },
         });
         const outboundEvent = await appendEventInTransaction(tx, {
           spaceId: run.spaceId,
@@ -272,7 +275,7 @@ export async function messageBot(
           type: "thread.message.created",
           runId: run.id,
           allowCancelledRun: options?.allowTerminalSource === true,
-          payload: { messageId: outbound.id, role: "bot", blocks: [outboundBlock] },
+          payload: { messageId: outbound.id, role: "bot", blocks: [outboundBlock, ...attachments] },
         });
         return {
           ok: true as const,

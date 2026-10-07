@@ -35,6 +35,7 @@ import {
 import type { ComputerCommand, MessageBlock, RunStatus } from "@rakazo/contracts";
 import {
   ATTACHMENT_MAX_BYTES,
+  ATTACHMENT_MAX_COUNT,
   BOT_DESCRIPTION_MAX_LENGTH,
   BOT_NAME_MAX_LENGTH,
   BOT_TITLE_MAX_LENGTH,
@@ -5861,6 +5862,45 @@ export function createRunExecutor(deps: ExecutorDeps) {
             );
           }
           if (name === "message_bot") {
+            const filePaths = Array.isArray(args.files) ? args.files.map(String) : [];
+            if (filePaths.length > ATTACHMENT_MAX_COUNT) {
+              return finish({ error: `send at most ${ATTACHMENT_MAX_COUNT} files per message` });
+            }
+            const attachments: Extract<MessageBlock, { kind: "image" | "file" }>[] = [];
+            for (const filePath of filePaths) {
+              if (!deps.artifacts) return finish({ error: "artifact storage unavailable" });
+              let bytes: Uint8Array;
+              try {
+                bytes = await deps.sandbox.readFile(
+                  computer,
+                  resolveBotWorkspacePath(computerMode, bot.id, filePath),
+                  context,
+                  { maxBytes: ATTACHMENT_MAX_BYTES },
+                );
+              } catch {
+                return finish({ error: `file not found or unreadable: ${filePath}` });
+              }
+              try {
+                const attached = await attachWorkspaceFileToThread(
+                  { prisma: deps.prisma, artifacts: deps.artifacts },
+                  {
+                    spaceId: run.spaceId,
+                    userId: run.userId,
+                    botId: bot.id,
+                    groupId: thread.groupId ?? undefined,
+                    runId: run.id,
+                    filePath,
+                    bytes,
+                    operationId: executionId,
+                  },
+                );
+                attachments.push(attached.block);
+              } catch (error) {
+                return finish({
+                  error: `${filePath}: ${error instanceof Error ? error.message : "could not attach file"}`,
+                });
+              }
+            }
             const sent = await messageBot(
               deps,
               { ...run, sourceMessageId: run.sourceMessageId },
@@ -5877,6 +5917,7 @@ export function createRunExecutor(deps: ExecutorDeps) {
                   | "fyi"
                   | undefined,
                 deliveryKey: effectKey,
+                attachments,
               },
             );
             if (!sent.ok) return finish({ error: sent.error });
