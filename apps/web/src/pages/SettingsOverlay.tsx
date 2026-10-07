@@ -1,7 +1,17 @@
 import { useLingui } from "@lingui/react/macro";
 import type { AvatarStyle, SpaceMemoryConfig } from "@rakazo/contracts";
 import { Button, Dialog, DialogClose, DialogContent, DialogTitle } from "@rakazo/ui-web";
-import { Brain, CloudDownload, Cpu, Gauge, Monitor, Settings, Volume2, XIcon } from "lucide-react";
+import {
+  Brain,
+  CloudDownload,
+  Cpu,
+  CreditCard,
+  Gauge,
+  Monitor,
+  Settings,
+  Volume2,
+  XIcon,
+} from "lucide-react";
 import type { ComponentType } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { computersAreUnavailable } from "../components/ComputersUnavailableHint";
@@ -11,6 +21,7 @@ import {
   UpdatesSettingsPanel,
   UsageSettingsPanel,
 } from "./AccountSettingsOverlay";
+import { BillingSettingsPanel } from "./BillingSettingsPanel";
 import { MemorySettingsOverlay } from "./MemorySettingsOverlay";
 import { ModelSettingsOverlay } from "./ModelSettingsOverlay";
 import { VoiceSettingsOverlay } from "./VoiceSettingsOverlay";
@@ -22,6 +33,7 @@ export type SettingsSection =
   | "voice"
   | "usage"
   | "computer"
+  | "billing"
   | "updates";
 
 type NavItem = {
@@ -38,6 +50,7 @@ export function SettingsOverlay({
   avatarStyle,
   onAvatarStyleChange,
   isDeploymentOwner = false,
+  billingEnabled = false,
   sandboxProvider,
   onSandboxProviderChange,
   messagingEnabled = false,
@@ -54,6 +67,7 @@ export function SettingsOverlay({
   avatarStyle: AvatarStyle;
   onAvatarStyleChange: (style: AvatarStyle) => Promise<void>;
   isDeploymentOwner?: boolean;
+  billingEnabled?: boolean;
   sandboxProvider?: string | null;
   onSandboxProviderChange?: (sandboxProvider: string) => void;
   messagingEnabled?: boolean;
@@ -97,6 +111,10 @@ export function SettingsOverlay({
   }, [showComputer, section]);
 
   useEffect(() => {
+    if (!billingEnabled && section === "billing") setSection("general");
+  }, [billingEnabled, section]);
+
+  useEffect(() => {
     if (section !== "computer") releaseComputerRecovery();
   }, [section, releaseComputerRecovery]);
   useEffect(() => () => window.clearTimeout(recoveryHoldTimer.current), []);
@@ -114,6 +132,7 @@ export function SettingsOverlay({
     { id: "voice", label: t`Voice`, icon: Volume2 },
     { id: "usage", label: t`Usage`, icon: Gauge },
     ...(showComputer ? [{ id: "computer" as const, label: t`Computer`, icon: Monitor }] : []),
+    ...(billingEnabled ? [{ id: "billing" as const, label: t`Billing`, icon: CreditCard }] : []),
     { id: "updates", label: t`Updates`, icon: CloudDownload },
   ];
 
@@ -248,6 +267,7 @@ export function SettingsOverlay({
                   onRecoveryDismissed={releaseComputerRecovery}
                 />
               ) : null}
+              {section === "billing" && billingEnabled ? <BillingSettingsPanel /> : null}
               {section === "updates" ? (
                 <UpdatesSettingsPanel isDeploymentOwner={isDeploymentOwner} />
               ) : null}

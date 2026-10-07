@@ -27,7 +27,7 @@ export type VoicePlaybackStatus = "idle" | "playing" | "paused";
 export type VoicePlaybackState = {
   status: VoicePlaybackStatus;
   botId?: string;
-  /** Set when this clip came from a specific message, so its own Play button can react. */
+  /** The thread message this clip was spoken from, when playback started from one. */
   messageId?: string;
   /** False when the active engine (Android on-device voice) can only stop, not pause. */
   canPause: boolean;
@@ -83,7 +83,7 @@ export function stopSpeaking(): void {
   stopVoicePlayback();
 }
 
-// --- Sequential playback across several messages: "Play" on a message plays
+// --- Sequential playback across several messages: speaking a message plays
 // it, then keeps going through the rest of the queue until Stop is pressed or
 // the last one finishes. Built on top of speakText, one call at a time, so a
 // single Stop (above) always reaches whatever is actually playing right now.
@@ -91,7 +91,7 @@ export function stopSpeaking(): void {
 export type SpeechQueueItem = SpeechOptions & { text: string };
 
 let speechQueue: SpeechQueueItem[] = [];
-/** Invalidates in-flight speak calls. Stop and a new Play/queue each bump it. */
+/** Invalidates in-flight speak calls. Stop and a new speak or queue each bump it. */
 let playbackEpoch = 0;
 
 function isCurrentSpeech(epoch: number): boolean {

@@ -132,6 +132,58 @@ describe("account preferences", () => {
   });
 });
 
+describe("billing", () => {
+  function billingDeps(isDeploymentOwner: boolean, billing?: RouterDeps["billing"]) {
+    const prisma = {
+      user: {
+        findUniqueOrThrow: vi.fn().mockResolvedValue({
+          email: "user@rakazo.test",
+          name: "Test User",
+          avatarStyle: "robot",
+        }),
+      },
+      spaceModelPreference: { findFirst: vi.fn().mockResolvedValue(null) },
+      deploymentSettings: { findUnique: vi.fn().mockResolvedValue(null) },
+    } as unknown as PrismaClient;
+    const deps = {
+      prisma,
+      billing,
+      env: {
+        defaultProvider: "fake",
+        defaultModel: "fake-model",
+        webOrigin: "http://127.0.0.1:5173",
+        screenProxySecret: "fake-test-secret",
+        sandboxProvider: "fake",
+      },
+      dataDir: "/tmp/rakazo-router-test",
+    } as unknown as RouterDeps;
+    const actor = {
+      spaceId: "workspace-1",
+      userId: "user-1",
+      email: "user@rakazo.test",
+      isDeploymentOwner,
+    } satisfies Actor;
+    return createRouterClient(createRouter(deps), { context: { actor } });
+  }
+
+  it("is not found when the deployment does not bill", async () => {
+    const client = billingDeps(false);
+    await expect(client.billing.status()).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(client.billing.checkout()).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(client.me()).resolves.toMatchObject({ billingEnabled: false });
+  });
+
+  it("enables billing on me for everyone but the deployment owner", async () => {
+    const billing = { status: vi.fn() } as unknown as RouterDeps["billing"];
+    await expect(billingDeps(false, billing).me()).resolves.toMatchObject({
+      billingEnabled: true,
+    });
+    await expect(billingDeps(true, billing).me()).resolves.toMatchObject({
+      billingEnabled: false,
+    });
+  });
+});
+
 describe("model setup gate", () => {
   function modelGateDeps(options: {
     agentRuntime: string;

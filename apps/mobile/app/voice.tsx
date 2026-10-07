@@ -10,6 +10,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { NativeActionButton } from "../components/native-action-button";
 import { rpc } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
 import { loadDeviceVoiceEnabled, saveDeviceVoiceEnabled } from "../lib/device-voice";
@@ -291,26 +292,18 @@ export default function VoiceSettings() {
               style={styles.input}
               textContentType="none"
             />
-            <Pressable
+            <NativeActionButton
               disabled={pending !== null || apiKey.trim().length < 8}
+              label={credential ? t("Replace key") : t("Connect")}
               onPress={() => void connect()}
-              style={[
-                styles.button,
-                (pending !== null || apiKey.trim().length < 8) && styles.disabled,
-              ]}
-            >
-              <Text style={styles.buttonLabel}>{credential ? t("Replace key") : t("Connect")}</Text>
-            </Pressable>
+            />
             {credential ? (
-              <Pressable
+              <NativeActionButton
                 disabled={pending !== null}
+                label={pending === "disconnect" ? t("Disconnecting…") : t("Disconnect")}
                 onPress={() => void disconnect()}
-                style={[styles.secondary, pending !== null && styles.disabled]}
-              >
-                <Text style={styles.secondaryLabel}>
-                  {pending === "disconnect" ? t("Disconnecting…") : t("Disconnect")}
-                </Text>
-              </Pressable>
+                prominence="destructive"
+              />
             ) : null}
             {credential && selected.id === "fish-audio" ? (
               <>
@@ -388,15 +381,7 @@ function createVoiceStyles() {
       paddingHorizontal: 14,
       paddingVertical: 12,
     },
-    button: {
-      marginTop: 8,
-      backgroundColor: tokens.primary,
-      borderRadius: 12,
-      paddingVertical: 12,
-      alignItems: "center",
-    },
     disabled: { opacity: 0.4 },
-    buttonLabel: { color: tokens.primaryForeground, fontWeight: "600" },
     voices: { marginTop: 12, borderRadius: 12, borderWidth: 1, borderColor: tokens.border },
     voiceRow: {
       flexDirection: "row",

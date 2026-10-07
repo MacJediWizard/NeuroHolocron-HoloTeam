@@ -1,8 +1,9 @@
 import { GROUP_MEMBER_MAX, GROUP_MEMBER_MIN } from "@rakazo/contracts";
 import { Stack, useLocalSearchParams, useRouter } from "expo-router";
 import { useEffect, useState } from "react";
-import { Alert, Pressable, ScrollView, Text, TextInput } from "react-native";
+import { Alert, ScrollView, Text, TextInput } from "react-native";
 import { BotMemberPicker } from "../components/bot-member-picker";
+import { NativeActionButton } from "../components/native-action-button";
 import { type MobileBot, type MobileGroup, rpc } from "../lib/api";
 import { useI18n } from "../lib/i18n";
 import { useMobileTokens } from "../lib/native";
@@ -107,46 +108,23 @@ export default function GroupSettingsScreen() {
           disabled={pending}
         />
         {error ? <Text style={{ color: tokens.destructive, marginTop: 12 }}>{error}</Text> : null}
-        <Pressable
-          onPress={() => void save()}
+        <NativeActionButton
           disabled={
             !name.trim() ||
             selected.length < GROUP_MEMBER_MIN ||
             selected.length > GROUP_MEMBER_MAX ||
             pending
           }
-          style={{
-            marginTop: 24,
-            backgroundColor: tokens.primary,
-            opacity:
-              !name.trim() ||
-              selected.length < GROUP_MEMBER_MIN ||
-              selected.length > GROUP_MEMBER_MAX ||
-              pending
-                ? 0.5
-                : 1,
-            borderRadius: 11,
-            padding: 14,
-            alignItems: "center",
-          }}
-        >
-          <Text style={{ color: tokens.primaryForeground, fontSize: 16, fontWeight: "600" }}>
-            {pending ? t("Saving…") : t("Save")}
-          </Text>
-        </Pressable>
-        <Pressable
+          label={pending ? t("Saving…") : t("Save")}
+          onPress={() => void save()}
+          style={{ marginTop: 24 }}
+        />
+        <NativeActionButton
+          label={t("Delete group")}
           onPress={remove}
-          style={{
-            marginTop: 16,
-            borderRadius: 11,
-            borderWidth: 1,
-            borderColor: tokens.border,
-            padding: 14,
-            alignItems: "center",
-          }}
-        >
-          <Text style={{ color: tokens.destructive, fontSize: 16 }}>{t("Delete group")}</Text>
-        </Pressable>
+          prominence="destructive"
+          style={{ marginTop: 16 }}
+        />
       </ScrollView>
     </>
   );

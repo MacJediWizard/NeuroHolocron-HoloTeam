@@ -4,7 +4,7 @@ import Footer from "../components/Footer.astro";
 import Header from "../components/Header.astro";
 import { fetchGithubStars, formatStarCount } from "../github";
 import BaseLayout from "../layouts/BaseLayout.astro";
-import { DOCS_URL, GITHUB_URL } from "../site";
+import { GITHUB_URL, SELF_HOST_GUIDE_PATH } from "../site";
 
 const stars = await fetchGithubStars();
 const starsLabel = stars === null ? "Star" : formatStarCount(stars);
@@ -34,7 +34,7 @@ const starsLabel = stars === null ? "Star" : formatStarCount(stars);
       <p>
         Legiara is maintained by MacJediWizard and released under the Apache-2.0 license. <Attribution />. The project accepts
         public issues and contributions on <a href={GITHUB_URL}>GitHub</a>. To run Legiara on your own
-        infrastructure, start with the <a href={DOCS_URL}>self-hosting guide</a>. For product or account help,
+        infrastructure, start with the <a href={SELF_HOST_GUIDE_PATH}>self-hosting guide</a>. For product or account help,
         email <a href="mailto:hello@legiara.com">hello@legiara.com</a>.
       </p>
     </main>

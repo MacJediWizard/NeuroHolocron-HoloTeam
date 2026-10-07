@@ -4,11 +4,32 @@
 
 ![Legiara — AI teammates you actually own](./docs/readme-hero.png)
 
-Legiara is an open-source platform for running persistent AI teammates. It is available on the web,
-as an Electron desktop app, and through an Expo mobile app. Bring your own model and computer
-provider, or run the complete stack locally.
+Legiara is an open source AI agent for persistent teammates, and a self-hosted AI assistant you
+can run on your own machine. It is available on the web, as an Electron desktop app, and through
+an Expo mobile app. Bring your own model and computer provider, or run the complete stack locally.
+
+It is an open source, self-hosted alternative to Grok Bot, Meta Muse, OpenAI Dots, Instinct,
+OpenClaw, Hermes Agent, and Hark Pro.
 
 Legiara is in beta. Learn more at [legiara.com](https://legiara.com).
+
+## How Legiara compares
+
+Once Legiara is running, it is just chat, like Grok Bot: you set up a bot and manage it from that
+chat. Muse, Dots, Instinct, and Hark Pro are hosted assistants. OpenClaw
+and Hermes Agent are also open source agents you can run yourself. Their docs describe installers,
+config files, and a gateway. Hermes Desktop can reach a first chat without the CLI; a messaging
+gateway is a separate process.
+
+- [Grok Bot](https://legiara.com/grok-bot-alternative/)
+- [Muse](https://legiara.com/muse-alternative/)
+- [Dots](https://legiara.com/dots-alternative/)
+- [Instinct](https://legiara.com/instinct-alternative/), the personal assistant you text or call
+- [OpenClaw](https://legiara.com/openclaw-alternative/)
+- [Hermes Agent](https://legiara.com/hermes-alternative/), Nous Research's open source agent
+- [Hark Pro](https://legiara.com/hark-alternative/), the personal agent at hark.com
+- [All comparisons](https://legiara.com/alternatives/)
+- [Self-hosting guide](https://legiara.com/self-hosted-ai-agent/)
 
 ## Features
 

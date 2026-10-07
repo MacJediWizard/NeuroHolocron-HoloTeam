@@ -95,9 +95,29 @@ msgstr "{0} will still respond to direct mentions."
 msgid "{0}'s screen"
 msgstr "{0}'s screen"
 
+#: src/lib/billing.ts
+msgid "{amount} / {period}"
+msgstr "{amount} / {period}"
+
 #: src/pages/Shell.tsx
 msgid "{botName}’s computer"
 msgstr "{botName}’s computer"
+
+#: src/lib/billing.ts
+msgid "{count} days"
+msgstr "{count} days"
+
+#: src/lib/billing.ts
+msgid "{count} months"
+msgstr "{count} months"
+
+#: src/lib/billing.ts
+msgid "{count} weeks"
+msgstr "{count} weeks"
+
+#: src/lib/billing.ts
+msgid "{count} years"
+msgstr "{count} years"
 
 #: src/lib/relative-time.ts
 #: src/pages/ActivityList.tsx
@@ -136,6 +156,10 @@ msgstr "{name} stopped"
 #: src/components/teach/TeachRecordingChrome.tsx
 msgid "{remaining} left · bot is watching, not acting"
 msgstr "{remaining} left · bot is watching, not acting"
+
+#: src/pages/BillingSettingsPanel.tsx
+msgid "{seats, plural, one {# seat} other {# seats}}"
+msgstr "{seats, plural, one {# seat} other {# seats}}"
 
 #: src/components/ArtifactFileCard.tsx
 msgid "{size} B"
@@ -229,6 +253,7 @@ msgstr "Actions for {0}"
 msgid "Actions for space"
 msgstr "Actions for space"
 
+#: src/pages/BillingSettingsPanel.tsx
 #: src/pages/RoutineEditor.tsx
 msgid "Active"
 msgstr "Active"
@@ -447,6 +472,10 @@ msgstr "Answered: {0}"
 msgid "Answered: {answer}"
 msgstr "Answered: {answer}"
 
+#: src/pages/Paywall.tsx
+msgid "Any model, with your own key"
+msgstr "Any model, with your own key"
+
 #: src/components/SoftwareUpdateSection.tsx
 msgid "API is back, but the update did not finish. Check the host logs."
 msgstr "API is back, but the update did not finish. Check the host logs."
@@ -627,6 +656,10 @@ msgstr "Basic auth ({username})"
 msgid "Bearer token"
 msgstr "Bearer token"
 
+#: src/pages/SettingsOverlay.tsx
+msgid "Billing"
+msgstr "Billing"
+
 #: src/pages/Shell.tsx
 msgid "Booting live desktop…"
 msgstr "Booting live desktop…"
@@ -670,6 +703,10 @@ msgstr "Bots"
 #: src/pages/Shell.tsx
 msgid "Bots are working"
 msgstr "Bots are working"
+
+#: src/pages/Paywall.tsx
+msgid "Bots with their own computer and browser"
+msgstr "Bots with their own computer and browser"
 
 #: src/pages/memory-providers/SerenitySettingsForm.tsx
 msgid "Brain label"
@@ -716,6 +753,10 @@ msgstr "Cancel new group"
 #: src/pages/Shell.tsx
 msgid "Cancel reply"
 msgstr "Cancel reply"
+
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Canceled"
+msgstr "Canceled"
 
 #: src/components/CloudAgentCard.tsx
 msgid "cancelled"
@@ -1292,6 +1333,10 @@ msgstr "Could not load approval rules"
 msgid "Could not load artifacts."
 msgstr "Could not load artifacts."
 
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Could not load billing"
+msgstr "Could not load billing"
+
 #: src/pages/IntegrationSetup.tsx
 msgid "Could not load bots. Reload to try again."
 msgstr "Could not load bots. Reload to try again."
@@ -1344,6 +1389,11 @@ msgstr "Could not load update status"
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Could not load voice settings"
 msgstr "Could not load voice settings"
+
+#: src/pages/BillingSettingsPanel.tsx
+#: src/pages/Paywall.tsx
+msgid "Could not open billing"
+msgstr "Could not open billing"
 
 #: src/components/computer/FilesApp.tsx
 msgid "Could not open file"
@@ -1633,6 +1683,7 @@ msgstr "Customize bot avatar"
 msgid "Dark"
 msgstr "Dark"
 
+#: src/lib/billing.ts
 #: src/pages/RoutineSchedule.tsx
 msgid "day"
 msgstr "day"
@@ -1875,6 +1926,10 @@ msgstr "Edit Profile"
 #: src/pages/Auth.tsx
 msgid "Email"
 msgstr "Email"
+
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Ends {day}"
+msgstr "Ends {day}"
 
 #: src/pages/ExternalConversationSettings.tsx
 msgid "Engage when... Ignore..."
@@ -2194,6 +2249,10 @@ msgstr "Image upload area"
 msgid "Import OpenAPI JSON"
 msgstr "Import OpenAPI JSON"
 
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Inactive"
+msgstr "Inactive"
+
 #: src/pages/shell/message-cards.tsx
 msgid "Inbox & email"
 msgstr "Inbox & email"
@@ -2344,6 +2403,10 @@ msgstr "Load more"
 msgid "Load older runs"
 msgstr "Load older runs"
 
+#: src/pages/AccountSettingsOverlay.tsx
+msgid "Load web images automatically"
+msgstr "Load web images automatically"
+
 #: src/pages/ActivityList.tsx
 msgid "Loading activity…"
 msgstr "Loading activity…"
@@ -2398,6 +2461,7 @@ msgstr "Local access lets bots run commands without asking. Avoid it on shared o
 msgid "Local Server Settings"
 msgstr "Local Server Settings"
 
+#: src/pages/Paywall.tsx
 #: src/pages/Shell.tsx
 msgid "Log out"
 msgstr "Log out"
@@ -2419,6 +2483,14 @@ msgstr "Lowercase letters, numbers, hyphens and underscores, starting with a let
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Make sure nothing is still running on this computer."
 msgstr "Make sure nothing is still running on this computer."
+
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Manage"
+msgstr "Manage"
+
+#: src/pages/Paywall.tsx
+msgid "Manage billing"
+msgstr "Manage billing"
 
 #: src/pages/PluginsOverlay.tsx
 msgid "Manage MCP servers"
@@ -2621,6 +2693,10 @@ msgstr "Models for the server owner’s default space."
 #: src/pages/Onboarding.tsx
 msgid "Models from server"
 msgstr "Models from server"
+
+#: src/lib/billing.ts
+msgid "month"
+msgstr "month"
 
 #: src/pages/RoutineSchedule.tsx
 msgid "Monthly"
@@ -3009,6 +3085,10 @@ msgstr "Password updated"
 msgid "Passwords do not match"
 msgstr "Passwords do not match"
 
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Past due"
+msgstr "Past due"
+
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Paste a replacement key"
@@ -3258,6 +3338,10 @@ msgstr "Removing…"
 msgid "Rename section"
 msgstr "Rename section"
 
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Renews {day}"
+msgstr "Renews {day}"
+
 #: src/pages/ScratchpadSection.tsx
 msgid "Reopen"
 msgstr "Reopen"
@@ -3386,6 +3470,10 @@ msgstr "Routine"
 #: src/pages/RoutineEditor.tsx
 msgid "Routines"
 msgstr "Routines"
+
+#: src/pages/Paywall.tsx
+msgid "Routines that run while you're away"
+msgstr "Routines that run while you're away"
 
 #: src/pages/RoutineEditor.tsx
 msgid "Run at"
@@ -3659,6 +3747,7 @@ msgstr "Show transcript"
 #: src/pages/Auth.tsx
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
+#: src/pages/Welcome.tsx
 msgid "Sign in"
 msgstr "Sign in"
 
@@ -3738,6 +3827,10 @@ msgstr "Speak this reply"
 msgid "Speech model"
 msgstr "Speech model"
 
+#: src/pages/Paywall.tsx
+msgid "Start {trialDays}-day free trial"
+msgstr "Start {trialDays}-day free trial"
+
 #: src/components/teach/TeachComputerOverlay.tsx
 msgid "Start recording"
 msgstr "Start recording"
@@ -3794,6 +3887,14 @@ msgstr "subagent"
 #: src/pages/Onboarding.tsx
 msgid "Submit"
 msgstr "Submit"
+
+#: src/pages/Paywall.tsx
+msgid "Subscribe"
+msgstr "Subscribe"
+
+#: src/pages/Paywall.tsx
+msgid "Subscription required"
+msgstr "Subscription required"
 
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
@@ -3984,6 +4085,14 @@ msgstr "Treat like a person"
 msgid "Treg token"
 msgstr "Treg token"
 
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Trial"
+msgstr "Trial"
+
+#: src/pages/BillingSettingsPanel.tsx
+msgid "Trial ends {day}"
+msgstr "Trial ends {day}"
+
 #: src/pages/Onboarding.tsx
 msgid "Try again"
 msgstr "Try again"
@@ -4165,6 +4274,10 @@ msgstr "Waiting in line…"
 msgid "Waiting…"
 msgstr "Waiting…"
 
+#: src/pages/Paywall.tsx
+msgid "Web, desktop and mobile apps"
+msgstr "Web, desktop and mobile apps"
+
 #: src/pages/RoutineEditor.tsx
 msgid "Webhook"
 msgstr "Webhook"
@@ -4172,6 +4285,10 @@ msgstr "Webhook"
 #: src/pages/shell/bot-credentials.tsx
 msgid "Website login"
 msgstr "Website login"
+
+#: src/lib/billing.ts
+msgid "week"
+msgstr "week"
 
 #: src/pages/RoutineEditor.tsx
 #: src/pages/RoutineSchedule.tsx
@@ -4226,6 +4343,10 @@ msgstr "Working…"
 #: src/components/computer/TerminalApp.tsx
 msgid "Wrote {path}"
 msgstr "Wrote {path}"
+
+#: src/lib/billing.ts
+msgid "year"
+msgstr "year"
 
 #: src/pages/Shell.tsx
 msgid "Yesterday"

@@ -158,7 +158,6 @@ export const ZH_MESSAGES: Record<string, string> = {
   "Connect Executor": "连接 Executor",
   "Connect MCP server {name}": "连接 MCP 服务器 {name}",
   "Connect Treg": "连接 Treg",
-  "Connect this provider to use it as your personal model.": "连接此提供商，将其用作你的个人模型。",
   Connected: "已连接",
   "Connected · {label}": "已连接 · {label}",
   "Connected and using {label}.": "已连接并正在使用 {label}。",
@@ -417,6 +416,7 @@ export const ZH_MESSAGES: Record<string, string> = {
   "Resetting…": "正在重置…",
   Restore: "恢复",
   "Stream replies": "流式回复",
+  "Load web images automatically": "自动加载网络图片",
   "Restore the last saved workspace. Unsaved work on the computer is lost.":
     "恢复上次保存的工作区。电脑上未保存的工作将会丢失。",
   "Resume notifications": "恢复通知",
@@ -518,7 +518,6 @@ export const ZH_MESSAGES: Record<string, string> = {
     "工作已停止，但线程无法刷新：{detail}",
   "You have control": "你已接管控制",
   "Your account": "你的账户",
-  "Stored securely. Never shown here.": "已安全存储。不会显示在这里。",
   Actions: "操作",
   Active: "启用",
   Add: "添加",

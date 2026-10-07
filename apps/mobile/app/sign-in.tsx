@@ -1,12 +1,11 @@
 import type { IntegrationSetupState } from "@rakazo/contracts";
 import { PRODUCT_NAME } from "@rakazo/contracts";
-import { Redirect, useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { Redirect, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
 import {
   AccessibilityInfo,
   Keyboard,
   KeyboardAvoidingView,
-  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -16,20 +15,15 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { NativeActionButton } from "../components/native-action-button";
 import {
-  apiBaseWarning,
   currentApiBase,
-  defaultApiBase,
   displayApiHost,
   loadSessionToken,
-  normalizeApiBase,
   type PasswordResetCapabilities,
   passwordResetCapabilities,
-  probeApiBase,
   requestPasswordReset,
-  resetApiBase,
   rpc,
-  saveApiBase,
   signIn,
   signUp,
   usesCustomApiBase,
@@ -52,9 +46,14 @@ export default function SignIn() {
   const [ready, setReady] = useState(false);
   const [hasSession, setHasSession] = useState(false);
   const [apiBase, setApiBase] = useState(() => currentApiBase());
-  const [serverOpen, setServerOpen] = useState(false);
   const [reset, setReset] = useState<PasswordResetCapabilities | null>(null);
   const [resetSent, setResetSent] = useState(false);
+
+  useFocusEffect(
+    useCallback(() => {
+      setApiBase(currentApiBase());
+    }, []),
+  );
 
   useEffect(() => {
     void loadSessionToken().then((token) => {
@@ -242,28 +241,20 @@ export default function SignIn() {
                   {error ? (
                     <Text style={{ color: tokens.destructive, marginTop: 12 }}>{error}</Text>
                   ) : null}
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() => void submit()}
+                  <NativeActionButton
                     disabled={pending}
-                    style={{
-                      marginTop: 16,
-                      backgroundColor: tokens.primary,
-                      borderRadius: 13,
-                      padding: 18,
-                      alignItems: "center",
-                    }}
-                  >
-                    <Text style={{ color: tokens.primaryForeground, fontSize: 17 }}>
-                      {pending
+                    label={
+                      pending
                         ? t("Working…")
                         : mode === "in"
                           ? t("Sign in")
                           : mode === "up"
                             ? t("Sign up")
-                            : t("Send reset link")}
-                    </Text>
-                  </Pressable>
+                            : t("Send reset link")
+                    }
+                    onPress={() => void submit()}
+                    style={{ marginTop: 16 }}
+                  />
                   {mode === "in" && reset?.passwordReset && reset.resetUrl ? (
                     <Pressable
                       accessibilityRole="button"
@@ -323,7 +314,7 @@ export default function SignIn() {
                   : t("Use a custom server")
               }
               hitSlop={12}
-              onPress={() => setServerOpen(true)}
+              onPress={() => router.push("/server")}
               style={{
                 alignItems: "center",
                 paddingHorizontal: 24,
@@ -349,160 +340,6 @@ export default function SignIn() {
           </View>
         </TouchableWithoutFeedback>
       </KeyboardAvoidingView>
-      <ServerSheet
-        visible={serverOpen}
-        current={apiBase}
-        onClose={() => setServerOpen(false)}
-        onSaved={(url) => {
-          setApiBase(url);
-          setServerOpen(false);
-        }}
-      />
     </SafeAreaView>
-  );
-}
-
-function ServerSheet({
-  visible,
-  current,
-  onClose,
-  onSaved,
-}: {
-  visible: boolean;
-  current: string;
-  onClose: () => void;
-  onSaved: (url: string) => void;
-}) {
-  const { t } = useI18n();
-  const tokens = useMobileTokens();
-  const [draft, setDraft] = useState(current);
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-
-  useEffect(() => {
-    if (!visible) return;
-    setDraft(current);
-    setError(null);
-    setPending(false);
-  }, [visible, current]);
-
-  const parsedDraft = normalizeApiBase(draft);
-  const warning = parsedDraft.ok ? apiBaseWarning(parsedDraft.url) : null;
-
-  async function save() {
-    setPending(true);
-    setError(null);
-    try {
-      const probed = await probeApiBase(draft);
-      if (!probed.ok) {
-        setError(probed.error);
-        return;
-      }
-      const saved = await saveApiBase(probed.url);
-      if (!saved.ok) {
-        setError(saved.error);
-        return;
-      }
-      onSaved(saved.url);
-    } finally {
-      setPending(false);
-    }
-  }
-
-  async function restoreDefault() {
-    setPending(true);
-    setError(null);
-    try {
-      const saved = await resetApiBase();
-      if (!saved.ok) {
-        setError(saved.error);
-        return;
-      }
-      onSaved(saved.url);
-    } finally {
-      setPending(false);
-    }
-  }
-
-  return (
-    <Modal
-      visible={visible}
-      animationType="slide"
-      presentationStyle="pageSheet"
-      onRequestClose={onClose}
-    >
-      <KeyboardAvoidingView
-        style={{ flex: 1, backgroundColor: tokens.background }}
-        behavior={Platform.OS === "ios" ? "padding" : undefined}
-      >
-        <SafeAreaView style={{ flex: 1, paddingHorizontal: 24, paddingTop: 12 }}>
-          <View
-            style={{
-              flexDirection: "row",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}
-          >
-            <Pressable onPress={onClose} hitSlop={8}>
-              <Text style={{ color: tokens.mutedForeground, fontSize: 17 }}>{t("Cancel")}</Text>
-            </Pressable>
-            <Text style={{ color: tokens.foreground, fontSize: 17, fontWeight: "600" }}>
-              {t("Server")}
-            </Text>
-            <Pressable onPress={() => void save()} disabled={pending} hitSlop={8}>
-              <Text style={{ color: tokens.foreground, fontSize: 17, fontWeight: "600" }}>
-                {pending ? t("Checking…") : t("Save")}
-              </Text>
-            </Pressable>
-          </View>
-          <Text
-            style={{ color: tokens.mutedForeground, marginTop: 28, fontSize: 15, lineHeight: 22 }}
-          >
-            {t("Enter your {PRODUCT_NAME} server address.", { PRODUCT_NAME })}
-          </Text>
-          <TextInput
-            autoCapitalize="none"
-            autoCorrect={false}
-            autoComplete="off"
-            keyboardType="url"
-            textContentType="URL"
-            returnKeyType="go"
-            onSubmitEditing={() => void save()}
-            placeholder={defaultApiBase()}
-            placeholderTextColor={tokens.mutedForeground}
-            value={draft}
-            onChangeText={(value) => {
-              setDraft(value);
-              setError(null);
-            }}
-            style={{
-              marginTop: 20,
-              backgroundColor: tokens.muted,
-              borderRadius: 13,
-              padding: 16,
-              color: tokens.foreground,
-              fontSize: 16,
-            }}
-          />
-          {warning ? (
-            <Text style={{ color: tokens.mutedForeground, marginTop: 12, fontSize: 13 }}>
-              {warning}
-            </Text>
-          ) : null}
-          {error ? <Text style={{ color: tokens.destructive, marginTop: 12 }}>{error}</Text> : null}
-          {usesCustomApiBase(current) || draft.trim() !== current ? (
-            <Pressable
-              onPress={() => void restoreDefault()}
-              disabled={pending}
-              style={{ marginTop: 28, alignItems: "center" }}
-            >
-              <Text style={{ color: tokens.mutedForeground, fontSize: 15 }}>
-                {t("Use default server")}
-              </Text>
-            </Pressable>
-          ) : null}
-        </SafeAreaView>
-      </KeyboardAvoidingView>
-    </Modal>
   );
 }

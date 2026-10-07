@@ -39,33 +39,6 @@ const FILES = [
   "apps/web/index.html",
   "apps/web/public/favicon.svg",
   "apps/web/public/site.webmanifest",
-  "apps/www/astro.config.mjs",
-  "apps/www/public/avatars/bot-avatar-blue.svg",
-  "apps/www/public/avatars/bot-avatar-coordinator.svg",
-  "apps/www/public/avatars/bot-avatar-coral.svg",
-  "apps/www/public/avatars/bot-avatar-indigo.svg",
-  "apps/www/public/avatars/bot-avatar-orange.svg",
-  "apps/www/public/avatars/bot-avatar-pink.svg",
-  "apps/www/public/avatars/bot-avatar-teal.svg",
-  "apps/www/public/avatars/bot-avatar-violet.svg",
-  "apps/www/public/brand/rakazo-mark.svg",
-  "apps/www/public/favicon.svg",
-  "apps/www/public/site.webmanifest",
-  "apps/www/src/agent-content.test.ts",
-  "apps/www/src/agent-content.ts",
-  "apps/www/src/components/Footer.astro",
-  "apps/www/src/components/HomePage.astro",
-  "apps/www/src/components/Logo.astro",
-  "apps/www/src/i18n/home.ts",
-  "apps/www/src/layouts/BaseLayout.astro",
-  "apps/www/src/middleware.test.ts",
-  "apps/www/src/pages/404.astro",
-  "apps/www/src/pages/about.astro",
-  "apps/www/src/pages/privacy.astro",
-  "apps/www/src/pages/support.astro",
-  "apps/www/src/site.ts",
-  "apps/www/src/waitlist.test.ts",
-  "apps/www/src/waitlist.ts",
   "docs/self-host.md",
   "infra/compose/.env.images.example",
   "infra/compose/backup-prod.sh",
@@ -103,6 +76,14 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 // Upstream keeps adding compose overlays, so every one of them is covered.
 for (const name of readdirSync(path.join(root, "infra/compose"))) {
   if (/^docker-compose.*\.yml$/.test(name)) FILES.push(`infra/compose/${name}`);
+}
+// Upstream keeps adding marketing pages, guides, and posts, so the whole site is covered.
+const WWW_TEXT = /\.(astro|json|md|mjs|svg|ts|webmanifest)$/;
+for (const entry of readdirSync(path.join(root, "apps/www"), { recursive: true, withFileTypes: true })) {
+  const file = path.relative(root, path.join(entry.parentPath, entry.name));
+  if (entry.isFile() && WWW_TEXT.test(entry.name) && !/(^|\/)(node_modules|dist|\.astro)\//.test(file)) {
+    FILES.push(file);
+  }
 }
 const check = process.argv.includes("--check");
 const stale: string[] = [];

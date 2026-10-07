@@ -2838,13 +2838,6 @@ export function ShellPage() {
           className="absolute inset-y-0 end-0 start-[min(calc(100%-48px),316px)] z-30 bg-overlay md:hidden"
         />
       ) : null}
-      {!mobileSidebarOpen ? (
-        <div
-          data-testid="mobile-sidebar-swipe-edge"
-          aria-hidden="true"
-          className="absolute bottom-20 start-0 top-16 z-20 w-8 touch-none md:hidden"
-        />
-      ) : null}
       <aside
         data-testid="bots-sidebar"
         data-collapsed={botsSidebarCollapsed ? "true" : "false"}
@@ -3509,11 +3502,20 @@ export function ShellPage() {
         />
       )}
 
+      {/* Keep the composer's z-index inside the chat so phone overlays like the side panel cover it. */}
       <main
         aria-hidden={mobileSidebarOpen || undefined}
         inert={mobileSidebarOpen}
-        className="flex min-w-0 flex-1 flex-col bg-background"
+        className="isolate flex min-w-0 flex-1 flex-col bg-background"
       >
+        {/* Inside main so the composer and its menus stay above it. */}
+        {!mobileSidebarOpen ? (
+          <div
+            data-testid="mobile-sidebar-swipe-edge"
+            aria-hidden="true"
+            className="absolute bottom-20 start-0 top-16 z-20 w-8 touch-none md:hidden"
+          />
+        ) : null}
         <div className="app-drag flex items-center justify-between border-b border-sidebar-border px-3 py-[17px] md:px-[22px]">
           <div className="flex min-w-0 items-center gap-2">
             {/* Collapsed bots sidebar: this header is the leading edge for window chrome. */}
@@ -4466,6 +4468,7 @@ export function ShellPage() {
             initialSection={settingsSection}
             avatarStyle={bootstrapMe?.avatarStyle ?? "robot"}
             isDeploymentOwner={bootstrapMe?.isDeploymentOwner === true}
+            billingEnabled={bootstrapMe?.billingEnabled === true}
             sandboxProvider={bootstrapMe?.sandboxProvider}
             onSandboxProviderChange={(sandboxProvider) =>
               setBootstrapMe((prev) => (prev ? { ...prev, sandboxProvider } : prev))

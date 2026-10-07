@@ -22,6 +22,7 @@ import {
   View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { NativeActionButton } from "../components/native-action-button";
 import { rpc } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
 import { useI18n } from "../lib/i18n";
@@ -519,15 +520,13 @@ export default function Integrations() {
               </Pressable>
             </View>
           ))}
-          <Pressable
-            accessibilityRole="button"
+          <NativeActionButton
             accessibilityLabel={t("Add another {name}", { name: item.name })}
             disabled={connecting || uninstalling}
+            label={connecting ? t("Working…") : t("Add another")}
             onPress={() => void connect(item)}
-            style={styles.cardButton}
-          >
-            <Text style={styles.buttonLabel}>{connecting ? t("Working…") : t("Add another")}</Text>
-          </Pressable>
+            prominence="secondary"
+          />
         </View>
 
         <View style={styles.card}>
@@ -639,13 +638,11 @@ export default function Integrations() {
             ) : null}
 
             {renderedApps.length < catalogApps.length ? (
-              <Pressable
-                accessibilityRole="button"
+              <NativeActionButton
+                label={t("Show more")}
                 onPress={() => setVisibleCount((count) => count + CONNECTION_CATALOG_PAGE_SIZE)}
-                style={styles.smallButton}
-              >
-                <Text style={styles.buttonLabel}>{t("Show more")}</Text>
-              </Pressable>
+                prominence="secondary"
+              />
             ) : null}
 
             <Pressable
@@ -666,14 +663,10 @@ export default function Integrations() {
               <View style={styles.advancedBody}>
                 <View style={styles.accountActions}>
                   {(["mcp", "api", "graphql", "executor", "treg"] as const).map((kind) => (
-                    <Pressable
+                    <NativeActionButton
                       key={kind}
-                      accessibilityRole="button"
-                      onPress={() => beginSource(kind)}
-                      style={styles.smallButton}
-                    >
-                      <Text style={styles.buttonLabel}>
-                        {kind === "treg"
+                      label={
+                        kind === "treg"
                           ? t("Add Treg")
                           : kind === "executor"
                             ? t("Add Executor")
@@ -681,9 +674,11 @@ export default function Integrations() {
                               ? t("Add MCP server")
                               : kind === "graphql"
                                 ? t("Add GraphQL")
-                                : t("Add OpenAPI")}
-                      </Text>
-                    </Pressable>
+                                : t("Add OpenAPI")
+                      }
+                      onPress={() => beginSource(kind)}
+                      prominence="secondary"
+                    />
                   ))}
                 </View>
 
@@ -758,25 +753,17 @@ export default function Integrations() {
                       />
                     ) : null}
                     <View style={styles.accountActions}>
-                      <Pressable
-                        accessibilityRole="button"
-                        disabled={pending === "source"}
+                      <NativeActionButton
+                        busy={pending === "source"}
+                        label={t("Verify and add")}
                         onPress={() => void addSource()}
-                        style={styles.smallButton}
-                      >
-                        {pending === "source" ? (
-                          <ActivityIndicator color={native.label} />
-                        ) : (
-                          <Text style={styles.buttonLabel}>{t("Verify and add")}</Text>
-                        )}
-                      </Pressable>
-                      <Pressable
-                        accessibilityRole="button"
+                        prominence="secondary"
+                      />
+                      <NativeActionButton
+                        label={t("Cancel")}
                         onPress={() => setSourceKind(null)}
-                        style={styles.smallButton}
-                      >
-                        <Text style={styles.buttonLabel}>{t("Cancel")}</Text>
-                      </Pressable>
+                        prominence="secondary"
+                      />
                     </View>
                   </View>
                 ) : null}
@@ -816,24 +803,6 @@ function createIntegrationsStyles() {
     content: { padding: 20, gap: 14 },
     explanation: { color: native.secondaryLabel, fontSize: 14, lineHeight: 20 },
     section: { color: native.secondaryLabel, fontSize: 14, fontWeight: "600", marginTop: 2 },
-    smallButton: {
-      minHeight: 42,
-      paddingHorizontal: 14,
-      borderRadius: 12,
-      backgroundColor: native.fill,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    cardButton: {
-      alignSelf: "flex-start",
-      minHeight: 42,
-      paddingHorizontal: 14,
-      borderRadius: 12,
-      backgroundColor: native.fillPressed,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    buttonLabel: { color: native.label, fontSize: 14, fontWeight: "600" },
     card: { padding: 16, borderRadius: 16, backgroundColor: native.fill, gap: 12 },
     input: {
       minHeight: 48,

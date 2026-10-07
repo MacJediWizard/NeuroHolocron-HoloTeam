@@ -38,6 +38,7 @@ export * from "./messaging-prompts.js";
 export * from "./model-oauth.js";
 export * from "./model-probe.js";
 export * from "./model-providers.js";
+export * from "./remote-images.js";
 export * from "./response-bytes.js";
 export * from "./run-state.js";
 export * from "./sandbox-command.js";

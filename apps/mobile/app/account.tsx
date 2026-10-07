@@ -5,11 +5,12 @@ import {
   ActivityIndicator,
   Alert,
   Button,
+  KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
   StyleSheet,
-  Switch,
   Text,
   TextInput,
   View,
@@ -17,6 +18,9 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useAvatarStyle } from "../components/avatar-style";
 import { BotAvatar } from "../components/bot-avatar";
+import { NativeActionButton } from "../components/native-action-button";
+import { NativeSegmentedControl } from "../components/native-segmented-control";
+import { NativeSwitch } from "../components/native-switch";
 import type { MobileBot, MobileMe } from "../lib/api";
 import {
   currentApiBase,
@@ -34,6 +38,7 @@ import {
 } from "../lib/appearance";
 import { explicitSignInRoute } from "../lib/auth-routing";
 import { confirmDeleteBot } from "../lib/bot-lifecycle";
+import { promptAccountDeletion } from "../lib/delete-account-prompt";
 import { setUiLocale, useI18n } from "../lib/i18n";
 import type { LiveNotificationSettings } from "../lib/live-notifications";
 import {
@@ -47,6 +52,11 @@ import {
 import { presentMessageActionSheet } from "../lib/message-action-sheet";
 import { native, useResolvedAppearance, useThemedStyles } from "../lib/native";
 import { registerPushToken } from "../lib/push";
+import {
+  getCachedRemoteImagesEnabled,
+  setRemoteImagesPreference,
+  subscribeRemoteImages,
+} from "../lib/remote-images-preference";
 import {
   getCachedResponseStreamingEnabled,
   setResponseStreamingPreference,
@@ -62,7 +72,8 @@ export default function Account() {
   const router = useRouter();
   const { focus } = useLocalSearchParams<{ focus?: string }>();
   const [me, setMe] = useState<MobileMe | null>(null);
-  const [password, setPassword] = useState("");
+  const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deletePassword, setDeletePassword] = useState("");
   const [localeSaving, setLocaleSaving] = useState(false);
   const [localeError, setLocaleError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
@@ -74,7 +85,8 @@ export default function Account() {
   const [notificationsReady, setNotificationsReady] = useState(Platform.OS !== "android");
   const [notificationPending, setNotificationPending] = useState(false);
   const [notificationError, setNotificationError] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [signOutError, setSignOutError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [archivedBots, setArchivedBots] = useState<MobileBot[]>([]);
   const [usage, setUsage] = useState<{
     runs: number;
@@ -88,6 +100,12 @@ export default function Account() {
     getCachedResponseStreamingEnabled,
     () => false,
   );
+  const loadRemoteImages = useSyncExternalStore(
+    subscribeRemoteImages,
+    getCachedRemoteImagesEnabled,
+    () => false,
+  );
+  const loadRemoteImagesLabel = t("Load web images automatically");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const styles = useThemedStyles(createAccountStyles);
   const versionInfo = getAppVersionInfo();
@@ -153,13 +171,13 @@ export default function Account() {
 
   async function handleSignOut() {
     setPending(true);
-    setError(null);
+    setSignOutError(null);
     try {
       await signOut();
       router.dismissAll();
       router.replace(explicitSignInRoute);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("Could not sign out"));
+      setSignOutError(err instanceof Error ? err.message : t("Could not sign out"));
       setPending(false);
     }
   }
@@ -190,22 +208,28 @@ export default function Account() {
     }
   }
 
-  function confirmDeletion() {
-    setError(null);
-    Alert.alert(
-      t("Delete your account?"),
-      t(
+  function closeDeletePrompt() {
+    if (pending) return;
+    setDeleteOpen(false);
+    setDeletePassword("");
+  }
+
+  function requestDeletion() {
+    if (pending) return;
+    setDeleteError(null);
+    const prompted = promptAccountDeletion({
+      title: t("Delete your account?"),
+      message: t(
         "This permanently deletes your account, bots, conversations, memories, files, and saved connections. This cannot be undone.",
       ),
-      [
-        { text: t("Cancel"), style: "cancel" },
-        {
-          text: t("Delete account"),
-          style: "destructive",
-          onPress: () => void handleDeletion(),
-        },
-      ],
-    );
+      cancelLabel: t("Cancel"),
+      deleteLabel: t("Delete"),
+      onSubmit: (password) => void handleDeletion(password),
+    });
+    if (!prompted) {
+      setDeletePassword("");
+      setDeleteOpen(true);
+    }
   }
 
   function applyLocale(code: AccountUiLocale) {
@@ -233,15 +257,17 @@ export default function Account() {
     });
   }
 
-  async function handleDeletion() {
+  async function handleDeletion(password: string) {
+    if (!password || pending) return;
     setPending(true);
-    setError(null);
+    setDeleteError(null);
     try {
       await deleteAccount(password);
+      setDeleteOpen(false);
       router.dismissAll();
       router.replace("/sign-in");
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("Could not delete account"));
+      setDeleteError(err instanceof Error ? err.message : t("Could not delete account"));
     } finally {
       setPending(false);
     }
@@ -273,34 +299,16 @@ export default function Account() {
 
         <View accessibilityLabel={t("Appearance")} style={styles.avatarSection}>
           <Text style={styles.settingsTitle}>{t("Appearance")}</Text>
-          <View style={styles.appearanceOptions}>
-            {(
-              [
-                ["system", "System"],
-                ["light", "Light"],
-                ["dark", "Dark"],
-              ] as const
-            ).map(([value, label]) => {
-              const selected = appearance === value;
-              const translated = t(label);
-              return (
-                <Pressable
-                  key={value}
-                  accessibilityLabel={translated}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected }}
-                  onPress={() => void setAppearancePreference(value)}
-                  style={({ pressed }) => [
-                    styles.appearanceOption,
-                    selected && styles.appearanceOptionSelected,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Text style={styles.appearanceLabel}>{translated}</Text>
-                </Pressable>
-              );
-            })}
-          </View>
+          <NativeSegmentedControl
+            accessibilityLabel={t("Appearance")}
+            onChange={(value) => void setAppearancePreference(value)}
+            options={[
+              { value: "system", label: t("System") },
+              { value: "light", label: t("Light") },
+              { value: "dark", label: t("Dark") },
+            ]}
+            value={appearance}
+          />
         </View>
 
         <View accessibilityLabel={t("Avatar style")} style={styles.avatarSection}>
@@ -469,25 +477,39 @@ export default function Account() {
           <View style={styles.avatarSection}>
             <View style={styles.switchRow}>
               <Text style={styles.switchLabel}>{t("Stream replies")}</Text>
-              <Switch
+              <NativeSwitch
                 accessibilityLabel={t("Stream replies")}
-                value={streamReplies}
                 onValueChange={(checked) =>
                   void setResponseStreamingPreference(checked ? "on" : "off")
                 }
+                value={streamReplies}
+              />
+            </View>
+            <View style={styles.switchRow}>
+              <Text style={styles.switchLabel}>{loadRemoteImagesLabel}</Text>
+              <NativeSwitch
+                accessibilityLabel={loadRemoteImagesLabel}
+                onValueChange={(checked) => void setRemoteImagesPreference(checked ? "on" : "off")}
+                value={loadRemoteImages}
               />
             </View>
           </View>
         ) : null}
 
-        <Pressable
-          accessibilityRole="button"
-          disabled={pending}
-          onPress={() => void handleSignOut()}
-          style={({ pressed }) => [styles.button, pressed && styles.pressed]}
-        >
-          <Text style={styles.buttonLabel}>{t("Sign out")}</Text>
-        </Pressable>
+        <View>
+          <NativeActionButton
+            disabled={pending}
+            fill
+            label={t("Sign out")}
+            onPress={() => void handleSignOut()}
+            prominence="secondary"
+          />
+          {signOutError ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              {signOutError}
+            </Text>
+          ) : null}
+        </View>
 
         {archivedBots.length > 0 ? (
           <View style={styles.archivedSection}>
@@ -528,43 +550,97 @@ export default function Account() {
           </View>
         ) : null}
 
-        <View style={styles.dangerZone}>
-          <Text style={styles.dangerTitle}>{t("Delete account")}</Text>
-          <TextInput
-            accessibilityLabel={t("Current password")}
-            autoCapitalize="none"
-            autoCorrect={false}
-            editable={!pending}
-            onChangeText={(value) => {
-              setPassword(value);
-              setError(null);
-            }}
-            placeholder={t("Current password")}
-            placeholderTextColor={native.tertiaryLabel}
-            secureTextEntry
-            style={styles.password}
-            textContentType="password"
-            value={password}
-          />
-          {error ? <Text style={styles.error}>{error}</Text> : null}
+        <View>
           <Pressable
             accessibilityRole="button"
-            disabled={pending || !password}
-            onPress={confirmDeletion}
+            disabled={pending}
+            onPress={requestDeletion}
             style={({ pressed }) => [
-              styles.deleteButton,
-              (pending || !password) && styles.disabled,
+              styles.settingsButton,
               pressed && styles.pressed,
+              pending && styles.disabled,
             ]}
           >
-            {pending ? (
-              <ActivityIndicator color={mobileTokens().destructiveForeground} />
-            ) : (
-              <Text style={styles.deleteLabel}>{t("Delete account")}</Text>
-            )}
+            <Text style={styles.destructiveTitle}>{t("Delete account")}</Text>
+            {pending ? <ActivityIndicator color={mobileTokens().destructive} /> : null}
           </Pressable>
+          {!deleteOpen && deleteError ? (
+            <Text accessibilityRole="alert" style={styles.error}>
+              {deleteError}
+            </Text>
+          ) : null}
         </View>
       </ScrollView>
+      {deleteOpen ? (
+        <Modal transparent animationType="fade" onRequestClose={closeDeletePrompt}>
+          <KeyboardAvoidingView
+            behavior={Platform.OS === "ios" ? "padding" : undefined}
+            style={styles.dialogOverlay}
+          >
+            <Pressable
+              accessibilityLabel={t("Cancel")}
+              style={StyleSheet.absoluteFill}
+              onPress={closeDeletePrompt}
+            />
+            <ScrollView
+              bounces={false}
+              contentContainerStyle={styles.dialog}
+              keyboardShouldPersistTaps="handled"
+              style={styles.dialogScroll}
+            >
+              <Text style={styles.dialogTitle}>{t("Delete your account?")}</Text>
+              <Text style={styles.dialogBody}>
+                {t(
+                  "This permanently deletes your account, bots, conversations, memories, files, and saved connections. This cannot be undone.",
+                )}
+              </Text>
+              <TextInput
+                accessibilityLabel={t("Current password")}
+                autoCapitalize="none"
+                autoCorrect={false}
+                autoFocus
+                editable={!pending}
+                onChangeText={(value) => {
+                  setDeletePassword(value);
+                  setDeleteError(null);
+                }}
+                placeholder={t("Current password")}
+                placeholderTextColor={native.tertiaryLabel}
+                secureTextEntry
+                style={styles.dialogInput}
+                textContentType="password"
+                value={deletePassword}
+              />
+              {deleteError ? (
+                <Text accessibilityRole="alert" style={styles.dialogError}>
+                  {deleteError}
+                </Text>
+              ) : null}
+              <View style={styles.dialogActions}>
+                <Pressable
+                  accessibilityRole="button"
+                  onPress={closeDeletePrompt}
+                  style={styles.dialogAction}
+                >
+                  <Text style={styles.dialogCancel}>{t("Cancel")}</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  disabled={pending || !deletePassword}
+                  onPress={() => void handleDeletion(deletePassword)}
+                  style={styles.dialogAction}
+                >
+                  <Text
+                    style={[styles.dialogDelete, (pending || !deletePassword) && styles.disabled]}
+                  >
+                    {t("Delete")}
+                  </Text>
+                </Pressable>
+              </View>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </Modal>
+      ) : null}
     </SafeAreaView>
   );
 }
@@ -595,12 +671,12 @@ function NotificationSwitch({
         <Text style={{ color: native.label, fontSize: 15 }}>{label}</Text>
         <Text style={{ color: native.secondaryLabel, fontSize: 12.5, marginTop: 2 }}>{detail}</Text>
       </View>
-      <Switch
-        accessibilityLabel={label}
+      <NativeSwitch
         accessibilityHint={detail}
+        accessibilityLabel={label}
         disabled={disabled}
-        value={value}
         onValueChange={onChange}
+        value={value}
       />
     </View>
   );
@@ -632,18 +708,6 @@ function createAccountStyles() {
     email: {
       color: native.secondaryLabel,
       fontSize: 15,
-    },
-    button: {
-      minHeight: 50,
-      borderRadius: 14,
-      alignItems: "center",
-      justifyContent: "center",
-      backgroundColor: native.fill,
-    },
-    buttonLabel: {
-      color: native.label,
-      fontSize: 17,
-      fontWeight: "600",
     },
     archivedSection: {
       borderRadius: 16,
@@ -690,28 +754,6 @@ function createAccountStyles() {
       backgroundColor: native.fill,
       padding: 18,
       gap: 14,
-    },
-    appearanceOptions: {
-      flexDirection: "row",
-      gap: 8,
-    },
-    appearanceOption: {
-      flex: 1,
-      minHeight: 44,
-      borderRadius: 12,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: native.tertiaryLabel,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    appearanceOptionSelected: {
-      borderColor: native.label,
-      backgroundColor: native.fillPressed,
-    },
-    appearanceLabel: {
-      color: native.label,
-      fontSize: 14,
-      fontWeight: "600",
     },
     avatarOptions: {
       flexDirection: "row",
@@ -777,44 +819,75 @@ function createAccountStyles() {
       fontSize: 12,
       textAlign: "center",
     },
-    dangerZone: {
-      marginTop: 12,
-      borderRadius: 16,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: tokens.destructive,
-      padding: 18,
-    },
-    dangerTitle: {
+    destructiveTitle: {
       color: tokens.destructive,
       fontSize: 17,
       fontWeight: "600",
-    },
-    password: {
-      height: 48,
-      borderRadius: 12,
-      backgroundColor: native.fill,
-      color: native.label,
-      paddingHorizontal: 14,
-      marginTop: 16,
-      fontSize: 16,
     },
     error: {
       color: tokens.destructive,
       fontSize: 14,
       marginTop: 10,
     },
-    deleteButton: {
-      minHeight: 50,
-      borderRadius: 12,
-      alignItems: "center",
+    dialogOverlay: {
+      flex: 1,
       justifyContent: "center",
-      backgroundColor: tokens.destructive,
-      marginTop: 14,
+      padding: 24,
+      backgroundColor: "rgba(0, 0, 0, 0.62)",
     },
-    deleteLabel: {
-      color: tokens.destructiveForeground,
+    dialogScroll: {
+      flexGrow: 0,
+      flexShrink: 1,
+      maxHeight: "100%",
+      borderRadius: 14,
+      backgroundColor: native.page,
+    },
+    dialog: {
+      padding: 18,
+      gap: 12,
+    },
+    dialogTitle: {
+      color: native.label,
+      fontSize: 17,
+      fontWeight: "600",
+    },
+    dialogBody: {
+      color: native.secondaryLabel,
+      fontSize: 14,
+      lineHeight: 20,
+    },
+    dialogInput: {
+      height: 48,
+      borderRadius: 12,
+      backgroundColor: native.fill,
+      color: native.label,
+      paddingHorizontal: 14,
       fontSize: 16,
-      fontWeight: "700",
+    },
+    dialogError: {
+      color: tokens.destructive,
+      fontSize: 14,
+    },
+    dialogActions: {
+      flexDirection: "row",
+      justifyContent: "flex-end",
+      alignItems: "center",
+      gap: 12,
+    },
+    dialogAction: {
+      minHeight: 48,
+      justifyContent: "center",
+      paddingHorizontal: 8,
+    },
+    dialogCancel: {
+      color: native.label,
+      fontSize: 16,
+      fontWeight: "600",
+    },
+    dialogDelete: {
+      color: tokens.destructive,
+      fontSize: 16,
+      fontWeight: "600",
     },
     disabled: {
       opacity: 0.45,

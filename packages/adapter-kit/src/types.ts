@@ -925,3 +925,41 @@ export interface AutoReviewResult {
   reason?: string;
   model: string;
 }
+
+/** Provider-neutral subscription state. Vendor-specific states map onto these. */
+export type BillingSubscriptionStatus =
+  | "trialing"
+  | "active"
+  | "past_due"
+  | "incomplete"
+  | "canceled";
+
+export interface BillingPrice {
+  /** Minor currency units, e.g. cents. */
+  amount: number;
+  currency: string;
+  interval: "day" | "week" | "month" | "year";
+  intervalCount: number;
+}
+
+/** Full subscription state for one billing customer, re-fetched from the provider on every sync. */
+export interface BillingSubscriptionSnapshot {
+  subscriptionId: string;
+  subscriptionItemId: string;
+  priceId: string;
+  status: BillingSubscriptionStatus;
+  seats: number;
+  trialEndsAt: Date | null;
+  currentPeriodEndsAt: Date | null;
+  cancelAtPeriodEnd: boolean;
+  endedAt: Date | null;
+}
+
+export interface BillingCheckoutRequest {
+  customerId: string;
+  seats: number;
+  /** Omitted when the customer has already used its trial. */
+  trialDays?: number;
+  successUrl: string;
+  cancelUrl: string;
+}
