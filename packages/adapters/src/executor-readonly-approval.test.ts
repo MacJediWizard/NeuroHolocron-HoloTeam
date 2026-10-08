@@ -40,6 +40,8 @@ type Effect = {
   result?: unknown;
   reviewDecision?: string;
   runId?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
 };
 
 function fixture({
@@ -60,7 +62,12 @@ function fixture({
   builtin = false,
   existingSharedMemory,
   advanceRevisionAfterRead = false,
+  approvalTarget,
+  parallel = false,
 }: {
+  approvalTarget?: string[];
+  /** Runs the scripted tool calls concurrently, like a model emitting several in one turn. */
+  parallel?: boolean;
   builtin?: boolean;
   existingSharedMemory?: string;
   /** Simulates another writer landing between the save's read and its commit. */
@@ -80,9 +87,10 @@ function fixture({
     name,
     description: "Read an item",
     readOnly,
+    ...(approvalTarget ? { approvalTarget } : {}),
     inputSchema: {
       type: "object",
-      properties: { id: { type: "string" } },
+      properties: { id: { type: "string" }, title: { type: "string" } },
       required: ["id"],
     },
     route: { connectorId: "demo", resourceId: "resource-1", toolName: name },
@@ -127,13 +135,22 @@ function fixture({
       async ({
         where,
       }: {
-        where?: { id?: string; runId?: string; status?: string; kind?: string };
+        where?: {
+          id?: string | { not: string };
+          runId?: string;
+          status?: string | { in: string[] };
+          kind?: string;
+        };
       } = {}) =>
         effects.filter((effect) => {
-          if (where?.status && effect.status !== where.status) return false;
+          const status = where?.status;
+          if (typeof status === "string" && effect.status !== status) return false;
+          if (typeof status === "object" && !status.in.includes(effect.status)) return false;
           if (where?.kind && effect.kind !== where.kind) return false;
           if (where?.runId && effect.runId && effect.runId !== where.runId) return false;
-          if (where?.id && effect.id !== where.id) return false;
+          const id = where?.id;
+          if (typeof id === "string" && effect.id !== id) return false;
+          if (typeof id === "object" && effect.id === id.not) return false;
           return true;
         }),
     ),
@@ -144,12 +161,26 @@ function fixture({
         ) ?? null,
     ),
     create: vi.fn(async ({ data }: { data: Omit<Effect, "id"> }) => {
-      const effect = { ...data, id: `effect-${effects.length + 1}` };
+      const now = new Date();
+      const effect = {
+        ...data,
+        id: `effect-${effects.length + 1}`,
+        createdAt: now,
+        updatedAt: now,
+      };
       effects.push(effect);
       return { ...effect };
     }),
     update: vi.fn(async ({ where, data }: { where: { id: string }; data: Partial<Effect> }) => {
       Object.assign(effects.find((effect) => effect.id === where.id)!, data);
+    }),
+    deleteMany: vi.fn(async ({ where }: { where: { id: string; status: string } }) => {
+      const index = effects.findIndex(
+        (effect) => effect.id === where.id && effect.status === where.status,
+      );
+      if (index < 0) return { count: 0 };
+      effects.splice(index, 1);
+      return { count: 1 };
     }),
     updateMany: vi.fn(
       async ({ where, data }: { where: { id: string; status: string }; data: Partial<Effect> }) => {
@@ -220,12 +251,18 @@ function fixture({
     { args: { id: "item-1" }, executionId: "call-1" },
   ];
   const runtimeRun = vi.fn(async function* (request: AgentRunRequest) {
-    for (const call of calls) {
-      const result = await request.executeTool!(
+    const callTool = (call: (typeof calls)[number]) =>
+      request.executeTool!(
         catalog ? "demo_execute_tool" : name,
         catalog ? { id: `resource-1:${name}`, arguments: call.args } : call.args,
         call.executionId,
       );
+    if (parallel) {
+      results.push(...(await Promise.all(calls.map(callTool))));
+      return;
+    }
+    for (const call of calls) {
+      const result = await callTool(call);
       results.push(result);
       if (isApprovalPausedResult(result)) return;
     }
@@ -417,6 +454,70 @@ describe("connector read-only metadata and approval enforcement", () => {
     expect(f.effects).toHaveLength(0);
     expect(f.execute).not.toHaveBeenCalled();
     expect(f.results[0]).toEqual({ error: expect.stringMatching(/Tool arguments are invalid/) });
+  });
+
+  describe("one approval card at a time", () => {
+    const gated = {
+      readOnly: false,
+      rules: [
+        { effect: "require_approval", matchKind: "tool", matchValue: "demo_get_item" },
+      ] as ActionApprovalRule[],
+    };
+
+    it("tells parallel sibling calls to wait instead of failing the second card", async () => {
+      const f = fixture({ ...gated, parallel: true });
+      f.setCalls([
+        { args: { id: "item-1" }, executionId: "call-1" },
+        { args: { id: "item-2" }, executionId: "call-2" },
+      ]);
+      await f.run();
+      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+      expect(isApprovalPausedResult(f.results[0])).toBe(true);
+      expect(f.results[1]).toEqual({ error: expect.stringMatching(/only one card can wait/) });
+      expect(f.effects).toHaveLength(1);
+      expect(f.execute).not.toHaveBeenCalled();
+    });
+
+    it("refuses a second card for a target that already has one waiting", async () => {
+      const f = fixture({ ...gated, approvalTarget: ["id"] });
+      await f.run();
+      expect(f.effects).toHaveLength(1);
+      f.setCalls([{ args: { id: "item-1", title: "Reworded" }, executionId: "call-2" }]);
+      await f.run();
+      expect(f.pauseRunForInput).toHaveBeenCalledOnce();
+      expect(f.results.at(-1)).toEqual({
+        error: expect.stringMatching(/same target \(id=item-1\) is already waiting/),
+      });
+      expect(f.effects).toHaveLength(1);
+    });
+
+    it("flags a recently completed change to the same target once, then files the card", async () => {
+      const f = fixture({ ...gated, approvalTarget: ["id"] });
+      await f.run();
+      f.effects[0]!.status = "completed";
+      const redo = { args: { id: "item-1", title: "Reworded" }, executionId: "call-2" };
+      f.setCalls([redo, { ...redo, executionId: "call-3" }]);
+      await f.run();
+      expect(f.results.at(-2)).toEqual({
+        error: expect.stringMatching(/already changed at .* with \{"id":"item-1"\}/),
+      });
+      expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
+      expect(f.pauseRunForInput).toHaveBeenCalledTimes(2);
+      expect(f.effects.map((effect) => effect.status)).toEqual(["completed", "intended"]);
+    });
+
+    it("files cards for other targets and for tools that declare none", async () => {
+      for (const approvalTarget of [["id"], undefined]) {
+        const f = fixture({ ...gated, approvalTarget });
+        await f.run();
+        f.effects[0]!.status = "completed";
+        f.setCalls([
+          { args: { id: approvalTarget ? "item-2" : "item-1", title: "New" }, executionId: "c2" },
+        ]);
+        await f.run();
+        expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
+      }
+    });
   });
 
   describe.each([false, true])("catalog = %s", (catalog) => {

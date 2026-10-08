@@ -152,6 +152,14 @@ import {
   uncertainEffectResult,
 } from "./approval-effect.js";
 import {
+  APPROVAL_TARGET_LOOKBACK_MS,
+  approvalQueuedResult,
+  approvalTargetOf,
+  findSameTargetEffect,
+  sameTargetCompletedResult,
+  sameTargetPendingResult,
+} from "./approval-target.js";
+import {
   autoReviewTimeoutMs,
   deploymentAutoReviewDefault,
   isAutoReviewCheckerConfigured,
@@ -3827,6 +3835,11 @@ export function createRunExecutor(deps: ExecutorDeps) {
         let unchangedVisualStreak: UnchangedVisualStreak = { count: 0 };
         let terminalCheckpointComplete = false;
         let approvalPausePending = false;
+        // Set synchronously by the first gated call of a turn, so parallel siblings wait instead
+        // of racing for the single approval card.
+        let approvalCardClaimed = false;
+        // Targets the bot re-submitted after being told they were already changed recently.
+        const confirmedApprovalTargets = new Set<string>();
         let handedOff = false;
         let progressRedactor = createStreamingRedactor(runSecrets);
         const scripted = deps.runtime.describe().capabilities.scripted;
@@ -4370,7 +4383,58 @@ export function createRunExecutor(deps: ExecutorDeps) {
             throw uncertainEffectError(name);
           };
 
+          // Refuses a card that would duplicate a pending change to the same declared target, and
+          // flags a recently finished one once so the bot checks the live state before redoing it.
+          const sameTargetGate = async (effectId: string) => {
+            const keys = viaConnector
+              ? (resolvedTool ?? connectorTools.get(name))?.approvalTarget
+              : undefined;
+            const route = boundDirectApprovalDetails(effectRequest, CATALOG_APPROVAL_TOOL)?.route;
+            const target = keys ? approvalTargetOf(args, keys) : undefined;
+            if (!keys || !route || !target) return undefined;
+            const now = new Date();
+            const effects = await deps.prisma.externalEffect.findMany({
+              where: {
+                spaceId: run.spaceId,
+                kind: replayEffectToolName,
+                id: { not: effectId },
+                status: { in: ["intended", "approved", "executing", "completed"] },
+                updatedAt: { gte: new Date(now.getTime() - APPROVAL_TARGET_LOOKBACK_MS) },
+              },
+              orderBy: { updatedAt: "desc" },
+              take: 100,
+              select: { id: true, status: true, request: true, createdAt: true, updatedAt: true },
+            });
+            const match = findSameTargetEffect({
+              effects,
+              target,
+              route,
+              marker: CATALOG_APPROVAL_TOOL,
+              now,
+            });
+            const confirmKey = `${replayEffectToolName}:${stableJsonValue(target)}`;
+            const result = match.pending
+              ? sameTargetPendingResult(target)
+              : match.completed && !confirmedApprovalTargets.has(confirmKey)
+                ? sameTargetCompletedResult(target, match.completed)
+                : undefined;
+            if (!result) return undefined;
+            if (!match.pending) confirmedApprovalTargets.add(confirmKey);
+            // Nothing ran; drop the unasked effect so a later identical call starts fresh.
+            await deps.prisma.externalEffect.deleteMany({
+              where: { id: effectId, status: "intended" },
+            });
+            return result;
+          };
+
           const requestApproval = async () => {
+            if (approvalCardClaimed) {
+              await deps.prisma.externalEffect.deleteMany({
+                where: { id: applied!.effect.id, status: "intended" },
+              });
+              return approvalQueuedResult();
+            }
+            approvalCardClaimed = true;
             if (!(await renewRunLease(deps, runId, workerId, fence))) {
               // Another worker owns the run now; exit without leaving a local pause card.
               return pauseForApproval();
@@ -4467,6 +4531,8 @@ export function createRunExecutor(deps: ExecutorDeps) {
               if (early !== undefined) return early;
             }
           } else if (needsApproval && applied) {
+            const blocked = await sameTargetGate(applied.effect.id);
+            if (blocked) return blocked;
             return requestApproval();
           } else if (bypassApproval && applied) {
             const early = await claimOrReturn("intended");
