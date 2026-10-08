@@ -24,24 +24,31 @@ export async function startMonitoring(fetchImpl: typeof fetch = fetch): Promise<
     return false;
   }
   if (!config.dsn) return false;
-  const Sentry = await import("@sentry/react");
-  Sentry.init({
-    dsn: config.dsn,
-    environment: config.environment ?? undefined,
-    release: config.release ?? undefined,
-    tunnel: config.tunnel,
-    dataCollection: {
-      userInfo: false,
-      cookies: false,
-      httpHeaders: false,
-      httpBodies: [],
-      urlQueryParams: false,
-    },
-    // Sessions are not used by the collector, and console output can carry user content.
-    integrations: (defaults) =>
-      defaults.filter((integration) => integration.name !== "BrowserSession"),
-    beforeBreadcrumb: (breadcrumb) => (breadcrumb.category === "console" ? null : breadcrumb),
-  });
+  let Sentry: typeof SentryReact;
+  try {
+    // A stale chunk after a deploy or a network failure must not surface as an unhandled rejection.
+    Sentry = await import("@sentry/react");
+    Sentry.init({
+      dsn: config.dsn,
+      environment: config.environment ?? undefined,
+      release: config.release ?? undefined,
+      tunnel: config.tunnel,
+      dataCollection: {
+        userInfo: false,
+        cookies: false,
+        httpHeaders: false,
+        httpBodies: [],
+        urlQueryParams: false,
+      },
+      // Sessions are not used by the collector, and console output can carry user content.
+      integrations: (defaults) =>
+        defaults.filter((integration) => integration.name !== "BrowserSession"),
+      beforeBreadcrumb: (breadcrumb) => (breadcrumb.category === "console" ? null : breadcrumb),
+    });
+  } catch (error) {
+    console.warn("Browser error reporting failed to start", error);
+    return false;
+  }
   sentry = Sentry;
   return true;
 }

@@ -27,6 +27,16 @@ describe("browser monitoring", () => {
     expect(sentry.init).not.toHaveBeenCalled();
   });
 
+  it("stays off when the SDK fails to start", async () => {
+    sentry.init.mockImplementation(() => {
+      throw new Error("init failed");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect(await startMonitoring(respond({ dsn: "https://key@errors.example.com/8" }))).toBe(false);
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it("starts the SDK through the API tunnel with data collection off", async () => {
     const fetchImpl = respond({
       dsn: "https://key@errors.example.com/8",
