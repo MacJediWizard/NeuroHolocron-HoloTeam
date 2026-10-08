@@ -39,19 +39,25 @@ export async function loadAgentMemoryContext(
   const sections: string[] = [];
   let remainingBytes = maxBytes - fixedBytes;
   for (const document of documents) {
-    const heading = `${sections.length === 0 ? "" : "\n\n"}## ${document.scope}: ${document.path} (revision ${document.revision})\n`;
+    const heading = `${sections.length === 0 ? "" : "\n\n"}## ${document.scope}: ${escapePromptData(document.path)} (revision ${document.revision})\n`;
     const headingBytes = byteLength(heading);
     if (headingBytes > remainingBytes) break;
     sections.push(heading);
     remainingBytes -= headingBytes;
 
-    const content = truncateUtf8(document.content, remainingBytes);
+    // Escaped so stored text cannot close the data block; truncation measures the escaped text.
+    const escaped = escapePromptData(document.content);
+    const content = truncateUtf8(escaped, remainingBytes);
     sections.push(content);
     remainingBytes -= byteLength(content);
-    if (content !== document.content) break;
+    if (content !== escaped) break;
   }
 
   return `${preamble}${sections.join("")}${closing}`;
+}
+
+function escapePromptData(value: string): string {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
 function byteLength(value: string): number {
