@@ -4,6 +4,7 @@ import type {
   ConnectorEvent,
   ConnectorProvider,
   ConnectorTool,
+  SecretStore,
 } from "@rakazo/adapter-kit";
 import type { PrismaClient } from "@rakazo/db";
 import { z } from "zod";
@@ -45,7 +46,6 @@ import {
   createSafeRemoteFetch,
   listRemoteMcpTools,
 } from "./remote-mcp.js";
-import type { EncryptedSecretStore } from "./secrets.js";
 
 const ModelHeaderName = HeaderName.refine(
   (name) => !isSensitiveHeader(name),
@@ -102,7 +102,7 @@ type RemoteRequestPolicy = RemoteConnectorDependencies & RemoteUrlPolicy;
 export class InstalledConnectorProvider implements ConnectorProvider {
   constructor(
     private readonly prisma: PrismaClient,
-    private readonly secrets: EncryptedSecretStore,
+    private readonly secrets: SecretStore,
     private readonly remote: RemoteConnectorDependencies = {},
     /** Instance flag letting every user reach loopback / LAN endpoints. */
     private readonly allowPrivateEndpoint = false,
@@ -345,7 +345,7 @@ export class InstalledConnectorProvider implements ConnectorProvider {
         spaceId: context.spaceId,
       },
     });
-    return row ? this.secrets.load(row.ciphertext, row.id) : undefined;
+    return row ? await this.secrets.load(row.ciphertext, row.id) : undefined;
   }
 }
 

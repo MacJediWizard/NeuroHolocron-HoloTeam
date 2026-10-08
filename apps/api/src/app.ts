@@ -43,7 +43,6 @@ import {
   InMemoryRealtimeFanout,
   InstalledConnectorProvider,
   IntegrationProviderSettings,
-  infisicalReferencedKeys,
   isComposioEnabled,
   isMessagingSurfaceEnabled,
   isPipedreamEnabled,
@@ -68,15 +67,15 @@ import {
   sandboxProviderOptionsFromEnv,
   stripeBillingConfigFromEnv,
   toTeamChatInbound,
+  withSecretPersistence,
 } from "@rakazo/adapters";
 import {
   createAuth,
   isBlockedAuthPath,
   loopbackTwinOrigins,
-  OIDC_PROVIDER_ID,
-  oidcRegistered,
+  migrateOidcAccountIds,
 } from "@rakazo/auth";
-import type { Actor } from "@rakazo/contracts";
+import type { Actor, AuthCapabilities } from "@rakazo/contracts";
 import { signupAllowlistBootUpdate, signupPolicyFromEnv } from "@rakazo/core";
 import type { Pool, PrismaClient } from "@rakazo/db";
 import {
@@ -192,7 +191,7 @@ export async function createApp(
         poolMax: parsePositiveInteger(process.env.DB_POOL_MAX, 4),
         applicationName: "rakazo-api",
       });
-  const { prisma } = created;
+  let { prisma } = created;
   const realtime =
     realtimeOverride ??
     (created.pool
@@ -201,9 +200,11 @@ export async function createApp(
           publisher: created.pool,
         })
       : new InMemoryRealtimeFanout());
-  const secrets = await createSecretStore(process.env, env.encryptionKey, realtime, {
-    referencedKeys: () => infisicalReferencedKeys(prisma),
-  });
+  const secrets = createSecretStore(env.encryptionKey, process.env, realtime);
+  await secrets.start();
+  if (secrets.describe().capabilities.degraded)
+    logger.warn("Secret storage degraded; encrypted credentials remain available");
+  prisma = withSecretPersistence(prisma, secrets);
   const events = createThreadEvents(prisma, realtime, {
     runSecretWriter: createRunSecretWriter(secrets),
   });
@@ -377,25 +378,34 @@ export async function createApp(
   const notifications = new ExpoPushProvider(env.dataDir, (sessionId) =>
     pushSessionExpiresAt(prisma, sessionId),
   );
+  // Fork: rewrite pre-sync OIDC account ids (raw sub) to upstream's issuer-bound
+  // subject before any sign-in. Idempotent, so it runs at every startup.
+  if (env.oidc) {
+    const { migrated } = await migrateOidcAccountIds(prisma, env.oidc.issuer, (message, details) =>
+      logger.warn(message, details),
+    );
+    if (migrated > 0) logger.info("Migrated OIDC account ids", { migrated });
+  }
   const auth = createAuth(prisma, {
-    secret: env.authSecret,
-    baseURL: env.authUrl,
-    webOrigin: env.webOrigin,
-    signupsEnabled: env.signupsEnabled,
-    signupAllowlist: env.signupAllowlist,
+    passwordAuth: env.passwordAuth,
+    // Fork: report group mappings that name a missing Space.
     oidc: env.oidc && {
       ...env.oidc,
       onGroupSpaceMissing: (spaceIds) =>
         getLogger().error("OIDC_GROUP_SPACES names a Space that does not exist", { spaceIds }),
     },
-    passwordAuth: env.passwordAuth,
+    secret: env.authSecret,
+    baseURL: env.authUrl,
+    webOrigin: env.webOrigin,
+    signupsEnabled: env.signupsEnabled,
+    signupAllowlist: env.signupAllowlist,
     email,
     onEmailError: (error) => getLogger().error("transactional email delivery failed", error),
     extraOrigins: MOBILE_AUTH_ORIGINS,
     beforeDeleteUser: async (userId) => {
       // First, so a provider failure aborts deletion before anything is destroyed.
       await billing?.cancelForDeletedUser(userId);
-      // Shared Spaces the user owns pass to another member and work in Spaces
+      // Fork: Shared Spaces the user owns pass to another member and work in Spaces
       // the user only joined stays with the Space owner, so the bots left below
       // are the ones in Spaces nobody else belongs to.
       await handOverAccount(prisma, userId);
@@ -579,24 +589,19 @@ export async function createApp(
       credentials: true,
     }),
   );
-  const sso =
-    env.oidc && (await oidcRegistered(auth))
-      ? { providerId: OIDC_PROVIDER_ID, name: env.oidc.name }
-      : null;
-  if (env.oidc && !sso) {
-    // Restarting retries discovery; an SSO-only server would otherwise run with no sign-in.
-    if (!env.passwordAuth) throw new Error("OIDC discovery failed and password sign-in is off");
-    getLogger().error("OIDC discovery failed; single sign-on is unavailable until restart");
-  }
-  app.get("/api/auth/capabilities", (c) =>
-    c.json({
-      passwordAuth: env.passwordAuth,
-      passwordReset: env.passwordAuth && Boolean(email),
-      resetUrl: env.passwordAuth && email ? new URL("/reset-password", env.webOrigin).href : null,
-      sso,
+  app.get("/api/auth/capabilities", (c) => {
+    c.header("cache-control", "no-store");
+    return c.json({
+      sso: env.oidc
+        ? { name: env.oidc.name, availability: auth.ssoAvailability() ?? "checking" }
+        : null,
+      passwordAuth: env.passwordAuth !== false,
+      passwordReset: env.passwordAuth !== false && Boolean(email),
+      resetUrl:
+        env.passwordAuth !== false && email ? new URL("/reset-password", env.webOrigin).href : null,
       billing: Boolean(billing),
-    }),
-  );
+    } satisfies AuthCapabilities);
+  });
   if (localEmailEmulator && env.nodeEnv === "development") {
     app.get(
       "/api/dev/emails",
@@ -944,6 +949,8 @@ export async function createApp(
       billing: billingProvider?.describe().id ?? null,
       jobs: jobKind,
       realtime: realtime.describe().id,
+      secrets: secrets.describe(),
+      degraded: secrets.describe().capabilities.degraded ?? false,
       revision: env.gitSha ?? null,
     })),
   );
@@ -963,6 +970,7 @@ export async function createApp(
     stop: async () => {
       // Abort in-flight continueRun boot waits before draining jobs so stop() cannot sit
       // on waitForComputerReady for the full boot-wait window during shared Postgres journeys.
+      auth.disposeOidcDiscovery();
       shutdown.abort();
       oauthLogins.abortAll();
       messagingStopped = true;

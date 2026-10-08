@@ -57,7 +57,7 @@ import {
   sessionPartitionForServerUrl,
 } from "./setup-config.js";
 import { clearSetup, readSetup, writeSetup } from "./setup-store.js";
-import { shouldOpenInAppPopup } from "./window-open.js";
+import { oauthPopupSessionPreferences, shouldOpenInAppPopup } from "./window-open.js";
 import {
   browserWindowOptions,
   developmentIconFile,
@@ -273,7 +273,7 @@ function createWindow(url: string, partition: string | null) {
     if (shouldOpenInAppPopup(appOrigin, childUrl, frameName)) {
       return {
         action: "allow",
-        overrideBrowserWindowOptions: oauthPopupWindowOptions(),
+        overrideBrowserWindowOptions: oauthPopupWindowOptions(partition),
       };
     }
     const external = safeExternalUrl(childUrl);
@@ -289,7 +289,7 @@ function createWindow(url: string, partition: string | null) {
   // The popup has no address bar, so a loopback redirect would otherwise strand
   // the user on a blank window holding the authorization code in a URL they
   // cannot read. Capture it here and hand it to the app instead.
-  win.webContents.on("did-create-window", (popup) => {
+  win.webContents.on("did-create-window", (popup, { frameName }) => {
     const capture = (details: {
       preventDefault: () => void;
       url: string;
@@ -298,6 +298,7 @@ function createWindow(url: string, partition: string | null) {
       // will-redirect can fire for iframes; only the top-level callback counts.
       if (details.isMainFrame === false) return;
       const callback = oauthCallbackFrom(details.url, {
+        frameName,
         excludeOrigins: appOrigin !== null ? [appOrigin] : [],
       });
       if (!callback) return;
@@ -562,7 +563,7 @@ async function installBundledRenderer(
   markOnce("rk:main:bundled-renderer-ready");
 }
 
-function oauthPopupWindowOptions() {
+function oauthPopupWindowOptions(partition: string | null) {
   return {
     width: 560,
     height: 720,
@@ -570,12 +571,7 @@ function oauthPopupWindowOptions() {
     titleBarStyle: "default" as const,
     autoHideMenuBar: true,
     backgroundColor: "#0B0C0E",
-    webPreferences: {
-      preload: "",
-      nodeIntegration: false,
-      contextIsolation: true,
-      sandbox: true,
-    },
+    webPreferences: oauthPopupSessionPreferences(partition),
   };
 }
 

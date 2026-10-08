@@ -130,7 +130,10 @@ async function leaveSpace(
   await prisma.$transaction(async (tx) => {
     // An owner is never removed by group sync, whatever else their role lists.
     if (await isSpaceOwner(tx, { spaceId: space.id, userId })) return;
-    await tx.spaceMember.deleteMany({ where: { spaceId: space.id, userId } });
+    const removed = await tx.spaceMember.deleteMany({ where: { spaceId: space.id, userId } });
+    // Only a user who was in this Space leaves; an organization membership the
+    // group never granted stays put.
+    if (removed.count === 0) return;
     // Without a Space left in the organization, the organization membership goes too.
     const remaining = await tx.spaceMember.count({
       where: { organizationId: space.organizationId, userId },

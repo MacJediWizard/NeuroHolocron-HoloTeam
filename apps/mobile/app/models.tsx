@@ -42,7 +42,9 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { NativeActionButton } from "../components/native-action-button";
 import { NativeSwitch } from "../components/native-switch";
-import { type MobileMe, type MobileModel, type MobileModelCredential, rpc } from "../lib/api";
+import { Checkmark, Chevron } from "../components/row-accessories";
+import type { MobileMe, MobileModel, MobileModelCredential } from "../lib/api";
+import { rpc } from "../lib/api";
 import { mobileTokens } from "../lib/appearance";
 import { useI18n } from "../lib/i18n";
 import { presentMessageActionSheet } from "../lib/message-action-sheet";
@@ -52,6 +54,7 @@ import {
   waitForModelOAuth,
 } from "../lib/model-auth";
 import { native, useResolvedAppearance, useThemedStyles } from "../lib/native";
+import { errorText } from "../lib/user-error";
 
 function connectionMaxTokensField(providerId: string, stored: number | undefined): string {
   if (providerId === OPENAI_COMPATIBLE_PROVIDER_ID) {
@@ -235,7 +238,7 @@ export default function Models() {
       void load()
         .catch((err: unknown) =>
           publishFeedback("connection", {
-            error: err instanceof Error ? err.message : t("Could not load model settings"),
+            error: errorText(err, t("Could not load model settings")),
           }),
         )
         .finally(() => setLoading(false));
@@ -433,7 +436,7 @@ export default function Models() {
       },
       onError: (err) =>
         publishFeedback("probe", {
-          error: err instanceof Error ? err.message : t("Could not reach this model server"),
+          error: errorText(err, t("Could not reach this model server")),
         }),
     });
   }
@@ -468,7 +471,7 @@ export default function Models() {
       });
     } catch (err) {
       publishFeedback("model", {
-        error: err instanceof Error ? err.message : t("Could not change the default model"),
+        error: errorText(err, t("Could not change the default model")),
       });
     } finally {
       setPending(null);
@@ -492,7 +495,7 @@ export default function Models() {
       });
     } catch (err) {
       publishFeedback("connection", {
-        error: err instanceof Error ? err.message : t("Could not disconnect this provider"),
+        error: errorText(err, t("Could not disconnect this provider")),
       });
     } finally {
       setPending(null);
@@ -613,7 +616,7 @@ export default function Models() {
       });
     } catch (err) {
       publishFeedback("connection", {
-        error: err instanceof Error ? err.message : t("Could not connect this provider"),
+        error: errorText(err, t("Could not connect this provider")),
       });
     } finally {
       setPending(null);
@@ -668,7 +671,7 @@ export default function Models() {
       oauthLoginIdRef.current = null;
       if (loginId) void rpc("models/cancelOAuth", { loginId }).catch(() => undefined);
       publishFeedback("connection", {
-        error: err instanceof Error ? err.message : t("Could not start sign-in"),
+        error: errorText(err, t("Could not start sign-in")),
       });
       setOauth(null);
     } finally {
@@ -709,7 +712,7 @@ export default function Models() {
         setPasteCode(code);
       }
       publishFeedback("connection", {
-        error: err instanceof Error ? err.message : t("Could not finish sign-in"),
+        error: errorText(err, t("Could not finish sign-in")),
       });
     } finally {
       oauthCodeSubmittingRef.current = false;
@@ -731,7 +734,9 @@ export default function Models() {
           style={({ pressed }) => [styles.modelRow, styles.singleRow, pressed && styles.pressed]}
         >
           <Text style={styles.modelLabel}>{label}</Text>
-          <Text style={styles.chevron}>{expanded ? "⌄" : "›"}</Text>
+          <View style={styles.chevron}>
+            <Chevron expanded={expanded} />
+          </View>
         </Pressable>
       </View>
     );
@@ -805,15 +810,12 @@ export default function Models() {
               onPress={() => stageCompatibleModelId(entry)}
               style={({ pressed }) => [
                 styles.modelRow,
-                entry === modelId && styles.selectedRow,
                 probing && styles.disabled,
                 pressed && styles.pressed,
               ]}
             >
-              <View style={styles.radio}>
-                {entry === modelId ? <View style={styles.radioDot} /> : null}
-              </View>
               <Text style={styles.modelLabel}>{entry}</Text>
+              {entry === modelId ? <Checkmark /> : null}
             </Pressable>
           ))}
           <Pressable
@@ -827,7 +829,6 @@ export default function Models() {
               pressed && styles.pressed,
             ]}
           >
-            <View style={styles.radio} />
             <Text style={styles.modelLabel}>{t("Other model…")}</Text>
           </Pressable>
         </View>
@@ -1001,16 +1002,10 @@ export default function Models() {
                   );
                   clearFeedback();
                 }}
-                style={({ pressed }) => [
-                  styles.modelRow,
-                  entry.id === selected.id && styles.selectedRow,
-                  pressed && styles.pressed,
-                ]}
+                style={({ pressed }) => [styles.modelRow, pressed && styles.pressed]}
               >
-                <View style={styles.radio}>
-                  {entry.id === selected.id ? <View style={styles.radioDot} /> : null}
-                </View>
                 <Text style={styles.modelLabel}>{entry.label}</Text>
+                {entry.id === selected.id ? <Checkmark /> : null}
               </Pressable>
               {stagedModelHidden && noModelMatches && index === 0 ? (
                 <View style={styles.modelRow}>
@@ -1091,7 +1086,7 @@ export default function Models() {
                     autoCorrect={false}
                     placeholder={t("http://localhost:53692/callback?code=…")}
                     placeholderTextColor={native.secondaryLabel}
-                    style={styles.keyInput}
+                    style={[styles.keyInput, styles.nestedInput]}
                   />
                   <NativeActionButton
                     disabled={!pasteCode.trim()}
@@ -1256,9 +1251,10 @@ export default function Models() {
           {t("Connected · {label}", { label: credential.label })}
         </Text>
       </View>
-      <Pressable
-        accessibilityRole="button"
+      <NativeActionButton
         disabled={busy}
+        fill={false}
+        label={pending === "disconnect" ? t("Disconnecting…") : t("Disconnect")}
         onPress={() => {
           const name = selected?.providerName ?? selected?.provider ?? "";
           Alert.alert(
@@ -1274,12 +1270,8 @@ export default function Models() {
             ],
           );
         }}
-        style={({ pressed }) => [pressed && styles.pressed, busy && styles.disabled]}
-      >
-        <Text style={styles.disconnectLabel}>
-          {pending === "disconnect" ? t("Disconnecting…") : t("Disconnect")}
-        </Text>
-      </Pressable>
+        prominence="destructive"
+      />
     </View>
   ) : null;
   if (loading && catalog.length === 0) {
@@ -1294,6 +1286,7 @@ export default function Models() {
     <SafeAreaView edges={["bottom"]} style={styles.screen}>
       <ScrollView
         contentContainerStyle={styles.content}
+        contentInsetAdjustmentBehavior="automatic"
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
       >
@@ -1327,11 +1320,7 @@ export default function Models() {
                     accessibilityRole="button"
                     accessibilityState={{ selected: group.id === provider }}
                     onPress={() => chooseProvider(group.id)}
-                    style={({ pressed }) => [
-                      styles.providerRow,
-                      group.id === provider && styles.selectedRow,
-                      pressed && styles.pressed,
-                    ]}
+                    style={({ pressed }) => [styles.providerRow, pressed && styles.pressed]}
                   >
                     <View style={styles.providerCopy}>
                       <Text style={styles.providerName}>{group.name}</Text>
@@ -1342,6 +1331,7 @@ export default function Models() {
                           })}
                       </Text>
                     </View>
+                    {group.id === provider ? <Checkmark /> : null}
                   </Pressable>
                 );
               })}
@@ -1356,11 +1346,7 @@ export default function Models() {
               accessibilityRole="button"
               accessibilityState={{ selected: group.id === provider }}
               onPress={() => chooseProvider(group.id)}
-              style={({ pressed }) => [
-                styles.providerRow,
-                group.id === provider && styles.selectedRow,
-                pressed && styles.pressed,
-              ]}
+              style={({ pressed }) => [styles.providerRow, pressed && styles.pressed]}
             >
               <View style={styles.providerCopy}>
                 <Text style={styles.providerName}>{group.name}</Text>
@@ -1370,6 +1356,7 @@ export default function Models() {
                   })}
                 </Text>
               </View>
+              {group.id === provider ? <Checkmark /> : null}
             </Pressable>
           ))}
           {groups.length > featuredProviders.length ? (
@@ -1432,6 +1419,7 @@ function createModelsStyles() {
       justifyContent: "center",
     },
     content: {
+      width: "100%",
       padding: 20,
       gap: 12,
       paddingBottom: 40,
@@ -1504,10 +1492,6 @@ function createModelsStyles() {
       gap: 12,
       marginTop: 8,
     },
-    disconnectLabel: {
-      color: native.secondaryLabel,
-      fontSize: 15,
-    },
     maintenanceSection: {
       marginTop: 16,
       borderTopWidth: StyleSheet.hairlineWidth,
@@ -1524,21 +1508,6 @@ function createModelsStyles() {
       borderBottomWidth: StyleSheet.hairlineWidth,
       borderBottomColor: native.fillPressed,
     },
-    radio: {
-      width: 20,
-      height: 20,
-      borderRadius: 10,
-      borderWidth: 1,
-      borderColor: native.secondaryLabel,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    radioDot: {
-      width: 10,
-      height: 10,
-      borderRadius: 5,
-      backgroundColor: native.label,
-    },
     modelLabel: {
       flex: 1,
       color: native.label,
@@ -1546,9 +1515,6 @@ function createModelsStyles() {
     },
     mutedLabel: {
       color: native.secondaryLabel,
-    },
-    selectedRow: {
-      backgroundColor: tokens.accent,
     },
     singleRow: {
       borderBottomWidth: 0,
@@ -1569,14 +1535,12 @@ function createModelsStyles() {
       marginTop: 8,
     },
     chevron: {
-      color: native.secondaryLabel,
-      fontSize: 22,
-      fontWeight: "300",
+      width: 16,
+      alignItems: "center",
     },
     oauthCard: {
       borderRadius: 14,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: native.fillPressed,
+      backgroundColor: native.fill,
       padding: 16,
       marginTop: 8,
     },
@@ -1594,6 +1558,10 @@ function createModelsStyles() {
       marginTop: 10,
       marginBottom: 2,
     },
+    nestedInput: {
+      // The OAuth card is already a fill; the page color keeps the field visible on it.
+      backgroundColor: native.page,
+    },
     keySection: {
       marginTop: 4,
     },
@@ -1606,35 +1574,6 @@ function createModelsStyles() {
       paddingVertical: 10,
       marginTop: 4,
       fontSize: 16,
-    },
-    primaryButton: {
-      minHeight: 48,
-      borderRadius: 12,
-      alignItems: "center",
-      justifyContent: "center",
-      backgroundColor: native.label,
-      marginTop: 12,
-      paddingHorizontal: 16,
-    },
-    primaryLabel: {
-      color: native.page,
-      fontSize: 16,
-      fontWeight: "700",
-    },
-    outlineButton: {
-      minHeight: 48,
-      borderRadius: 12,
-      borderWidth: StyleSheet.hairlineWidth,
-      borderColor: native.fillPressed,
-      alignItems: "center",
-      justifyContent: "center",
-      marginTop: 12,
-      paddingHorizontal: 16,
-    },
-    outlineLabel: {
-      color: native.label,
-      fontSize: 16,
-      fontWeight: "600",
     },
     error: {
       color: tokens.destructive,

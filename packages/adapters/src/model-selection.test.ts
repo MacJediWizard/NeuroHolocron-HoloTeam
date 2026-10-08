@@ -295,7 +295,9 @@ describe("space catalog auth", () => {
       ],
       secrets: [{ id: "secret-oauth", ciphertext: "cipher-oauth" }],
     });
-    const load = vi.fn((ciphertext: string) => (ciphertext === "cipher-oauth" ? oauth : apiKey));
+    const load = vi.fn(async (ciphertext: string) =>
+      ciphertext === "cipher-oauth" ? oauth : apiKey,
+    );
 
     const auth = await modelCredentialAuthKindsForSpace(prisma, { load }, scope);
 
@@ -338,7 +340,7 @@ describe("space catalog auth", () => {
         { id: "secret-api", ciphertext: "cipher-api" },
       ],
     });
-    const load = vi.fn((_ciphertext: string, secretId: string) =>
+    const load = vi.fn(async (_ciphertext: string, secretId: unknown) =>
       secretId === "secret-oauth" ? oauth : apiKey,
     );
 
@@ -389,7 +391,7 @@ describe("space catalog auth", () => {
     const auth = await modelCredentialAuthKindsForSpace(
       prisma,
       {
-        load: (_ciphertext: string, secretId: string) =>
+        load: async (_ciphertext: string, secretId: unknown) =>
           secretId === "secret-oauth" ? oauth : apiKey,
       },
       scope,
@@ -413,7 +415,7 @@ describe("space catalog auth", () => {
         { id: "secret-api", ciphertext: "cipher-api" },
       ],
     });
-    const load = vi.fn((ciphertext: string) => {
+    const load = vi.fn(async (ciphertext: string) => {
       if (ciphertext === "cipher-broken") throw new Error("unreadable");
       return apiKey;
     });
@@ -460,7 +462,7 @@ describe("space catalog auth", () => {
         { id: "secret-oauth", ciphertext: "cipher-oauth" },
       ],
     });
-    const load = vi.fn((_ciphertext: string, secretId: string) => {
+    const load = vi.fn(async (_ciphertext: string, secretId: unknown) => {
       if (secretId === "secret-oauth") throw new Error("unreadable");
       return apiKey;
     });
@@ -482,7 +484,7 @@ describe("space catalog auth", () => {
       preferences: [],
       secrets: [{ id: "secret-or", ciphertext: "cipher-or" }],
     });
-    const load = vi.fn(() => apiKey);
+    const load = vi.fn(async () => apiKey);
 
     const auth = await modelCredentialAuthKindsForSpace(prisma, { load }, scope);
 
@@ -546,7 +548,7 @@ describe("stored model auth", () => {
       return null;
     });
     const prisma = { secret: { findFirst } } as unknown as PrismaClient;
-    const load = vi.fn((ciphertext: string) => {
+    const load = vi.fn(async (ciphertext: string) => {
       if (ciphertext === "cipher-broken") throw new Error("unreadable");
       return JSON.stringify({
         type: "oauth",
@@ -590,7 +592,7 @@ describe("stored model auth", () => {
       },
     } as unknown as PrismaClient;
     // Decrypts fine, but the stored JSON claims oauth without a credential.
-    const load = vi.fn(() => JSON.stringify({ kind: "oauth" }));
+    const load = vi.fn(async () => JSON.stringify({ kind: "oauth" }));
     const live = {
       read: vi.fn(async () => [
         {
@@ -632,7 +634,7 @@ describe("stored model auth", () => {
       expires: Date.now() + 60_000,
       accountId: "acct-live",
     });
-    const load = vi.fn(() => oauthWithAccount);
+    const load = vi.fn(async () => oauthWithAccount);
     const live = {
       read: vi.fn(async (_userId: string, account: { accountId: string }) =>
         account.accountId === "acct-live"
@@ -691,7 +693,7 @@ describe("stored model auth", () => {
         })),
       },
     } as unknown as PrismaClient;
-    const load = vi.fn(() =>
+    const load = vi.fn(async () =>
       JSON.stringify({
         type: "oauth",
         access: "access-token",
@@ -742,7 +744,7 @@ describe("stored model auth", () => {
       expires: Date.now() - 1_000,
       accountId: "acct-live",
     });
-    const load = vi.fn(() => plaintext);
+    const load = vi.fn(async () => plaintext);
     const read = vi.fn(
       async (
         _userId: string,
@@ -810,7 +812,7 @@ describe("stored model auth", () => {
         })),
       },
     } as unknown as PrismaClient;
-    const load = vi.fn(() =>
+    const load = vi.fn(async () =>
       JSON.stringify({
         type: "oauth",
         access: "access-token",

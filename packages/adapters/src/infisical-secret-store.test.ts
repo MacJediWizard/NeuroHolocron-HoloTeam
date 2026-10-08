@@ -1,502 +1,226 @@
-import type { AdapterContext } from "@rakazo/adapter-kit";
-import type { PrismaClient } from "@rakazo/db";
-import { installLogger } from "@rakazo/logging";
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { migrateSecretsToInfisical } from "./infisical-secret-migration.js";
-import type { InfisicalSecretStoreOptions } from "./infisical-secret-store.js";
+// Fork compat tests: Legiara and spartacus-services share Infisical keys in the fork format
+// `infisical:SECRET_<recordId with non-alphanumerics as _>[__v<base36>_<hex>]`.
+import type { AdapterContext, RealtimeFanout } from "@rakazo/adapter-kit";
+import { SecretNotFoundError } from "@rakazo/adapter-kit";
+import { describe, expect, it, vi } from "vitest";
+import { credentialDigest } from "./credential-digest.js";
+import { InfisicalSecretStore, isInfisicalRef } from "./infisical-secret-store.js";
+import type { SecretMigrationRepository, SecretMigrationRow } from "./secret-migration.js";
+import { migrateSecrets } from "./secret-migration.js";
 import {
+  ComposedSecretStore,
   createSecretStore,
-  InfisicalSecretStore,
-  infisicalSecretKey,
-  UNREFERENCED_KEY_GRACE_MS,
-} from "./infisical-secret-store.js";
-import { InMemoryRealtimeFanout } from "./realtime.js";
+  secretStoreOptionsFromEnv,
+} from "./secret-store-factory.js";
+import { infisicalFake } from "./secret-store-fake.js";
 import { EncryptedSecretStore } from "./secrets.js";
 
-const KEY = "test-encryption-key-with-enough-length";
 const context: AdapterContext = {
-  operationId: "op",
+  operationId: "op-1",
   traceId: "trace",
   spaceId: "space",
   userId: "user",
   signal: new AbortController().signal,
 };
+const signal = new AbortController().signal;
 
-/** In-memory stand-in for the Infisical endpoints the store calls. */
-class FakeInfisical {
-  secrets = new Map<string, { value: string; comment?: string }>();
-  logins = 0;
-  rejectNextToken = false;
-  requests: string[] = [];
-  /** Holds folder reads until released, to interleave them with writes. */
-  holdReads: (() => void)[] | undefined;
-
-  fetch: typeof fetch = async (input, init) => {
-    const url = new URL(String(input));
-    const method = init?.method ?? "GET";
-    this.requests.push(`${method} ${url.pathname}`);
-    const body = init?.body ? JSON.parse(String(init.body)) : {};
-    if (url.pathname === "/api/v1/auth/universal-auth/login") {
-      if (body.clientSecret !== "client-secret") return json({ message: "denied" }, 401);
-      this.logins += 1;
-      return json({ accessToken: `token-${this.logins}`, expiresIn: 3600 });
-    }
-    const auth = new Headers(init?.headers).get("authorization");
-    if (this.rejectNextToken) {
-      this.rejectNextToken = false;
-      return json({ message: "expired" }, 401);
-    }
-    if (auth !== `Bearer token-${this.logins}`) return json({ message: "denied" }, 401);
-    if (url.pathname === "/api/v3/secrets/raw" && method === "GET") {
-      if (url.searchParams.get("include_imports") !== "false") return json({}, 400);
-      const snapshot = [...this.secrets].map(([secretKey, { value }]) => ({
-        secretKey,
-        secretValue: value,
-      }));
-      if (this.holdReads) await new Promise<void>((release) => this.holdReads?.push(release));
-      return json({ secrets: snapshot });
-    }
-    const key = decodeURIComponent(url.pathname.replace("/api/v3/secrets/raw/", ""));
-    if (method === "POST") {
-      if (this.secrets.has(key)) return json({ message: `secret ${body.secretValue} exists` }, 400);
-      this.secrets.set(key, { value: body.secretValue, comment: body.secretComment });
-      return json({});
-    }
-    if (method === "PATCH") {
-      const existing = this.secrets.get(key);
-      if (!existing) return json({}, 404);
-      existing.value = body.secretValue;
-      return json({});
-    }
-    if (method === "DELETE") {
-      if (body.secretPath !== "/app") return json({}, 422);
-      if (!this.secrets.delete(key)) return json({}, 404);
-      return json({});
-    }
-    return json({}, 404);
-  };
+async function composed() {
+  const fake = infisicalFake();
+  const store = new ComposedSecretStore(
+    new EncryptedSecretStore("key"),
+    new InfisicalSecretStore(fake.options),
+  );
+  await store.start();
+  return { fake, store };
 }
 
-function json(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { "content-type": "application/json" },
-  });
-}
-
-function options(fake: FakeInfisical): InfisicalSecretStoreOptions {
-  return {
-    siteUrl: "https://infisical.test",
-    clientId: "client-id",
-    clientSecret: "client-secret",
-    projectId: "project",
-    environment: "prod",
-    secretPath: "/app",
-    fetch: fake.fetch,
-  };
-}
-
-const keyOf = (stored: { ciphertext: string }) => stored.ciphertext.slice("infisical:".length);
-
-const stores: InfisicalSecretStore[] = [];
-async function started(
-  fake: FakeInfisical,
-  realtime?: InMemoryRealtimeFanout,
-  overrides: Partial<InfisicalSecretStoreOptions> = {},
-) {
-  const store = new InfisicalSecretStore(KEY, { ...options(fake), ...overrides });
-  stores.push(store);
-  await store.start(realtime);
-  return store;
-}
-
-afterEach(async () => {
-  await Promise.all(stores.splice(0).map((store) => store.close()));
-});
-
-describe("InfisicalSecretStore", () => {
-  it("writes values to Infisical and keeps only a reference in the row", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    const stored = await store.put("sk-live-value", context, "rec1");
-    expect(stored.id).toBe("rec1");
-    expect(stored.ciphertext).toMatch(/^infisical:SECRET_rec1__v[0-9a-z]+_[0-9a-f]+$/);
-    expect(fake.secrets.get(keyOf(stored))).toEqual({ value: "sk-live-value", comment: "op" });
-    expect(store.load(stored.ciphertext, "rec1")).toBe("sk-live-value");
+describe("fork Infisical key format", () => {
+  it("recognises every infisical: ref", () => {
+    expect(isInfisicalRef("infisical:SECRET_abc")).toBe(true);
+    expect(isInfisicalRef("infisical:v1:rakazo_x")).toBe(true);
+    expect(isInfisicalRef("v2:abc")).toBe(false);
   });
 
-  it("binds a reference to its record", async () => {
-    const store = await started(new FakeInfisical());
-    const stored = await store.put("value", context, "rec1");
-    expect(() => store.load(stored.ciphertext, "rec2")).toThrow("does not match");
-    expect(() => store.load(stored.ciphertext.replace("rec1", "rec10"), "rec1")).toThrow(
-      "does not match",
+  it("loads legacy unversioned and versioned refs through the composed store", async () => {
+    const { fake, store } = await composed();
+    fake.values.set("SECRET_rec_1", "legacy value");
+    fake.values.set("SECRET_rec_1__vmabc12_0a1b2c3d", "versioned value");
+    fake.values.set("SECRET_integration_provider_github", "provider value");
+    await expect(store.load("infisical:SECRET_rec_1", { recordId: "rec-1", signal })).resolves.toBe(
+      "legacy value",
     );
+    await expect(
+      store.load("infisical:SECRET_rec_1__vmabc12_0a1b2c3d", { recordId: "rec-1", signal }),
+    ).resolves.toBe("versioned value");
+    await expect(
+      store.load("infisical:SECRET_integration_provider_github", {
+        recordId: "integration-provider:github",
+        signal,
+      }),
+    ).resolves.toBe("provider value");
   });
 
-  it("keeps the committed value when a replacement is never committed", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    const committed = await store.put("first", context, "rec1");
-    // The caller's database write fails after this, so the row keeps `committed`.
-    const abandoned = await store.put("second", context, "rec1");
-    expect(keyOf(abandoned)).not.toBe(keyOf(committed));
-    expect(fake.secrets.get(keyOf(committed))?.value).toBe("first");
-    expect(store.load(committed.ciphertext, "rec1")).toBe("first");
+  it("rejects a key bound to a different record or with a malformed suffix", async () => {
+    const { fake, store } = await composed();
+    fake.values.set("SECRET_rec_2", "other row");
+    fake.values.set("SECRET_rec_1__vbad", "bad suffix");
+    await expect(
+      store.load("infisical:SECRET_rec_2", { recordId: "rec-1", signal }),
+    ).rejects.toBeInstanceOf(SecretNotFoundError);
+    await expect(
+      store.load("infisical:SECRET_rec_1__vbad", { recordId: "rec-1", signal }),
+    ).rejects.toBeInstanceOf(SecretNotFoundError);
+    await expect(
+      store.load("infisical:SECRET_rec_10", { recordId: "rec-1", signal }),
+    ).rejects.toBeInstanceOf(SecretNotFoundError);
   });
 
-  it("still reads keys written before saves were versioned", async () => {
-    const fake = new FakeInfisical();
-    fake.secrets.set("SECRET_rec1", { value: "legacy" });
-    const store = await started(fake);
-    expect(store.load("infisical:SECRET_rec1", "rec1")).toBe("legacy");
-  });
-
-  it("still reads rows encrypted before the switch", async () => {
-    const legacy = await new EncryptedSecretStore(KEY).put("old-value", context, "rec1");
-    const store = await started(new FakeInfisical());
-    expect(store.load(legacy.ciphertext, "rec1")).toBe("old-value");
-  });
-
-  it("keeps ephemeral values encrypted locally", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    const stored = await store.put("123456", context, "otp", { ephemeral: true });
-    expect(stored.ciphertext.startsWith("v2:")).toBe(true);
-    expect(fake.secrets.size).toBe(0);
-    expect(store.load(stored.ciphertext, "otp")).toBe("123456");
-  });
-
-  it("picks up values edited in Infisical on refresh and reports a new revision", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    const stored = await store.put("before", context, "rec1");
-    const before = store.revision(stored.ciphertext, "rec1");
-    await store.refresh();
-    expect(store.revision(stored.ciphertext, "rec1")).toBe(before);
-    fake.secrets.set(keyOf(stored), { value: "after" });
-    await store.refresh();
-    expect(store.load(stored.ciphertext, "rec1")).toBe("after");
-    expect(store.revision(stored.ciphertext, "rec1")).not.toBe(before);
-  });
-
-  it("does not let an older folder read undo a newer write", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    const old = await store.put("old", context, "rec1");
-    fake.holdReads = [];
-    const reading = store.refresh();
-    await vi.waitFor(() => expect(fake.holdReads).toHaveLength(1));
-    const fresh = await store.put("new", context, "rec2");
-    await store.remove(keyOf(old));
-    for (const release of fake.holdReads.splice(0)) release();
-    fake.holdReads = undefined;
-    await reading;
-    expect(store.load(fresh.ciphertext, "rec2")).toBe("new");
-    expect(store.keys()).toEqual([keyOf(fresh)]);
-  });
-
-  it("reads again when asked to refresh while a read is in flight", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    fake.holdReads = [];
-    const first = store.refresh();
-    await vi.waitFor(() => expect(fake.holdReads).toHaveLength(1));
-    // Another process writes after the in-flight read took its snapshot.
-    fake.secrets.set("SECRET_rec1", { value: "remote" });
-    const second = store.refresh();
-    fake.holdReads.splice(0)[0]?.();
-    await first;
-    await vi.waitFor(() => expect(fake.holdReads).toHaveLength(1));
-    fake.holdReads.splice(0)[0]?.();
-    fake.holdReads = undefined;
-    await second;
-    expect(store.load("infisical:SECRET_rec1", "rec1")).toBe("remote");
-  });
-
-  it("tells other processes to refresh after a write", async () => {
-    const fake = new FakeInfisical();
-    const realtime = new InMemoryRealtimeFanout();
-    const writer = await started(fake, realtime);
-    const reader = await started(fake, realtime);
-    const stored = await writer.put("shared", context, "rec1");
-    await vi.waitFor(() => expect(reader.load(stored.ciphertext, "rec1")).toBe("shared"));
-  });
-
-  it("fails clearly when a referenced value is missing", async () => {
-    const store = await started(new FakeInfisical());
-    expect(() => store.load("infisical:SECRET_rec1", "rec1")).toThrow("not available");
-  });
-
-  it("waits for a refresh before failing an async read", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    fake.secrets.set("SECRET_rec1", { value: "written elsewhere" });
-    await expect(store.loadAsync("infisical:SECRET_rec1", "rec1")).resolves.toBe(
-      "written elsewhere",
+  it("writes the fork key and ref shape with a secret comment", async () => {
+    const { fake, store } = await composed();
+    const record = await store.put("new value", context, { recordId: "row-9" });
+    expect(record.id).toBe("row-9");
+    expect(record.ref).toMatch(/^infisical:SECRET_row_9__v[0-9a-z]+_[0-9a-f]{8}$/);
+    expect(record.ciphertext).toBe(record.ref);
+    const post = fake.fetcher.mock.calls.find(
+      ([input, init]) => init?.method === "POST" && String(input).includes("/secrets/raw/"),
     );
-  });
-
-  it("logs in again when the access token is rejected", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    fake.rejectNextToken = true;
-    await store.put("value", context, "rec1");
-    expect(fake.logins).toBe(2);
-  });
-
-  it("keeps response bodies out of errors", async () => {
-    const fake = new FakeInfisical();
-    fake.fetch = async () => json({ message: "echo sk-live-value" }, 500);
-    const failing = new InfisicalSecretStore(KEY, options(fake));
-    await expect(failing.refresh()).rejects.toThrow("HTTP 500");
-    await expect(failing.refresh()).rejects.not.toThrow("sk-live");
-  });
-
-  it("logs a failed background refresh once and keeps the last values", async () => {
-    const warn = vi.fn();
-    const info = vi.fn();
-    installLogger({ warn, info, error: vi.fn(), debug: vi.fn() } as never);
-    const fake = new FakeInfisical();
-    const realtime = new InMemoryRealtimeFanout();
-    let failing = false;
-    const store = await started(fake, realtime, {
-      fetch: (input, init) =>
-        failing ? Promise.resolve(json({ message: "echo kept" }, 503)) : fake.fetch(input, init),
+    expect(JSON.parse(String(post?.[1]?.body))).toMatchObject({
+      secretValue: "new value",
+      secretComment: "op-1",
     });
-    const stored = await store.put("kept", context, "rec1");
-    failing = true;
-    await realtime.publish("secret-store:changed", "x");
-    await vi.waitFor(() => expect(warn).toHaveBeenCalledTimes(1));
-    await realtime.publish("secret-store:changed", "x");
-    await store.refresh().catch(() => undefined);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0]?.[0]).toContain("HTTP 503");
-    expect(warn.mock.calls[0]?.[0]).not.toContain("kept");
-    expect(store.load(stored.ciphertext, "rec1")).toBe("kept");
-    expect(store.lastRefreshedAt).toBeInstanceOf(Date);
-    failing = false;
-    await realtime.publish("secret-store:changed", "x");
-    await vi.waitFor(() => expect(info).toHaveBeenCalledWith("Infisical secret refresh recovered"));
+    expect(fake.values.get(record.ref.slice("infisical:".length))).toBe("new value");
+    await expect(store.load(record.ref, { recordId: "row-9", signal })).resolves.toBe("new value");
   });
 
-  it("stops polling when closed", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake, undefined, { refreshMs: 5 });
-    await vi.waitFor(() =>
-      expect(fake.requests.filter((r) => r === "GET /api/v3/secrets/raw").length).toBeGreaterThan(
-        1,
-      ),
+  it("still reads upstream-format refs", async () => {
+    const fake = infisicalFake();
+    const remote = new InfisicalSecretStore(fake.options);
+    const upstreamKey = `rakazo_${credentialDigest("row").slice(0, 24)}_00000000-0000-0000-0000-000000000000`;
+    fake.values.set(upstreamKey, "upstream");
+    await expect(remote.load(`infisical:v1:${upstreamKey}`, "row")).resolves.toBe("upstream");
+    await expect(remote.load(`infisical:v1:${upstreamKey}`, "other")).rejects.toBeInstanceOf(
+      SecretNotFoundError,
     );
+  });
+
+  it("drops cached values on the legacy secret-store:changed topic", async () => {
+    const fake = infisicalFake();
+    const handlers = new Map<string, (payload: string) => void>();
+    const realtime: RealtimeFanout = {
+      publish: vi.fn(async () => undefined),
+      subscribe: vi.fn(async (topic: string, handler: (payload: string) => void) => {
+        handlers.set(topic, handler);
+        return async () => undefined;
+      }),
+    } as unknown as RealtimeFanout;
+    const store = new ComposedSecretStore(
+      new EncryptedSecretStore("key"),
+      new InfisicalSecretStore(fake.options),
+      realtime,
+    );
+    await store.start();
+    fake.values.set("SECRET_rec", "before");
+    await expect(store.load("infisical:SECRET_rec", "rec")).resolves.toBe("before");
+    fake.values.set("SECRET_rec", "after");
+    await expect(store.load("infisical:SECRET_rec", "rec")).resolves.toBe("before");
+    handlers.get("secret-store:changed")?.("SECRET_rec");
+    await expect(store.load("infisical:SECRET_rec", "rec")).resolves.toBe("after");
     await store.close();
-    const reads = fake.requests.length;
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    expect(fake.requests.length).toBe(reads);
-  });
-
-  it("removes keys, including ones already gone", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    const stored = await store.put("value", context, "rec1");
-    await store.remove(keyOf(stored));
-    await store.remove(keyOf(stored));
-    expect(fake.secrets.size).toBe(0);
-    expect(store.keys()).toEqual([]);
-  });
-
-  it("forgets revisions for keys that are gone", async () => {
-    const fake = new FakeInfisical();
-    const store = await started(fake);
-    const tracked = () => (store as unknown as { revisions: Map<string, number> }).revisions.size;
-    const removed = await store.put("one", context, "rec1");
-    const deletedElsewhere = await store.put("two", context, "rec2");
-    expect(tracked()).toBe(2);
-    await store.remove(keyOf(removed));
-    expect(tracked()).toBe(1);
-    fake.secrets.delete(keyOf(deletedElsewhere));
-    await store.refresh();
-    expect(tracked()).toBe(0);
-  });
-
-  it("sweeps only unreferenced app keys past the grace period", async () => {
-    const fake = new FakeInfisical();
-    fake.secrets.set("SECRET_legacy", { value: "x" });
-    fake.secrets.set("OPERATOR_NOTE", { value: "x" });
-    const store = await started(fake);
-    const referenced = await store.put("in use", context, "rec1");
-    const pending = await store.put("committing", context, "rec2");
-    expect(await store.sweep([keyOf(referenced)])).toEqual(["SECRET_legacy"]);
-    expect(fake.secrets.has(keyOf(pending))).toBe(true);
-    const later = Date.now() + UNREFERENCED_KEY_GRACE_MS + 1;
-    expect(await store.sweep([keyOf(referenced)], later)).toEqual([keyOf(pending)]);
-    expect([...fake.secrets.keys()].sort()).toEqual(["OPERATOR_NOTE", keyOf(referenced)].sort());
-  });
-
-  it("maps record ids to Infisical-safe keys", () => {
-    expect(infisicalSecretKey("integration-provider:composio")).toBe(
-      "SECRET_integration_provider_composio",
-    );
   });
 });
 
-describe("createSecretStore", () => {
-  it("keeps the database store by default", async () => {
-    const store = await createSecretStore({}, KEY);
-    expect(store).toBeInstanceOf(EncryptedSecretStore);
-    expect(store).not.toBeInstanceOf(InfisicalSecretStore);
-  });
-
-  it("requires the Infisical settings when selected", async () => {
-    await expect(createSecretStore({ SECRET_STORE: "infisical" }, KEY)).rejects.toThrow(
-      "INFISICAL_SITE_URL is required",
-    );
-  });
-});
-
-describe("migrateSecretsToInfisical", () => {
-  async function setup() {
-    const local = new EncryptedSecretStore(KEY);
-    const seal = async (value: string, id: string) =>
-      (await local.put(value, context, id)).ciphertext;
-    const rows = {
-      secrets: [
-        {
-          id: "s1",
-          kind: "model",
-          ciphertext: await seal("model-key", "s1"),
-          spaceId: "space",
-          userId: "u",
-          mcpServers: [],
-          agentSecret: null,
-        },
-        {
-          id: "s2",
-          kind: "mcp",
-          ciphertext: await seal("{}", "s2"),
-          spaceId: "space",
-          userId: "u",
-          mcpServers: [{ name: "Mail" }],
-          agentSecret: null,
-        },
-        {
-          id: "s3",
-          kind: "model",
-          ciphertext: "not-decryptable",
-          spaceId: "space",
-          userId: "u",
-          mcpServers: [],
-          agentSecret: null,
-        },
-      ],
-      botSecrets: [
-        {
-          id: "b1",
-          name: "site_login",
-          ciphertext: await seal("pw", "b1"),
-          spaceId: "space",
-          userId: "u",
-          bot: { name: "Operator" },
-        },
-      ],
-      providers: [
-        {
-          id: "composio",
-          ciphertext: await seal('{"provider":"composio"}', "integration-provider:composio"),
-        },
-      ],
-    };
-    const update =
-      (list: { id: string; ciphertext: string }[]) =>
-      async ({
-        where,
-        data,
-      }: {
-        where: { id: string; ciphertext: string };
-        data: { ciphertext: string };
-      }) => {
-        const row = list.find((r) => r.id === where.id && r.ciphertext === where.ciphertext);
-        if (row) row.ciphertext = data.ciphertext;
-        return { count: row ? 1 : 0 };
-      };
-    const prisma = {
-      secret: { findMany: async () => rows.secrets, updateMany: update(rows.secrets) },
-      botSecret: { findMany: async () => rows.botSecrets, updateMany: update(rows.botSecrets) },
-      integrationProviderConfig: {
-        findMany: async () => rows.providers,
-        updateMany: update(rows.providers),
+describe("fork migration compat", () => {
+  it("reports existing fork refs as verified without writing", async () => {
+    const { fake, store } = await composed();
+    fake.values.set("SECRET_row", "legacy");
+    fake.values.set("SECRET_row2__vmabc_0a1b2c3d", "versioned");
+    const rows: SecretMigrationRow[] = [
+      { id: "row", recordId: "row", label: "secret", ref: "infisical:SECRET_row" },
+      {
+        id: "row2",
+        recordId: "row2",
+        label: "botSecret",
+        ref: "infisical:SECRET_row2__vmabc_0a1b2c3d",
       },
-    } as unknown as PrismaClient;
-    const fake = new FakeInfisical();
-    const store = new InfisicalSecretStore(KEY, options(fake));
-    stores.push(store);
-    return { rows, prisma, fake, store };
-  }
-
-  it("reports without writing on a dry run", async () => {
-    const { prisma, fake, store } = await setup();
-    const report = await migrateSecretsToInfisical(prisma, store, { dryRun: true });
-    expect(report.migrated).toHaveLength(4);
-    expect(report.unreadable).toEqual(["secrets:s3"]);
-    expect(fake.secrets.size).toBe(0);
-  });
-
-  it("moves every readable value, labels it, and is safe to rerun", async () => {
-    const { rows, prisma, fake, store } = await setup();
-    const report = await migrateSecretsToInfisical(prisma, store);
-    expect(report.migrated).toHaveLength(4);
-    expect(rows.secrets[0]?.ciphertext).toMatch(/^infisical:SECRET_s1__v/);
-    expect(rows.providers[0]?.ciphertext).toMatch(
-      /^infisical:SECRET_integration_provider_composio__v/,
-    );
-    expect(fake.secrets.get(keyOf(rows.secrets[1] ?? { ciphertext: "" }))?.comment).toBe(
-      "MCP server Mail",
-    );
-    expect(fake.secrets.get(keyOf(rows.botSecrets[0] ?? { ciphertext: "" }))?.comment).toBe(
-      "Operator credential site_login",
-    );
-    expect(store.load(rows.botSecrets[0]?.ciphertext ?? "", "b1")).toBe("pw");
-    expect(store.load(rows.providers[0]?.ciphertext ?? "", "integration-provider:composio")).toBe(
-      '{"provider":"composio"}',
-    );
-    const again = await migrateSecretsToInfisical(prisma, store);
-    expect(again.migrated).toEqual([]);
-    expect(again.alreadyReferenced).toBe(4);
-    expect(again.orphaned).toEqual([]);
-  });
-
-  it("leaves a credential saved during the migration untouched", async () => {
-    const { rows, prisma, fake, store } = await setup();
-    const runtime = await store.put("newer", context, "b1");
-    const botSecret = prisma.botSecret as unknown as {
-      updateMany: (args: unknown) => Promise<{ count: number }>;
+    ];
+    const repository: SecretMigrationRepository = {
+      async *rows() {
+        yield* rows;
+      },
+      replace: vi.fn(async () => true),
+      referenced: vi.fn(async () => true),
     };
-    const update = botSecret.updateMany;
-    // The app saves a replacement after the migration read the old row.
-    botSecret.updateMany = async (args) => {
-      const row = rows.botSecrets[0];
-      if (row) row.ciphertext = runtime.ciphertext;
-      return update(args);
-    };
-    await migrateSecretsToInfisical(prisma, store);
-    expect(rows.botSecrets[0]?.ciphertext).toBe(runtime.ciphertext);
-    expect(store.load(runtime.ciphertext, "b1")).toBe("newer");
-    // The copy that lost the race is removed instead of left behind.
-    expect([...fake.secrets.keys()].filter((key) => key.startsWith("SECRET_b1"))).toEqual([
-      keyOf(runtime),
-    ]);
+    const report = vi.fn();
+    const counts = await migrateSecrets(
+      repository,
+      new EncryptedSecretStore("key"),
+      store,
+      context,
+      { direction: "forward", dryRun: true, report },
+    );
+    expect(counts).toMatchObject({ verified: 2, failed: 0, planned: 0, migrated: 0 });
+    expect(report).toHaveBeenCalledWith(rows[0], "verified");
+    expect(repository.replace).not.toHaveBeenCalled();
+  });
+});
+
+describe("fork env aliases", () => {
+  const base = {
+    SECRET_STORE: "infisical",
+    INFISICAL_CLIENT_ID: "id",
+    INFISICAL_CLIENT_SECRET: "secret",
+    INFISICAL_PROJECT_ID: "project",
+    INFISICAL_ENVIRONMENT: "prod",
+  };
+
+  it("accepts the fork names, including when compose injects empty upstream names", () => {
+    const options = secretStoreOptionsFromEnv({
+      ...base,
+      INFISICAL_URL: "",
+      INFISICAL_FOLDER: " ",
+      INFISICAL_SITE_URL: "https://vault.example.test",
+      INFISICAL_SECRET_PATH: "/app",
+      INFISICAL_REFRESH_SECONDS: "45",
+    });
+    expect(options).toMatchObject({
+      baseUrl: "https://vault.example.test",
+      folder: "/app",
+      cacheTtlMs: 45_000,
+    });
   });
 
-  it("prunes only unreferenced keys past the grace period", async () => {
-    const { prisma, fake, store } = await setup();
-    await migrateSecretsToInfisical(prisma, store);
-    fake.secrets.set("SECRET_gone", { value: "x" });
-    fake.secrets.set("OPERATOR_NOTE", { value: "x" });
-    const pending = await store.put("committing", context, "s9");
-    const report = await migrateSecretsToInfisical(prisma, store, { prune: true });
-    expect(report.orphaned.sort()).toEqual(["SECRET_gone", keyOf(pending)].sort());
-    expect(report.pruned).toBe(1);
-    expect(fake.secrets.has("SECRET_gone")).toBe(false);
-    expect(fake.secrets.has(keyOf(pending))).toBe(true);
-    expect(fake.secrets.has("OPERATOR_NOTE")).toBe(true);
+  it("prefers the upstream names when set", () => {
+    const options = secretStoreOptionsFromEnv({
+      ...base,
+      INFISICAL_URL: "https://new.example.test",
+      INFISICAL_FOLDER: "/new",
+      INFISICAL_SITE_URL: "https://old.example.test",
+      INFISICAL_SECRET_PATH: "/app",
+    });
+    expect(options).toMatchObject({ baseUrl: "https://new.example.test", folder: "/new" });
+    expect(options?.cacheTtlMs).toBeUndefined();
+  });
+
+  it("names both variables when neither is set and rejects a bad refresh period", () => {
+    expect(() => secretStoreOptionsFromEnv(base)).toThrow(
+      "Missing INFISICAL_URL (or INFISICAL_SITE_URL)",
+    );
+    expect(() =>
+      secretStoreOptionsFromEnv({
+        ...base,
+        INFISICAL_SITE_URL: "https://vault.example.test",
+        INFISICAL_SECRET_PATH: "/app",
+        INFISICAL_REFRESH_SECONDS: "soon",
+      }),
+    ).toThrow("INFISICAL_REFRESH_SECONDS");
+  });
+
+  it("treats unset, empty and database SECRET_STORE as the encrypted store", () => {
+    expect(secretStoreOptionsFromEnv({})).toBeUndefined();
+    expect(secretStoreOptionsFromEnv({ SECRET_STORE: "" })).toBeUndefined();
+    expect(secretStoreOptionsFromEnv({ SECRET_STORE: "database" })).toBeUndefined();
+    expect(createSecretStore("key", { SECRET_STORE: "database" }).describe().id).toBe(
+      "app-encrypted",
+    );
   });
 });
