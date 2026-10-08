@@ -4465,6 +4465,10 @@ export function createRunExecutor(deps: ExecutorDeps) {
               }
             } catch (error) {
               approvalCardClaimed = false;
+              // No card was filed, so the effect must not read as a pending change to this target.
+              await deps.prisma.externalEffect
+                .deleteMany({ where: { id: applied!.effect.id, status: "intended" } })
+                .catch(() => undefined);
               throw error;
             }
             await notifyRun(deps, run, {

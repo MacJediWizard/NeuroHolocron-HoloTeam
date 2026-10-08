@@ -520,6 +520,19 @@ describe("connector read-only metadata and approval enforcement", () => {
       expect(f.pauseRunForInput).toHaveBeenCalledTimes(2);
     });
 
+    it("drops the unfiled effect so a revised retry on the same target gets its card", async () => {
+      const f = fixture({ ...gated, approvalTarget: ["id"] });
+      f.pauseRunForInput.mockRejectedValueOnce(new Error("pause failed"));
+      f.setCalls([
+        { args: { id: "item-1" }, executionId: "call-1" },
+        { args: { id: "item-1", title: "Revised" }, executionId: "call-2" },
+      ]);
+      await f.run();
+      expect(f.results[0]).toEqual({ thrown: "pause failed" });
+      expect(isApprovalPausedResult(f.results[1])).toBe(true);
+      expect(f.effects).toHaveLength(1);
+    });
+
     it("files cards for other targets and for tools that declare none", async () => {
       for (const approvalTarget of [["id"], undefined]) {
         const f = fixture({ ...gated, approvalTarget });
