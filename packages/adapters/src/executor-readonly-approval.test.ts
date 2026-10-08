@@ -262,7 +262,8 @@ function fixture({
       return;
     }
     for (const call of calls) {
-      const result = await callTool(call);
+      // A runtime that turns a thrown tool error into a result and keeps the turn going.
+      const result = await callTool(call).catch((error: Error) => ({ thrown: error.message }));
       results.push(result);
       if (isApprovalPausedResult(result)) return;
     }
@@ -504,6 +505,19 @@ describe("connector read-only metadata and approval enforcement", () => {
       expect(isApprovalPausedResult(f.results.at(-1))).toBe(true);
       expect(f.pauseRunForInput).toHaveBeenCalledTimes(2);
       expect(f.effects.map((effect) => effect.status)).toEqual(["completed", "intended"]);
+    });
+
+    it("releases the card slot when filing the card throws", async () => {
+      const f = fixture(gated);
+      f.pauseRunForInput.mockRejectedValueOnce(new Error("pause failed"));
+      f.setCalls([
+        { args: { id: "item-1" }, executionId: "call-1" },
+        { args: { id: "item-2" }, executionId: "call-2" },
+      ]);
+      await f.run();
+      expect(f.results[0]).toEqual({ thrown: "pause failed" });
+      expect(isApprovalPausedResult(f.results[1])).toBe(true);
+      expect(f.pauseRunForInput).toHaveBeenCalledTimes(2);
     });
 
     it("files cards for other targets and for tools that declare none", async () => {

@@ -4434,31 +4434,38 @@ export function createRunExecutor(deps: ExecutorDeps) {
               });
               return approvalQueuedResult();
             }
+            // Claimed before the first await so parallel siblings see it; released if no card
+            // gets filed, so later calls in the turn are not told to wait for a missing card.
             approvalCardClaimed = true;
-            if (!(await renewRunLease(deps, runId, workerId, fence))) {
-              // Another worker owns the run now; exit without leaving a local pause card.
-              return pauseForApproval();
-            }
-            await workspaceCheckpoint.flush();
-            const paused = await deps.events.pauseRunForInput({
-              spaceId: run.spaceId,
-              threadId: run.threadId,
-              botId: run.botId,
-              runId,
-              attemptId: attempt.id,
-              leaseOwner: workerId,
-              leaseFence: fence,
-              blocks: [
-                buildApprovalAskBlock(applied!.effect.id, name, args, runSecrets, {
-                  reviewReason,
-                }),
-              ],
-            });
-            // pauseRunForInput returning false after a successful renew means the run row no
-            // longer matches this worker. Exiting via pauseForApproval() would leave the run
-            // stuck in "running" with no ask card — fail instead so the user can retry.
-            if (!paused) {
-              throw new Error("Could not pause this run for approval; try sending again.");
+            try {
+              if (!(await renewRunLease(deps, runId, workerId, fence))) {
+                // Another worker owns the run now; exit without leaving a local pause card.
+                return pauseForApproval();
+              }
+              await workspaceCheckpoint.flush();
+              const paused = await deps.events.pauseRunForInput({
+                spaceId: run.spaceId,
+                threadId: run.threadId,
+                botId: run.botId,
+                runId,
+                attemptId: attempt.id,
+                leaseOwner: workerId,
+                leaseFence: fence,
+                blocks: [
+                  buildApprovalAskBlock(applied!.effect.id, name, args, runSecrets, {
+                    reviewReason,
+                  }),
+                ],
+              });
+              // pauseRunForInput returning false after a successful renew means the run row no
+              // longer matches this worker. Exiting via pauseForApproval() would leave the run
+              // stuck in "running" with no ask card — fail instead so the user can retry.
+              if (!paused) {
+                throw new Error("Could not pause this run for approval; try sending again.");
+              }
+            } catch (error) {
+              approvalCardClaimed = false;
+              throw error;
             }
             await notifyRun(deps, run, {
               kind: "help",
