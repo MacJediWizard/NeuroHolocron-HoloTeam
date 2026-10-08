@@ -406,6 +406,19 @@ describe("connector read-only metadata and approval enforcement", () => {
     expect(f.results.at(-1)).toEqual({ error: "path is required" });
   });
 
+  it("rejects invalid arguments for a bound tool before asking for approval", async () => {
+    const f = fixture({
+      readOnly: false,
+      rules: [{ effect: "require_approval", matchKind: "tool", matchValue: "demo_get_item" }],
+    });
+    f.setCalls([{ args: { id: 42 }, executionId: "call-1" }]);
+    await f.run();
+    expect(f.pauseRunForInput).not.toHaveBeenCalled();
+    expect(f.effects).toHaveLength(0);
+    expect(f.execute).not.toHaveBeenCalled();
+    expect(f.results[0]).toEqual({ error: expect.stringMatching(/Tool arguments are invalid/) });
+  });
+
   describe.each([false, true])("catalog = %s", (catalog) => {
     it.each(["tool", "connector"] as const)(
       "honors an explicit %s approval rule",

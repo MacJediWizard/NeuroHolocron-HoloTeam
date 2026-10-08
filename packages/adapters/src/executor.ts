@@ -4100,6 +4100,18 @@ export function createRunExecutor(deps: ExecutorDeps) {
               }
             }
           }
+          // A fresh bound call is checked against the live schema before it can reach an
+          // approval card; otherwise the person approves a request that fails on replay.
+          if (!nextApprovedTool && !catalogRemapped && connectorCall.route?.resourceId) {
+            const liveSchema = connectorTools.get(name)?.inputSchema;
+            if (liveSchema) {
+              try {
+                assertConnectorToolArgs(liveSchema, args);
+              } catch (error) {
+                return { error: sanitizeConnectorError(error) };
+              }
+            }
+          }
           const viaConnector = !BUILTIN_AGENT_TOOL_NAMES.has(name);
           // Declared effect of the operation this call dispatches (installed API method and
           // flag). Install config is immutable per route resource, so it cannot drift before
