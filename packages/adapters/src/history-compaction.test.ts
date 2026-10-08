@@ -25,6 +25,7 @@ import {
   SUMMARIZE_TIMEOUT_MIN_MS,
   selectCompactedHistory,
   shouldEnqueueCompaction,
+  steppedHistoryTail,
   summarizeTimeoutMs,
 } from "./history-compaction.js";
 
@@ -1194,5 +1195,39 @@ describe("compactHistory", () => {
     await compactHistory(harness.deps, "thread-1");
 
     expect(harness.jobs.enqueue).not.toHaveBeenCalled();
+  });
+});
+
+describe("steppedHistoryTail", () => {
+  const thread = (count: number) => Array.from({ length: count }, (_, seq) => ({ seq }));
+
+  it("keeps short histories whole", () => {
+    expect(steppedHistoryTail(thread(20), 24, 12)).toHaveLength(20);
+    expect(steppedHistoryTail([], 24, 12)).toEqual([]);
+  });
+
+  it("keeps at least the window and fewer than window + step messages", () => {
+    for (let count = 25; count < 200; count += 1) {
+      const kept = steppedHistoryTail(thread(count), 24, 12);
+      expect(kept.length).toBeGreaterThanOrEqual(24);
+      expect(kept.length).toBeLessThan(36);
+      expect(kept.at(-1)!.seq).toBe(count - 1);
+    }
+  });
+
+  it("moves the window start only once per step so the cached prefix survives", () => {
+    const starts = Array.from({ length: 36 }, (_, index) => {
+      return steppedHistoryTail(thread(60 + index), 24, 12)[0]!.seq;
+    });
+    expect(new Set(starts).size).toBe(3);
+    for (const start of starts) expect(start % 12).toBe(0);
+  });
+
+  it("works on the uncompacted tail of a compacted thread", () => {
+    const tail = Array.from({ length: 70 }, (_, index) => ({ seq: 1000 + index }));
+    const kept = steppedHistoryTail(tail, 24, 12);
+    expect(kept[0]!.seq % 12).toBe(0);
+    expect(kept.at(-1)!.seq).toBe(1069);
+    expect(kept.length).toBeGreaterThanOrEqual(24);
   });
 });
