@@ -65,6 +65,7 @@ import {
   type PiSessionHandle,
   type PiSessionRecorder,
 } from "./pi-session.js";
+import { withStableHistoryCache } from "./prompt-cache.js";
 import type { FinishedShellCommand } from "./shell-command-stream.js";
 import { deliverFinishedShells } from "./shell-command-stream.js";
 import { textContentArg } from "./tool-text.js";
@@ -283,7 +284,7 @@ export class PiAgentRuntime implements AgentRuntime {
               models,
               m,
               ctx,
-              withCloudflareGatewayAuth(request.model, options),
+              withStableHistoryCache(withCloudflareGatewayAuth(request.model, options), m, history),
               request.model.maxTokens,
               () => selectedModel.credentials?.accessToken ?? apiKey,
             ),

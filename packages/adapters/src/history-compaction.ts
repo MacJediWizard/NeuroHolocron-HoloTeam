@@ -101,6 +101,33 @@ export function historyWindowSize(options: {
     : LEGACY_HISTORY_WINDOW_SIZE;
 }
 
+/**
+ * Delegated (bot_message) runs carry a request that stands on its own, so they see a shorter
+ * history window. Compacted summaries and semantic recall still cover what falls outside it.
+ */
+export const BOT_MESSAGE_HISTORY_WINDOW = 24;
+/** The window start moves in steps of this many messages so the cached prefix stays stable. */
+export const BOT_MESSAGE_HISTORY_STEP = 12;
+
+/**
+ * Keeps the newest messages, at least `window` and fewer than `window + step`, starting on a
+ * sequence number that is a multiple of `step`. A plain `slice(-window)` would move the start on
+ * every message and invalidate the prompt cache for the whole history on every run; here the
+ * start (and so the cached prefix) only moves once every `step` messages.
+ */
+export function steppedHistoryTail<T extends { seq: number }>(
+  messages: T[],
+  window = BOT_MESSAGE_HISTORY_WINDOW,
+  step = BOT_MESSAGE_HISTORY_STEP,
+): T[] {
+  if (messages.length === 0) return messages;
+  const lastSeq = Math.max(...messages.map((message) => message.seq));
+  const firstWanted = lastSeq + 1 - window;
+  if (firstWanted <= 0) return messages;
+  const start = Math.floor(firstWanted / step) * step;
+  return messages.filter((message) => message.seq >= start);
+}
+
 export function formatRecalledMemory(
   results: Array<{ memory: string; id?: string; provenance?: string; entity?: string }>,
 ): string {
