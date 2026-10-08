@@ -1,0 +1,89 @@
+import * as Sentry from "@sentry/node";
+import { afterEach, describe, expect, it } from "vitest";
+import { createLogger } from "./logger.js";
+import { createSentrySink, createSentrySinkFromEnv, sentryConfigFromEnv } from "./sentry.js";
+
+const DSN = "https://publickey@errors.example.com/7";
+
+function recordingTransport() {
+  const events: Array<Record<string, any>> = [];
+  const transport = (options: Parameters<typeof Sentry.createTransport>[0]) =>
+    Sentry.createTransport(options, async (request) => {
+      const body =
+        typeof request.body === "string" ? request.body : new TextDecoder().decode(request.body);
+      const lines = body.split("\n");
+      for (let index = 1; index < lines.length - 1; index += 2) {
+        if (JSON.parse(lines[index]!).type === "event") events.push(JSON.parse(lines[index + 1]!));
+      }
+      return { statusCode: 200 };
+    });
+  return { events, transport };
+}
+
+afterEach(async () => {
+  await Sentry.close();
+});
+
+describe("sentry sink", () => {
+  it("reads config from the environment", () => {
+    expect(sentryConfigFromEnv({})).toEqual({});
+    expect(sentryConfigFromEnv({ SENTRY_DSN: "  " })).toEqual({});
+    expect(sentryConfigFromEnv({ SENTRY_DSN: "https://errors.example.com/7" }).warning).toContain(
+      "not a valid DSN",
+    );
+    expect(sentryConfigFromEnv({ SENTRY_DSN: "not a dsn" }).warning).toBeDefined();
+    expect(
+      sentryConfigFromEnv({ SENTRY_DSN: DSN, SENTRY_ENVIRONMENT: " lg-acme ", GIT_SHA: "abc123" }),
+    ).toEqual({ config: { dsn: DSN, environment: "lg-acme", release: "abc123" } });
+    expect(
+      sentryConfigFromEnv({ SENTRY_DSN: DSN, SENTRY_RELEASE: "v1", GIT_SHA: "abc" }).config
+        ?.release,
+    ).toBe("v1");
+    expect(sentryConfigFromEnv({ SENTRY_DSN: DSN, GIT_SHA: "unknown" }).config?.release).toBe(
+      undefined,
+    );
+    expect(createSentrySinkFromEnv({ SENTRY_DSN: "bad" }).sink).toBeUndefined();
+  });
+
+  it("reports error logs with the exception chain, tags, and redacted extras", async () => {
+    const { events, transport } = recordingTransport();
+    const sink = createSentrySink({ dsn: DSN, environment: "lg-acme", release: "abc" }, transport);
+    const logger = createLogger({ service: "rakazo-worker", sinks: [sink] });
+    const error = new Error("run failed", { cause: new TypeError("bad input") });
+    logger.error("job crashed", error, { jobId: "j1", apiKey: "sk-secret" });
+    await logger.flush();
+
+    expect(events).toHaveLength(1);
+    const event = events[0]!;
+    expect(event).toMatchObject({
+      environment: "lg-acme",
+      release: "abc",
+      level: "error",
+      tags: { service: "rakazo-worker", jobId: "j1" },
+      extra: { "log.message": "job crashed", jobId: "j1" },
+    });
+    expect(event.extra.apiKey).toBe("[Redacted]");
+    const values = event.exception.values;
+    expect(values.map((value: { type: string }) => value.type)).toEqual(["TypeError", "Error"]);
+    expect(values[1].stacktrace.frames.at(-1).filename).toContain("sentry.test.ts");
+  });
+
+  it("reports error logs without an error as messages and ignores lower levels", async () => {
+    const { events, transport } = recordingTransport();
+    const logger = createLogger({
+      service: "rakazo-api",
+      sinks: [createSentrySink({ dsn: DSN }, transport)],
+    });
+    logger.info("started");
+    logger.warn("slow");
+    logger.error("queue unavailable", { "request.id": "req-1" });
+    await logger.flush();
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      level: "error",
+      message: "queue unavailable",
+      tags: { service: "rakazo-api", "request.id": "req-1" },
+    });
+  });
+});
