@@ -1,8 +1,7 @@
 import { ORPCError } from "@orpc/server";
-import type { AdapterContext } from "@rakazo/adapter-kit";
+import type { AdapterContext, SecretStore } from "@rakazo/adapter-kit";
 import {
   createVoiceProvider,
-  type EncryptedSecretStore,
   isFishSpeechModelId,
   isVoiceProviderId,
   listVoiceCatalog,
@@ -32,7 +31,7 @@ import { requireSpaceOwner } from "./space-owner.js";
 
 export interface VoiceDeps {
   prisma: PrismaClient;
-  secrets: EncryptedSecretStore;
+  secrets: SecretStore;
 }
 
 export { listVoiceCatalog };
@@ -109,7 +108,7 @@ export async function loadVoiceCredential(deps: VoiceDeps, actor: Actor, provide
     where: { id: cred.secretId, userId: cred.userId, spaceId: null },
   });
   if (!secret) return null;
-  return { cred, apiKey: deps.secrets.load(secret.ciphertext, secret.id) };
+  return { cred, apiKey: await deps.secrets.load(secret.ciphertext, secret.id) };
 }
 
 export async function resolveVoiceTarget(

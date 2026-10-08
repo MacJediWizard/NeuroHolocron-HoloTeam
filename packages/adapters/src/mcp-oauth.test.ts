@@ -125,6 +125,7 @@ async function rejectedOAuthBegin(
   );
   const tx = {
     $executeRaw: vi.fn().mockResolvedValue(1),
+    $queryRaw: vi.fn().mockResolvedValue([]),
     mcpServer: {
       findFirst: vi.fn().mockResolvedValue({
         endpoint: "https://mcp.example.test/mcp",
@@ -358,6 +359,7 @@ describe("MCP OAuth", () => {
       });
       const tx = {
         $executeRaw: vi.fn().mockResolvedValue(1),
+        $queryRaw: vi.fn().mockResolvedValue([]),
         mcpServer: {
           findFirst: vi.fn().mockResolvedValue({
             endpoint: `${mcpOrigin}/mcp`,
@@ -597,6 +599,7 @@ describe("MCP OAuth", () => {
     );
     const tx = {
       $executeRaw: vi.fn().mockResolvedValue(1),
+      $queryRaw: vi.fn().mockResolvedValue([]),
       mcpServer: {
         findFirst: vi.fn().mockResolvedValue({
           endpoint: "https://mcp.example.test/mcp",
@@ -833,6 +836,7 @@ describe("MCP OAuth", () => {
   it("rotates the current credential inside a serialized database transaction", async () => {
     const tx = {
       $executeRaw: vi.fn().mockResolvedValue(1),
+      $queryRaw: vi.fn().mockResolvedValue([]),
       mcpServer: {
         findFirst: vi.fn().mockResolvedValue({
           endpoint: "https://mcp.example.test/mcp",
@@ -894,6 +898,7 @@ describe("MCP OAuth", () => {
     const storedPayloads: string[] = [];
     const tx = {
       $executeRaw: vi.fn().mockResolvedValue(1),
+      $queryRaw: vi.fn().mockResolvedValue([]),
       mcpServer: {
         findFirst: vi.fn().mockResolvedValue({
           endpoint: "https://mcp.example.test/mcp",

@@ -237,6 +237,7 @@ import {
   transcriptMovedDown,
 } from "../lib/transcript-scroll";
 import { speaker } from "../lib/tts";
+import { errorText } from "../lib/user-error";
 import { ActivityList } from "./ActivityList";
 import type { ContextMenuPosition } from "./BotContextMenu";
 import { CreateGroupForm, GroupSettings, memberName } from "./GroupPanel";
@@ -2061,7 +2062,7 @@ export function ShellPage() {
           ? activeGroupId.current === groupId
           : activeBotId.current === botId;
         if (!stillHere) return;
-        setSendError(error instanceof Error ? error.message : t`Could not update reaction`);
+        setSendError(errorText(error, t`Could not update reaction`));
       }
     },
     [t],
@@ -2237,11 +2238,11 @@ export function ShellPage() {
         else if (botTarget) void refreshThreadRef.current(botTarget).catch(() => undefined);
       } catch (error) {
         if (reroutedToGroup && groupTarget) {
-          setSendError(error instanceof Error ? error.message : t`Failed to send message`);
+          setSendError(errorText(error, t`Failed to send message`));
         } else if (groupTarget && activeGroupId.current === groupTarget) {
-          setSendError(error instanceof Error ? error.message : t`Failed to send message`);
+          setSendError(errorText(error, t`Failed to send message`));
         } else if (botTarget && activeBotId.current === botTarget) {
-          setSendError(error instanceof Error ? error.message : t`Failed to send message`);
+          setSendError(errorText(error, t`Failed to send message`));
         }
       } finally {
         sendingRef.current = false;
@@ -2272,7 +2273,7 @@ export function ShellPage() {
           await rpc.threads.stop({ groupId: groupTarget });
         } catch (error) {
           if (activeGroupId.current === groupTarget) {
-            setSendError(error instanceof Error ? error.message : t`Failed to stop`);
+            setSendError(errorText(error, t`Failed to stop`));
           }
           return;
         }
@@ -2291,7 +2292,7 @@ export function ShellPage() {
         await rpc.threads.stop({ botId: botTarget });
       } catch (error) {
         if (activeBotId.current === botTarget) {
-          setSendError(error instanceof Error ? error.message : t`Failed to stop`);
+          setSendError(errorText(error, t`Failed to stop`));
         }
         return;
       }
@@ -2485,7 +2486,7 @@ export function ShellPage() {
       await refreshComputerFor(targetBotId);
     } catch (error) {
       if (!stillThisBoot() || !stillThisBot()) return;
-      setComputerError(error instanceof Error ? error.message : t`Could not take control`);
+      setComputerError(errorText(error, t`Could not take control`));
       setComputerErrorFromScreen(false);
       throw error;
     } finally {
@@ -4044,9 +4045,7 @@ export function ShellPage() {
                     ) {
                       return;
                     }
-                    setRoutineError(
-                      error instanceof Error ? error.message : t`Could not save routine`,
-                    );
+                    setRoutineError(errorText(error, t`Could not save routine`));
                     return;
                   } finally {
                     routineSavePending.current = false;
@@ -4073,9 +4072,7 @@ export function ShellPage() {
                     await refreshThread(targetBotId);
                   } catch (error) {
                     if (activeBotId.current === targetBotId) {
-                      setRoutineError(
-                        error instanceof Error ? error.message : t`Could not run routine`,
-                      );
+                      setRoutineError(errorText(error, t`Could not run routine`));
                     }
                   } finally {
                     routineRunPending.current = false;

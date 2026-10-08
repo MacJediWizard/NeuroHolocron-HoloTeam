@@ -1,10 +1,10 @@
 import type { IntegrationSetupState } from "@rakazo/contracts";
 import { PRODUCT_NAME } from "@rakazo/contracts";
+import { credentialIssue } from "@rakazo/core";
 import { Redirect, useFocusEffect, useLocalSearchParams, useRouter } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import {
   AccessibilityInfo,
-  ActivityIndicator,
   Keyboard,
   KeyboardAvoidingView,
   Platform,
@@ -17,11 +17,11 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { NativeActionButton } from "../components/native-action-button";
+import type { PasswordResetCapabilities } from "../lib/api";
 import {
   currentApiBase,
   displayApiHost,
   loadSessionToken,
-  type PasswordResetCapabilities,
   passwordResetCapabilities,
   requestPasswordReset,
   rpc,
@@ -29,9 +29,12 @@ import {
   signUp,
   usesCustomApiBase,
 } from "../lib/api";
-import { type AuthMode, initialAuthMode } from "../lib/auth-routing";
+import type { AuthMode } from "../lib/auth-routing";
+import { initialAuthMode } from "../lib/auth-routing";
 import { useI18n } from "../lib/i18n";
 import { useMobileTokens } from "../lib/native";
+import { continueWithSso } from "../lib/sso";
+import { credentialIssueText, errorText } from "../lib/user-error";
 
 export default function SignIn() {
   const { t } = useI18n();
@@ -48,8 +51,8 @@ export default function SignIn() {
   const [hasSession, setHasSession] = useState(false);
   const [apiBase, setApiBase] = useState(() => currentApiBase());
   const [reset, setReset] = useState<PasswordResetCapabilities | null>(null);
-  const [capabilitiesFailed, setCapabilitiesFailed] = useState(false);
-  const [capabilitiesAttempt, setCapabilitiesAttempt] = useState(0);
+  const [capabilityError, setCapabilityError] = useState(false);
+  const [capabilityAttempt, setCapabilityAttempt] = useState(0);
   const [resetSent, setResetSent] = useState(false);
 
   useFocusEffect(
@@ -68,19 +71,18 @@ export default function SignIn() {
   useEffect(() => {
     let active = true;
     setReset(null);
-    setCapabilitiesFailed(false);
+    setCapabilityError(false);
     void passwordResetCapabilities()
       .then((capabilities) => {
         if (active) setReset(capabilities);
       })
-      // Without them an SSO-only server would get a password form it refuses.
       .catch(() => {
-        if (active) setCapabilitiesFailed(true);
+        if (active) setCapabilityError(true);
       });
     return () => {
       active = false;
     };
-  }, [apiBase, capabilitiesAttempt]);
+  }, [apiBase, capabilityAttempt]);
 
   useEffect(() => {
     if (resetSent) AccessibilityInfo.announceForAccessibility(t("Check your email"));
@@ -103,7 +105,12 @@ export default function SignIn() {
   if (hasSession) return <Redirect href="/" />;
 
   async function submit() {
-    if (pending) return;
+    if (pending || !reset?.passwordAuth) return;
+    const issue = credentialIssue({ email, password: mode === "forgot" ? undefined : password });
+    if (issue) {
+      setError(credentialIssueText(issue));
+      return;
+    }
     setPending(true);
     setError(null);
     try {
@@ -135,15 +142,25 @@ export default function SignIn() {
           : null;
       router.replace(setup?.needsSetup ? "/integration-setup" : "/");
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("Could not continue"));
+      setError(errorText(err, t("Could not continue")));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function sso() {
+    setPending(true);
+    setError(null);
+    try {
+      if (await continueWithSso()) router.replace("/");
+    } catch (err) {
+      setError(errorText(err, t("Could not continue")));
     } finally {
       setPending(false);
     }
   }
 
   const custom = usesCustomApiBase(apiBase);
-  // Single sign-on runs in the browser; the app has no way to receive that session yet.
-  const ssoOnly = reset?.passwordAuth === false;
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: tokens.background }}>
@@ -180,45 +197,7 @@ export default function SignIn() {
                       ? t("Sign up for {PRODUCT_NAME}", { PRODUCT_NAME })
                       : t("Reset your password")}
               </Text>
-              {ssoOnly ? (
-                <Text
-                  accessibilityRole="alert"
-                  style={{
-                    color: tokens.mutedForeground,
-                    fontSize: 15,
-                    marginTop: 28,
-                    textAlign: "center",
-                  }}
-                >
-                  {t("This server signs in with {provider}, which the app does not support yet.", {
-                    provider: reset?.sso?.name ?? t("single sign-on"),
-                  })}
-                </Text>
-              ) : capabilitiesFailed ? (
-                <View accessibilityRole="alert" style={{ alignItems: "center", marginTop: 28 }}>
-                  <Text
-                    style={{ color: tokens.mutedForeground, fontSize: 15, textAlign: "center" }}
-                  >
-                    {t("Could not load sign-in options")}
-                  </Text>
-                  <Pressable
-                    accessibilityRole="button"
-                    hitSlop={12}
-                    onPress={() => setCapabilitiesAttempt((attempt) => attempt + 1)}
-                    style={{ marginTop: 16 }}
-                  >
-                    <Text style={{ color: tokens.foreground, fontSize: 15, fontWeight: "600" }}>
-                      {t("Try again")}
-                    </Text>
-                  </Pressable>
-                </View>
-              ) : !reset && !resetSent ? (
-                <ActivityIndicator
-                  accessibilityLabel={t("Loading…")}
-                  color={tokens.mutedForeground}
-                  style={{ marginTop: 28 }}
-                />
-              ) : resetSent ? (
+              {resetSent ? (
                 <View style={{ alignItems: "center", marginTop: 28 }}>
                   <Pressable
                     accessibilityRole="button"
@@ -234,122 +213,163 @@ export default function SignIn() {
                 </View>
               ) : (
                 <>
-                  {mode === "up" ? (
-                    <TextInput
-                      autoComplete="name"
-                      placeholder={t("Name")}
-                      placeholderTextColor={tokens.mutedForeground}
-                      value={name}
-                      onChangeText={setName}
-                      style={{
-                        marginTop: 28,
-                        backgroundColor: tokens.muted,
-                        borderRadius: 13,
-                        padding: 16,
-                        color: tokens.foreground,
-                      }}
-                    />
-                  ) : null}
-                  <TextInput
-                    autoCapitalize="none"
-                    autoComplete="email"
-                    keyboardType="email-address"
-                    placeholder={t("Email")}
-                    placeholderTextColor={tokens.mutedForeground}
-                    value={email}
-                    onChangeText={setEmail}
-                    style={{
-                      marginTop: mode === "up" ? 12 : 28,
-                      backgroundColor: tokens.muted,
-                      borderRadius: 13,
-                      padding: 16,
-                      color: tokens.foreground,
-                    }}
-                  />
-                  {mode !== "forgot" ? (
-                    <TextInput
-                      autoComplete={mode === "in" ? "current-password" : "new-password"}
-                      placeholder={t("Password")}
-                      placeholderTextColor={tokens.mutedForeground}
-                      returnKeyType="go"
-                      secureTextEntry
-                      value={password}
-                      onChangeText={setPassword}
-                      onSubmitEditing={() => void submit()}
-                      style={{
-                        marginTop: 12,
-                        backgroundColor: tokens.muted,
-                        borderRadius: 13,
-                        padding: 16,
-                        color: tokens.foreground,
-                      }}
-                    />
-                  ) : null}
-                  {error ? (
-                    <Text style={{ color: tokens.destructive, marginTop: 12 }}>{error}</Text>
-                  ) : null}
-                  <NativeActionButton
-                    disabled={pending}
-                    label={
-                      pending
-                        ? t("Working…")
-                        : mode === "in"
-                          ? t("Sign in")
-                          : mode === "up"
-                            ? t("Sign up")
-                            : t("Send reset link")
-                    }
-                    onPress={() => void submit()}
-                    style={{ marginTop: 16 }}
-                  />
-                  {mode === "in" && reset?.passwordReset && reset.resetUrl ? (
-                    <Pressable
-                      accessibilityRole="button"
-                      hitSlop={8}
-                      onPress={() => {
-                        setMode("forgot");
-                        setError(null);
-                      }}
-                      style={{ alignSelf: "center", marginTop: 16 }}
-                    >
-                      <Text style={{ color: tokens.foreground, fontSize: 14, fontWeight: "600" }}>
-                        {t("Forgot password?")}
+                  {capabilityError ? (
+                    <View accessibilityRole="alert">
+                      <Text style={{ color: tokens.destructive }}>
+                        {t("Could not load sign-in options")}
                       </Text>
-                    </Pressable>
-                  ) : null}
-                  <View
-                    style={{
-                      flexDirection: "row",
-                      justifyContent: "center",
-                      alignItems: "center",
-                      marginTop: 24,
-                    }}
-                  >
-                    <Text style={{ color: tokens.mutedForeground, fontSize: 15 }}>
-                      {mode === "in"
-                        ? t("Don’t have an account?")
-                        : mode === "up"
-                          ? t("Already have an account?")
-                          : ""}
+                      <NativeActionButton
+                        label={t("Retry")}
+                        onPress={() => setCapabilityAttempt((value) => value + 1)}
+                      />
+                    </View>
+                  ) : !reset ? (
+                    <Text
+                      style={{ color: tokens.mutedForeground, textAlign: "center", marginTop: 16 }}
+                    >
+                      {t("Loading…")}
                     </Text>
-                    <Pressable
-                      accessibilityRole="button"
-                      hitSlop={8}
-                      onPress={() => {
-                        setMode((current) => (current === "in" ? "up" : "in"));
-                        setError(null);
-                      }}
-                      style={{ marginLeft: 5 }}
+                  ) : null}
+                  {reset?.sso && mode !== "forgot" ? (
+                    <NativeActionButton
+                      label={t("Continue with {name}", { name: reset.sso.name })}
+                      disabled={pending}
+                      onPress={() => void sso()}
+                      style={{ marginTop: 16 }}
+                    />
+                  ) : null}
+                  {error && !reset?.passwordAuth ? (
+                    <Text
+                      accessibilityRole="alert"
+                      style={{ color: tokens.destructive, marginTop: 12 }}
                     >
-                      <Text style={{ color: tokens.foreground, fontSize: 15, fontWeight: "600" }}>
-                        {mode === "in"
-                          ? t("Sign up")
-                          : mode === "up"
-                            ? t("Sign in")
-                            : t("Back to sign in")}
-                      </Text>
-                    </Pressable>
-                  </View>
+                      {error}
+                    </Text>
+                  ) : null}
+                  {reset?.passwordAuth ? (
+                    <>
+                      {mode === "up" ? (
+                        <TextInput
+                          autoComplete="name"
+                          placeholder={t("Name")}
+                          placeholderTextColor={tokens.mutedForeground}
+                          value={name}
+                          onChangeText={setName}
+                          style={{
+                            marginTop: 28,
+                            backgroundColor: tokens.muted,
+                            borderRadius: 13,
+                            padding: 16,
+                            color: tokens.foreground,
+                          }}
+                        />
+                      ) : null}
+                      <TextInput
+                        autoCapitalize="none"
+                        autoComplete="email"
+                        keyboardType="email-address"
+                        placeholder={t("Email")}
+                        placeholderTextColor={tokens.mutedForeground}
+                        value={email}
+                        onChangeText={setEmail}
+                        style={{
+                          marginTop: mode === "up" ? 12 : 28,
+                          backgroundColor: tokens.muted,
+                          borderRadius: 13,
+                          padding: 16,
+                          color: tokens.foreground,
+                        }}
+                      />
+                      {mode !== "forgot" ? (
+                        <TextInput
+                          autoComplete={mode === "in" ? "current-password" : "new-password"}
+                          placeholder={t("Password")}
+                          placeholderTextColor={tokens.mutedForeground}
+                          returnKeyType="go"
+                          secureTextEntry
+                          value={password}
+                          onChangeText={setPassword}
+                          onSubmitEditing={() => void submit()}
+                          style={{
+                            marginTop: 12,
+                            backgroundColor: tokens.muted,
+                            borderRadius: 13,
+                            padding: 16,
+                            color: tokens.foreground,
+                          }}
+                        />
+                      ) : null}
+                      {error ? (
+                        <Text style={{ color: tokens.destructive, marginTop: 12 }}>{error}</Text>
+                      ) : null}
+                      <NativeActionButton
+                        disabled={pending}
+                        label={
+                          pending
+                            ? t("Working…")
+                            : mode === "in"
+                              ? t("Sign in")
+                              : mode === "up"
+                                ? t("Sign up")
+                                : t("Send reset link")
+                        }
+                        onPress={() => void submit()}
+                        style={{ marginTop: 16 }}
+                      />
+                      {mode === "in" && reset?.passwordReset && reset.resetUrl ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          hitSlop={8}
+                          onPress={() => {
+                            setMode("forgot");
+                            setError(null);
+                          }}
+                          style={{ alignSelf: "center", marginTop: 16 }}
+                        >
+                          <Text
+                            style={{ color: tokens.foreground, fontSize: 14, fontWeight: "600" }}
+                          >
+                            {t("Forgot password?")}
+                          </Text>
+                        </Pressable>
+                      ) : null}
+                      <View
+                        style={{
+                          flexDirection: "row",
+                          justifyContent: "center",
+                          alignItems: "center",
+                          marginTop: 24,
+                        }}
+                      >
+                        <Text style={{ color: tokens.mutedForeground, fontSize: 15 }}>
+                          {mode === "in"
+                            ? t("Don’t have an account?")
+                            : mode === "up"
+                              ? t("Already have an account?")
+                              : ""}
+                        </Text>
+                        <Pressable
+                          accessibilityRole="button"
+                          hitSlop={8}
+                          onPress={() => {
+                            setMode((current) => (current === "in" ? "up" : "in"));
+                            setError(null);
+                          }}
+                          style={{ marginLeft: 5 }}
+                        >
+                          <Text
+                            style={{ color: tokens.foreground, fontSize: 15, fontWeight: "600" }}
+                          >
+                            {mode === "in"
+                              ? t("Sign up")
+                              : mode === "up"
+                                ? t("Sign in")
+                                : t("Back to sign in")}
+                          </Text>
+                        </Pressable>
+                      </View>
+                    </>
+                  ) : null}
                 </>
               )}
             </ScrollView>

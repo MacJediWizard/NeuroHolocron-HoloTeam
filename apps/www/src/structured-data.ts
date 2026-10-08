@@ -3,6 +3,11 @@ import { GITHUB_URL, SITE_NAME, SITE_URL } from "./site";
 const OPERATOR_NAME = "MacJediWizard";
 const SUPPORT_EMAIL = "hello@legiara.com";
 
+export type HomeFaqItem = {
+  question: string;
+  answer: string;
+};
+
 export type HomeStructuredDataInput = {
   pageUrl: string;
   title: string;
@@ -11,6 +16,7 @@ export type HomeStructuredDataInput = {
   inLanguage: string;
   defaultInLanguage: string;
   availableLanguages: string[];
+  faq?: readonly HomeFaqItem[];
 };
 
 export function homeStructuredData(input: HomeStructuredDataInput) {
@@ -73,6 +79,23 @@ export function homeStructuredData(input: HomeStructuredDataInput) {
           priceCurrency: "USD",
         },
       },
+      ...(input.faq && input.faq.length > 0
+        ? [
+            {
+              "@type": "FAQPage",
+              "@id": `${input.pageUrl}#faq`,
+              url: input.pageUrl,
+              mainEntity: input.faq.map((item) => ({
+                "@type": "Question",
+                name: item.question,
+                acceptedAnswer: {
+                  "@type": "Answer",
+                  text: item.answer,
+                },
+              })),
+            },
+          ]
+        : []),
     ],
   };
 }

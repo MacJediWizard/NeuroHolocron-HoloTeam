@@ -11,6 +11,7 @@ import {
 function makePrisma(options: {
   spaces: Array<{ id: string; organizationId: string }>;
   remaining?: number;
+  removed?: number;
   spaceRole?: string;
   orgRole?: string;
 }) {
@@ -28,7 +29,9 @@ function makePrisma(options: {
     spaceMember: {
       findUnique: vi.fn(async () => ({ role: options.spaceRole ?? "member" })),
       create: vi.fn(async (_input: { data: Record<string, unknown> }) => ({})),
-      deleteMany: vi.fn(async (_input: { where: Record<string, unknown> }) => ({ count: 1 })),
+      deleteMany: vi.fn(async (_input: { where: Record<string, unknown> }) => ({
+        count: options.removed ?? 1,
+      })),
       count: vi.fn(async () => options.remaining ?? 0),
     },
     memoryDocument: {
@@ -139,6 +142,17 @@ describe("syncGroupSpaces", () => {
     await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", [], mapping);
 
     expect(prisma.spaceMember.deleteMany).toHaveBeenCalledOnce();
+    expect(prisma.member.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("keeps an organization membership when the user was not in the Space", async () => {
+    const prisma = makePrisma({
+      spaces: [{ id: "space-1", organizationId: "org-1" }],
+      removed: 0,
+    });
+    await syncGroupSpaces(prisma as unknown as PrismaClient, "user-2", [], mapping);
+
+    expect(prisma.spaceMember.count).not.toHaveBeenCalled();
     expect(prisma.member.deleteMany).not.toHaveBeenCalled();
   });
 

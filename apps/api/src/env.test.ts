@@ -35,47 +35,6 @@ describe("loadEnv", () => {
     expect(env.wakeupDriver).toBe("memory");
   });
 
-  it("leaves OIDC off and password sign-in on by default", () => {
-    const env = loadEnv(base);
-    expect(env.oidc).toBeUndefined();
-    expect(env.passwordAuth).toBe(true);
-  });
-
-  it("loads an OIDC provider and lets it replace password sign-in", () => {
-    const oidc = {
-      OIDC_ISSUER: "https://id.example.test/application/o/app/",
-      OIDC_CLIENT_ID: "client",
-      OIDC_CLIENT_SECRET: "secret",
-    };
-    expect(loadEnv({ ...base, ...oidc }).oidc).toEqual({
-      issuer: oidc.OIDC_ISSUER,
-      clientId: "client",
-      clientSecret: "secret",
-      name: "SSO",
-      groupSpaces: [],
-      groupsClaim: "groups",
-    });
-    expect(
-      loadEnv({ ...base, ...oidc, OIDC_GROUP_SPACES: "orca:space-1", OIDC_GROUPS_CLAIM: "roles" })
-        .oidc,
-    ).toMatchObject({ groupSpaces: [{ group: "orca", spaceId: "space-1" }], groupsClaim: "roles" });
-    expect(() => loadEnv({ ...base, OIDC_GROUP_SPACES: "orca:space-1" })).toThrow(
-      "OIDC_GROUP_SPACES needs OIDC_ISSUER",
-    );
-    const env = loadEnv({ ...base, ...oidc, OIDC_NAME: "Company", AUTH_PASSWORD_ENABLED: "false" });
-    expect(env.oidc?.name).toBe("Company");
-    expect(env.passwordAuth).toBe(false);
-  });
-
-  it("refuses a partial OIDC provider and a deployment nobody can sign in to", () => {
-    expect(() => loadEnv({ ...base, OIDC_ISSUER: "https://id.example.test/" })).toThrow(
-      "must be set together",
-    );
-    expect(() => loadEnv({ ...base, AUTH_PASSWORD_ENABLED: "false" })).toThrow(
-      "nobody can sign in",
-    );
-  });
-
   it("loads an optional integrations catalog mirror", () => {
     expect(loadEnv(base).integrationsCatalogUrl).toBeUndefined();
     expect(
@@ -259,6 +218,56 @@ describe("loadEnv", () => {
     );
     expect(loadEnv({ ...base, MCP_ALLOW_PRIVATE_ENDPOINT: "1" }).mcpAllowPrivateEndpoint).toBe(
       false,
+    );
+  });
+});
+
+describe("OIDC environment", () => {
+  const oidc = {
+    OIDC_ISSUER: "https://identity.example.test",
+    OIDC_CLIENT_ID: "fake-client",
+    OIDC_CLIENT_SECRET: "fake-secret",
+  };
+  it("requires all credentials and an HTTPS issuer", () => {
+    for (const [key, value] of Object.entries(oidc))
+      expect(() => loadEnv({ ...base, [key]: value })).toThrow(/configured together/);
+    expect(() =>
+      loadEnv({ ...base, ...oidc, OIDC_ISSUER: "http://identity.example.test" }),
+    ).toThrow(/HTTPS/);
+  });
+  it.each(["identity.example.test", "/issuer", "https://"])(
+    "reports invalid issuer %s as a configuration error",
+    (issuer) => {
+      expect(() => loadEnv({ ...base, ...oidc, OIDC_ISSUER: issuer })).toThrow(
+        "OIDC_ISSUER must be an HTTPS issuer URL",
+      );
+    },
+  );
+  it("guards password-only lockout without contacting discovery", () => {
+    expect(() => loadEnv({ ...base, AUTH_PASSWORD_ENABLED: "false" })).toThrow(/requires OIDC/);
+    expect(loadEnv({ ...base, ...oidc, AUTH_PASSWORD_ENABLED: "false" }).passwordAuth).toBe(false);
+  });
+  it("defaults to SSO with the fork's policy bypass on", () => {
+    expect(loadEnv({ ...base, ...oidc }).oidc).toMatchObject({
+      name: "SSO",
+      allowSignupBypass: true,
+      scopes: ["openid", "email", "profile"],
+    });
+    expect(
+      loadEnv({ ...base, ...oidc, OIDC_ALLOW_SIGNUP_BYPASS: "false" }).oidc?.allowSignupBypass,
+    ).toBe(false);
+  });
+  it("loads group Spaces only alongside an OIDC provider", () => {
+    expect(loadEnv({ ...base, ...oidc }).oidc).toMatchObject({
+      groupSpaces: [],
+      groupsClaim: "groups",
+    });
+    expect(
+      loadEnv({ ...base, ...oidc, OIDC_GROUP_SPACES: "orca:space-1", OIDC_GROUPS_CLAIM: "roles" })
+        .oidc,
+    ).toMatchObject({ groupSpaces: [{ group: "orca", spaceId: "space-1" }], groupsClaim: "roles" });
+    expect(() => loadEnv({ ...base, OIDC_GROUP_SPACES: "orca:space-1" })).toThrow(
+      "OIDC_GROUP_SPACES needs OIDC_ISSUER",
     );
   });
 });

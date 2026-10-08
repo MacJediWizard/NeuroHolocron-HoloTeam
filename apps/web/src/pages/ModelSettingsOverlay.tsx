@@ -61,6 +61,7 @@ import type { ModelCatalogEntry, ModelCredential } from "../lib/model-auth";
 import { thinkingLevelLabel } from "../lib/model-catalog";
 import { rpc } from "../lib/rpc";
 import { useModelOAuthSignIn } from "../lib/use-model-oauth-signin";
+import { errorText } from "../lib/user-error";
 
 function connectionMaxTokensField(providerId: string, stored: number | undefined): string {
   if (providerId === OPENAI_COMPATIBLE_PROVIDER_ID) {
@@ -194,9 +195,7 @@ export function ModelSettingsOverlay({
 
   useEffect(() => {
     void refresh()
-      .catch((err: unknown) =>
-        setError(err instanceof Error ? err.message : t`Could not load model settings`),
-      )
+      .catch((err: unknown) => setError(errorText(err, t`Could not load model settings`)))
       .finally(() => setLoading(false));
     return () => {
       refreshRevisionRef.current += 1;
@@ -387,8 +386,7 @@ export function ModelSettingsOverlay({
         else setModelId(next);
         setNotice(openAiCompatibleProbeSuccessMessage(models.length));
       },
-      onError: (err) =>
-        setError(err instanceof Error ? err.message : t`Could not reach this model server`),
+      onError: (err) => setError(errorText(err, t`Could not reach this model server`)),
     });
   }
 
@@ -417,7 +415,7 @@ export function ModelSettingsOverlay({
       await refresh();
       setNotice(isOpenAiCompatible ? t`Model updated.` : t`Now using ${selected.label}.`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t`Could not change the default model`);
+      setError(errorText(err, t`Could not change the default model`));
     } finally {
       setPending(null);
     }
@@ -520,7 +518,7 @@ export function ModelSettingsOverlay({
           : t`Connected and using ${selected.label}.`,
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : t`Could not connect this provider`);
+      setError(errorText(err, t`Could not connect this provider`));
     } finally {
       setPending(null);
     }
@@ -540,7 +538,7 @@ export function ModelSettingsOverlay({
       detailScrollRef.current?.scrollTo({ top: 0 });
       setNotice(t`Disconnected ${selected.providerName ?? selected.provider}.`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : t`Could not disconnect this provider`);
+      setError(errorText(err, t`Could not disconnect this provider`));
     } finally {
       setPending(null);
     }

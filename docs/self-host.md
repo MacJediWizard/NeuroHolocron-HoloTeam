@@ -182,31 +182,79 @@ account before exposing the service. Further accounts still need SMTP.
 For a public deployment, configure SMTP and an allowlist before the API's first start.
 Keep an installation without email on a trusted local network.
 
-### Single sign-on (OIDC)
+### Optional OpenID Connect SSO
 
-Set all three to add a "Continue with" button that signs in through an OpenID Connect provider:
+SSO works with a self-hosted or hosted OpenID Connect provider. Leave its settings unset to
+keep password authentication alone. Configure all three credentials together on the API:
 
 ```env
-OIDC_ISSUER=https://id.example.com/application/o/app/
-OIDC_CLIENT_ID=...
-OIDC_CLIENT_SECRET=...
-OIDC_NAME=Company SSO   # button label, default "SSO"
-AUTH_PASSWORD_ENABLED=false   # optional: SSO only
+OIDC_ISSUER=https://identity.example.com
+OIDC_CLIENT_ID=replace-with-client-id
+OIDC_CLIENT_SECRET=replace-with-client-secret
+OIDC_NAME=SSO
+OIDC_SCOPES=openid email profile
+AUTH_PASSWORD_ENABLED=true
+OIDC_ALLOW_SIGNUP_BYPASS=true
 ```
 
-Register `${BETTER_AUTH_URL}/api/auth/callback/oidc` as the redirect URI and allow the
-`openid email profile` scopes. The provider decides who may sign in: a user it admits gets a
-space even when not on the signup allowlist, and its email is trusted as verified, so restrict
-access in the provider. `AUTH_PASSWORD_ENABLED=false` hides the email form and refuses password
-sign-in; the API will not start with it unless OIDC is configured.
+The issuer must be HTTPS and exactly match the discovery document's issuer. Legiara loads
+`<issuer>/.well-known/openid-configuration`, verifies ID tokens against discovery JWKS with
+issuer, audience and nonce checks, and uses authorization codes with PKCE. Additional scopes
+may be space- or comma-separated; `openid email profile` are always requested. `OIDC_NAME`
+is the button label, defaulting to “SSO”. Secrets remain on the API; Compose clears the worker's
+OIDC credentials. The capabilities endpoint exposes only the label, discovery availability,
+and enabled authentication methods.
 
-The API reads the provider's discovery document at startup. If that fails, the button stays
-hidden until the next restart, and with password sign-in off the API exits so the container
-restarts and tries again.
+Register this redirect URI at the provider (using your public `BETTER_AUTH_URL` origin):
 
-An existing account joins on its first SSO sign-in when the emails match. While password sign-in
-is on, that needs a verified email, so an address someone registered first cannot capture the SSO
-sign-in. With it off, unverified accounts join too, and their earlier sessions end.
+```text
+https://app.example.com/api/auth/callback/oidc
+```
+
+Web, Electron and mobile use the same provider redirect URI. Electron completes SSO in a
+sandboxed in-app popup sharing the app's session, then returns to the main window. Mobile completes the callback
+on the API, then returns to `rakazo://sign-in` (or `rakazo://account` for linking and reauthentication) through Better Auth's Expo authorization proxy
+and a native auth browser session. The `rakazo` app scheme is trusted by the auth server;
+never register a client secret in the mobile app. Mobile stores the resulting session with
+SecureStore, like password sign-in. Native builds need the Expo WebBrowser module.
+
+Provider emails are verified only when `email_verified` is the boolean `true`. False or missing
+claims stay unverified, including on subsequent sign-ins. Sign-in never links accounts by email.
+If an email belongs to another account, sign in to that existing account and choose **Link SSO**
+in account settings. Linking requires an authenticated session, a verified provider email and
+matching email addresses. The issuer and provider subject identify the linked account thereafter. Changing issuers does
+not reuse an old identity. Old-issuer links remain stored but do not count as linked to the
+current provider, so **Link SSO** becomes available again. Link the new identity from the
+existing signed-in account; authenticated-session, verified-email and matching-email checks
+still apply. Restoring the old issuer makes its existing links usable again.
+
+SSO signup follows closed registration and the deployment allowlist before creating an account.
+Allowlisted provider emails must be verified; the password signup's first-account exemption
+never upgrades an OIDC email. `OIDC_ALLOW_SIGNUP_BYPASS=true` admits IdP identities
+without applying the allowlist or its email-verification admission requirement. In this fork it
+defaults to `true` when unset, because the IdP controls who may join; set it to `false` to apply
+the allowlist to SSO signups. It does **not** reopen closed registration,
+and does not change email verification claims or linking rules. Existing admitted accounts can
+sign in while registration is closed.
+
+Set `AUTH_PASSWORD_ENABLED=false` for SSO-only operation. Password sign-in, signup, password
+reset and password mutation endpoints are disabled server-side, and sign-in forms are hidden.
+The API refuses to start in this mode unless all OIDC credentials are configured. It can still
+start while discovery is temporarily unavailable: the provider remains registered, sign-in
+returns a temporary error, and background retries recover without restarting. Discovery is lazy
+on first use, refreshed in the background, and failures back off up to one minute. Availability
+reflects discovery, not a guarantee that the provider's token endpoint is currently reachable.
+
+Account deletion keeps the existing password confirmation for password users. Users without a
+password may delete after a provider sign-in within five minutes; **Sign in again** starts a fresh
+provider round-trip bound to the signed-in account. Choosing a different identity cannot confirm
+deletion or create another account in that flow. A stale or borrowed session alone cannot authorize deletion. With transactional
+email configured, **Send deletion code** sends a single-use code to the account email, valid for ten
+minutes. Enter it in account settings to confirm deletion. Email-code requests are rate-limited;
+invalid, expired or wrong-account codes fail. No password needs to be created for deletion.
+
+Accounts that an earlier Legiara release linked by the raw provider subject are rewritten to the
+issuer-bound id when the API starts, so those users keep signing in to the same account.
 
 #### Shared Spaces from provider groups
 
@@ -220,7 +268,7 @@ OIDC_GROUPS_CLAIM=groups   # optional; the ID token claim that lists groups
 On every SSO sign-in, a user in a mapped group joins that Space as a member, and a user no longer
 in any group for it leaves (the Space owner never does). Someone who joins through a group gets no
 Space of their own. Ask the provider to put groups in the ID token (most do with the `profile`
-scope or a groups mapping).
+scope or a groups mapping). `OIDC_GROUP_SPACES` requires the OIDC settings above.
 
 Members share everything in the Space: bots, chats, groups, routines, artifacts, memory, skills,
 connections, and secrets. Each message shows who wrote it. Members run on the owner's model and
@@ -228,15 +276,12 @@ voice credentials and connected apps, and any member may change the Space's mode
 owner can delete the Space, connect or remove model and voice credentials, change the memory
 provider, or manage billing; deployment settings stay with the deployment owner.
 
-The mobile app signs in with email only. Against an SSO-only server it explains that sign-in is not
-supported yet; use the web or desktop app.
-
 ### Secret store (Infisical)
 
 Credentials that users save in the app are encrypted with `ENCRYPTION_KEY` and stored in Postgres by
-default. To keep them in an Infisical folder instead, set `SECRET_STORE=infisical` and the
-`INFISICAL_*` keys, then migrate existing rows with `pnpm --filter @rakazo/api secrets:infisical`.
-See [Keeping in-app secrets in Infisical](./self-host-secrets.md#keeping-in-app-secrets-in-infisical-optional).
+default. To keep them in Infisical instead, set `SECRET_STORE=infisical` and the `INFISICAL_*` keys
+on the API and worker, then migrate existing rows with `pnpm --filter @rakazo/api secrets:infisical`.
+See [Infisical setup, migration, and rollback](./infisical-secrets.md).
 
 ### Verification and password recovery email
 

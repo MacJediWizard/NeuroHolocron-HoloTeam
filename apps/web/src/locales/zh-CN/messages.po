@@ -1132,10 +1132,10 @@ msgstr "继续"
 msgid "Continue in Background"
 msgstr ""
 
-#. placeholder {0}: sso.name
+#. placeholder {0}: reset.sso.name
 #: src/pages/Auth.tsx
 msgid "Continue with {0}"
-msgstr "使用 {0} 继续"
+msgstr "通过 {0} 继续"
 
 #: src/pages/Auth.tsx
 msgid "Continue with email"
@@ -1223,6 +1223,10 @@ msgstr "无法连接此语音提供方"
 msgid "Could not connect to the computer screen"
 msgstr ""
 
+#: src/components/AccountAccess.tsx
+#: src/lib/account-security.ts
+#: src/lib/sso-flow.ts
+#: src/lib/user-error.ts
 #: src/pages/Auth.tsx
 #: src/pages/Shell.tsx
 msgid "Could not continue"
@@ -1366,6 +1370,7 @@ msgstr "无法加载模型设置"
 msgid "Could not load run history"
 msgstr "无法加载运行历史记录"
 
+#: src/lib/account-security.ts
 #: src/pages/Auth.tsx
 msgid "Could not load sign-in options"
 msgstr "无法加载登录选项"
@@ -1415,6 +1420,8 @@ msgstr "无法打开终端"
 msgid "Could not play a test clip"
 msgstr "无法播放测试片段"
 
+#: src/lib/computer-sandbox.ts
+#: src/lib/user-error.ts
 #: src/pages/AccountSettingsOverlay.tsx
 #: src/pages/Auth.tsx
 msgid "Could not reach the server"
@@ -1667,6 +1674,7 @@ msgstr "Cron"
 msgid "Cron expression"
 msgstr "Cron 表达式"
 
+#: src/components/AccountAccess.tsx
 #: src/pages/AccountSettingsOverlay.tsx
 msgid "Current password"
 msgstr "当前密码"
@@ -1756,6 +1764,10 @@ msgstr "删除 {0}"
 msgid "Delete {0}?"
 msgstr "删除 {0}？"
 
+#: src/components/AccountAccess.tsx
+msgid "Delete account"
+msgstr "删除账户"
+
 #: src/pages/GroupPanel.tsx
 msgid "Delete group"
 msgstr "删除群组"
@@ -1777,6 +1789,10 @@ msgstr "已删除"
 #: src/pages/shell/dialogs.tsx
 msgid "Deleting…"
 msgstr "正在删除…"
+
+#: src/components/AccountAccess.tsx
+msgid "Deletion code"
+msgstr "删除验证码"
 
 #: src/components/AskCard.tsx
 msgid "Denied"
@@ -1931,6 +1947,14 @@ msgstr "编辑资料"
 msgid "Email"
 msgstr "邮箱"
 
+#: src/lib/user-error.ts
+msgid "Email is not allowed to register"
+msgstr "该邮箱不允许注册"
+
+#: src/lib/user-error.ts
+msgid "Email verification required"
+msgstr "需要验证邮箱"
+
 #: src/pages/BillingSettingsPanel.tsx
 msgid "Ends {day}"
 msgstr ""
@@ -1939,9 +1963,17 @@ msgstr ""
 msgid "Engage when... Ignore..."
 msgstr ""
 
+#: src/lib/user-error.ts
+msgid "Enter a password"
+msgstr "请输入密码"
+
 #: src/pages/shell/bot-credentials.tsx
 msgid "Enter a username and password"
 msgstr ""
+
+#: src/lib/user-error.ts
+msgid "Enter a valid email"
+msgstr "请输入有效的电子邮件地址"
 
 #: src/pages/ModelSettingsOverlay.tsx
 #: src/pages/Onboarding.tsx
@@ -2382,6 +2414,10 @@ msgstr "Linear 工单"
 #: src/pages/MessagingSettingsOverlay.tsx
 msgid "Link a chat app"
 msgstr "关联聊天应用"
+
+#: src/components/AccountAccess.tsx
+msgid "Link SSO"
+msgstr "关联 SSO"
 
 #: src/pages/Artifacts.tsx
 msgid "List view"
@@ -3230,6 +3266,10 @@ msgstr "录制中：{0}"
 msgid "Recover computer"
 msgstr "恢复电脑"
 
+#: src/components/ComputerMaintenanceActions.tsx
+msgid "Recover computer?"
+msgstr "恢复电脑？"
+
 #. placeholder {0}: update.name
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Recovering {0}’s Computer"
@@ -3251,9 +3291,14 @@ msgstr ""
 msgid "Recovery is unavailable until the previous operation has stopped."
 msgstr ""
 
+#: src/components/ComputerMaintenanceActions.tsx
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Recovery restores the last saved workspace. Unsaved work may be lost."
-msgstr ""
+msgstr "恢复操作会还原上次保存的工作区。未保存的工作可能会丢失。"
+
+#: src/components/ComputerMaintenanceActions.tsx
+msgid "Recreate a computer that is not working."
+msgstr "重建无法正常工作的电脑。"
 
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Recreating the computer"
@@ -3270,6 +3315,10 @@ msgstr ""
 #: src/components/teach/TeachComputerOverlay.tsx
 msgid "Refreshing…"
 msgstr ""
+
+#: src/lib/user-error.ts
+msgid "Registration is closed"
+msgstr "注册已关闭"
 
 #: src/pages/Shell.tsx
 msgid "Release"
@@ -3426,12 +3475,21 @@ msgid "Restore"
 msgstr "恢复"
 
 #: src/components/ComputerMaintenanceActions.tsx
+msgid "Restore the last saved workspace."
+msgstr "恢复上次保存的工作区。"
+
+#: src/components/ComputerMaintenanceActions.tsx
 msgid "Restore the last saved workspace. Unsaved work on the computer is lost."
 msgstr "还原上次保存的工作区。电脑上未保存的工作会丢失。"
 
 #: src/components/ComputerUpdateProgress.tsx
 msgid "Restoring your workspace"
 msgstr ""
+
+#: src/components/AccountAccess.tsx
+#: src/pages/Auth.tsx
+msgid "Retry"
+msgstr "重试"
 
 #: src/App.tsx
 #: src/pages/PeerMessagesOverlay.tsx
@@ -3536,6 +3594,10 @@ msgstr ""
 msgid "Save new value"
 msgstr ""
 
+#: src/components/ComputerMaintenanceActions.tsx
+msgid "Save the workspace and install current software."
+msgstr "保存工作区并安装最新软件。"
+
 #: src/components/AskCard.tsx
 #: src/components/teach/SkillDraftCard.tsx
 #: src/pages/ExternalConversationSettings.tsx
@@ -3633,6 +3695,10 @@ msgstr "请在 10 分钟内从聊天应用向该线路发送 <0>{linkCode}</0>�
 #: src/components/AskCard.tsx
 msgid "Send answer"
 msgstr "发送回答"
+
+#: src/components/AccountAccess.tsx
+msgid "Send deletion code"
+msgstr "发送删除验证码"
 
 #: src/components/AskCard.tsx
 msgid "Send it"
@@ -3756,6 +3822,8 @@ msgstr "显示文字记录"
 msgid "Sign in"
 msgstr "登录"
 
+#: src/components/AccountAccess.tsx
+#: src/lib/user-error.ts
 #: src/pages/ModelSettingsOverlay.tsx
 msgid "Sign in again"
 msgstr ""
@@ -3763,6 +3831,10 @@ msgstr ""
 #: src/pages/Auth.tsx
 msgid "Sign in to {PRODUCT_NAME}"
 msgstr "登录 {PRODUCT_NAME}"
+
+#: src/lib/user-error.ts
+msgid "Sign in to your existing account to link SSO"
+msgstr "请登录现有账户以关联 SSO"
 
 #: src/pages/Auth.tsx
 #: src/pages/Welcome.tsx
@@ -3804,6 +3876,10 @@ msgstr ""
 msgid "Software update"
 msgstr "软件更新"
 
+#: src/lib/user-error.ts
+msgid "Something went wrong. Try again."
+msgstr "出了点问题。请重试。"
+
 #: src/pages/shell/bot-panel.tsx
 msgid "Space default"
 msgstr "工作区默认"
@@ -3831,6 +3907,10 @@ msgstr "朗读这条回复"
 #: src/pages/VoiceSettingsOverlay.tsx
 msgid "Speech model"
 msgstr "语音模型"
+
+#: src/lib/user-error.ts
+msgid "SSO is temporarily unavailable. Try again."
+msgstr "SSO 暂时不可用，请重试。"
 
 #: src/pages/Paywall.tsx
 msgid "Start {trialDays}-day free trial"
@@ -4022,6 +4102,10 @@ msgstr "这台 Mac"
 msgid "This month"
 msgstr ""
 
+#: src/components/AccountAccess.tsx
+msgid "This permanently deletes your account and data."
+msgstr "此操作将永久删除您的账户和数据。"
+
 #: src/pages/shell/dialogs.tsx
 msgid "This permanently removes every message and stops current work. The chat remains available."
 msgstr "将永久删除全部消息并停止当前工作。聊天仍可使用。"
@@ -4098,7 +4182,6 @@ msgstr ""
 msgid "Trial ends {day}"
 msgstr ""
 
-#: src/pages/Auth.tsx
 #: src/pages/Onboarding.tsx
 msgid "Try again"
 msgstr "重试"

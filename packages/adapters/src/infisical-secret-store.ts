@@ -1,428 +1,422 @@
-import { randomBytes } from "node:crypto";
-import type { AdapterContext, RealtimeFanout, SecretRecord } from "@rakazo/adapter-kit";
+import { randomBytes, randomUUID } from "node:crypto";
+import type {
+  AdapterContext,
+  SecretContext,
+  SecretPutOptions,
+  SecretRecord,
+  SecretStore,
+} from "@rakazo/adapter-kit";
+import { SecretNotFoundError, SecretStoreUnavailableError } from "@rakazo/adapter-kit";
 import { getLogger } from "@rakazo/logging";
-import type { SecretPutOptions } from "./secrets.js";
-import { EncryptedSecretStore } from "./secrets.js";
+import { credentialDigest } from "./credential-digest.js";
+import { SecretChanges } from "./secret-changes.js";
 
-/** Rows written by this store hold `infisical:<key>` instead of ciphertext. */
-export const INFISICAL_REFERENCE_PREFIX = "infisical:";
-const CHANGED_TOPIC = "secret-store:changed";
-const REQUEST_TIMEOUT_MS = 15_000;
-/** Unreferenced keys younger than this may belong to a save that has not committed yet. */
-export const UNREFERENCED_KEY_GRACE_MS = 60 * 60 * 1000;
-const VERSION_SUFFIX = /^__v([0-9a-z]+)_[0-9a-f]+$/;
+export { SecretNotFoundError, SecretStoreUnavailableError } from "@rakazo/adapter-kit";
+
+export const INFISICAL_REF_PREFIX = "infisical:v1:";
+
+// Fork shim: Legiara (and spartacus-services, which shares the /app folder) store refs as
+// `infisical:SECRET_<recordId with non-alphanumerics as _>[__v<base36>_<hex>]`. Any
+// `infisical:` ref belongs to this store; `key()` decides which format it is.
+const FORK_REF_PREFIX = "infisical:";
+const FORK_VERSION_SUFFIX = /^__v[0-9a-z]+_[0-9a-f]+$/;
+
+/** True for every Infisical ref: upstream `infisical:v1:` and the fork's `infisical:SECRET_…`. */
+export function isInfisicalRef(ref: string): boolean {
+  return ref.startsWith(FORK_REF_PREFIX);
+}
+
+function forkKeyBase(recordId: string): string {
+  return `SECRET_${recordId.replace(/[^A-Za-z0-9]/g, "_")}`;
+}
+
+/** Fork key format, read and written by spartacus-services too. */
+function forkKeyBelongsTo(key: string, recordId: string): boolean {
+  const base = forkKeyBase(recordId);
+  return key === base || (key.startsWith(base) && FORK_VERSION_SUFFIX.test(key.slice(base.length)));
+}
 
 export interface InfisicalSecretStoreOptions {
-  siteUrl: string;
+  baseUrl: string;
   clientId: string;
   clientSecret: string;
   projectId: string;
   environment: string;
-  /** Folder that holds only app-managed secrets, e.g. `/app`. */
-  secretPath: string;
-  refreshMs?: number;
+  folder: string;
   fetch?: typeof fetch;
+  cacheMaxEntries?: number;
+  cacheTtlMs?: number;
+  timeoutMs?: number;
+  now?: () => number;
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
+type RestResult = { accessToken?: string; expiresIn?: number; secret?: { secretValue?: string } };
+type CacheEntry = { value: string; expires: number; timer: ReturnType<typeof setTimeout> };
 
-export interface InfisicalStartOptions {
-  /** Keys rows currently reference; enables the periodic removal of unreferenced keys. */
-  referencedKeys?: () => Promise<Iterable<string>>;
-  sweepMs?: number;
-}
-
-export function isSecretReference(ciphertext: string): boolean {
-  return ciphertext.startsWith(INFISICAL_REFERENCE_PREFIX);
-}
-
-/** Infisical key prefix for a database record id; letters, digits and underscores only. */
-export function infisicalSecretKey(recordId: string): string {
-  return `SECRET_${recordId.replace(/[^A-Za-z0-9]/g, "_")}`;
-}
-
-/** When a versioned key was written; keys from before versioning have no time. */
-export function infisicalKeyWrittenAt(key: string): number | undefined {
-  const match = /__v([0-9a-z]+)_[0-9a-f]+$/.exec(key);
-  return match?.[1] ? Number.parseInt(match[1], 36) : undefined;
-}
-
-function keyBelongsTo(key: string, recordId: string): boolean {
-  const base = infisicalSecretKey(recordId);
-  return key === base || (key.startsWith(base) && VERSION_SUFFIX.test(key.slice(base.length)));
-}
-
-/**
- * Keeps secret values in an Infisical folder so operators manage them there.
- * Reads stay synchronous: the folder is mirrored in memory and refreshed on an
- * interval and whenever any process writes. Rows that still hold ciphertext
- * (written before the switch) keep decrypting with the deployment key.
- *
- * Every save writes a new key, so a save that fails or loses a race never
- * changes the value a committed row references. Keys no row references are
- * removed once they are older than UNREFERENCED_KEY_GRACE_MS.
- */
-export class InfisicalSecretStore extends EncryptedSecretStore {
-  private values = new Map<string, string>();
-  /** Bumped per key whenever its value changes, so callers can tell a rotation. */
-  private revisions = new Map<string, number>();
-  private lastRevision = 0;
-  /** Local writes and removals, kept until a refresh that started after them lands. */
-  private localChanges = new Map<string, { value: string | undefined; sequence: number }>();
-  private sequence = 0;
-  private token: { value: string; expiresAt: number } | undefined;
-  private refreshing: Promise<void> | undefined;
-  private queuedRefresh: Promise<void> | undefined;
-  private timers: ReturnType<typeof setInterval>[] = [];
-  private unsubscribe: (() => Promise<void>) | undefined;
-  private realtime: RealtimeFanout | undefined;
-  private refreshFailing = false;
+/** Targeted REST reads only: no plaintext folder snapshot. */
+export class InfisicalSecretStore extends SecretChanges implements SecretStore {
+  private token?: { value: string; expires: number };
+  private login?: Promise<string>;
+  private readonly cache = new Map<string, CacheEntry>();
+  private readonly lastSeen = new Map<string, string>();
+  private readonly pendingReads = new Map<string, Promise<string>>();
+  private readonly reads = new Map<string, Set<{ invalidated: boolean }>>();
+  private readonly lifetime = new AbortController();
+  private degraded = false;
   private closed = false;
-  private readonly fetchImpl: typeof fetch;
-  /** Time of the last successful folder read, or undefined before the first. */
-  lastRefreshedAt: Date | undefined;
-
-  constructor(
-    encryptionKey: string,
-    private readonly options: InfisicalSecretStoreOptions,
-  ) {
-    super(encryptionKey);
-    this.fetchImpl = options.fetch ?? fetch;
+  private readonly now: () => number;
+  private readonly fetcher: typeof fetch;
+  constructor(private readonly options: InfisicalSecretStoreOptions) {
+    super();
+    this.now = options.now ?? Date.now;
+    this.fetcher = options.fetch ?? fetch;
+    if (
+      !Number.isSafeInteger(options.cacheMaxEntries ?? 256) ||
+      (options.cacheMaxEntries ?? 256) < 1 ||
+      !Number.isFinite(options.cacheTtlMs ?? 30_000) ||
+      (options.cacheTtlMs ?? 30_000) < 1 ||
+      !Number.isSafeInteger(options.timeoutMs ?? 15_000) ||
+      (options.timeoutMs ?? 15_000) < 1
+    )
+      throw new Error("Invalid secret cache or timeout limits");
   }
-
-  override describe() {
+  describe() {
     return {
       id: "infisical",
       contractVersion: "1",
-      adapterVersion: "0.1.0",
-      capabilities: { rotate: true },
+      adapterVersion: "1",
+      capabilities: { rotate: true, degraded: this.degraded },
     };
   }
-
-  /** Loads the folder (fails loudly when Infisical is unreachable) and starts syncing. */
-  async start(realtime?: RealtimeFanout, options: InfisicalStartOptions = {}): Promise<void> {
-    await this.refresh();
-    this.realtime = realtime;
-    this.unsubscribe = await realtime?.subscribe(CHANGED_TOPIC, () => this.refreshQuietly());
-    this.every(this.options.refreshMs ?? 30_000, () => this.refreshQuietly());
-    const { referencedKeys } = options;
-    if (referencedKeys) {
-      this.every(options.sweepMs ?? UNREFERENCED_KEY_GRACE_MS, () => {
-        void referencedKeys()
-          .then((keys) => this.sweep(keys))
-          .catch((error: unknown) => {
-            getLogger().warn(
-              `Infisical cleanup of unreferenced keys failed: ${errorSummary(error)}`,
-            );
-          });
-      });
-    }
-  }
-
-  override async close(): Promise<void> {
-    this.closed = true;
-    for (const timer of this.timers.splice(0)) clearInterval(timer);
-    await this.unsubscribe?.();
-    this.unsubscribe = undefined;
-  }
-
-  override async put(
-    plaintext: string,
-    context: AdapterContext,
-    recordId = randomBytes(12).toString("hex"),
-    options: SecretPutOptions = {},
-  ): Promise<SecretRecord> {
-    if (options.ephemeral) return super.put(plaintext, context, recordId);
-    const key = `${infisicalSecretKey(recordId)}__v${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
-    await this.request("POST", this.secretPath(key), {
-      ...this.scope(),
-      secretValue: plaintext,
-      secretComment: options.label ?? context.operationId,
-    });
-    this.changeLocally(key, plaintext);
-    await this.realtime?.publish(CHANGED_TOPIC, key).catch(() => undefined);
-    return { id: recordId, ciphertext: `${INFISICAL_REFERENCE_PREFIX}${key}` };
-  }
-
-  override load(ciphertext: string, recordId: string): string {
-    if (!isSecretReference(ciphertext)) return super.load(ciphertext, recordId);
-    const value = this.values.get(this.keyFor(ciphertext, recordId));
-    if (value === undefined) {
-      // Another process may have just written it; the next read can succeed.
-      this.refreshQuietly();
-      throw new Error("Secret is not available from Infisical yet");
-    }
-    return value;
-  }
-
-  /** Like load, but waits for a refresh when the value is not mirrored yet. */
-  override async loadAsync(ciphertext: string, recordId: string): Promise<string> {
-    if (!isSecretReference(ciphertext)) return super.loadAsync(ciphertext, recordId);
-    if (!this.values.has(this.keyFor(ciphertext, recordId))) await this.refresh();
-    return this.load(ciphertext, recordId);
-  }
-
-  /** Changes when the referenced value changes, including edits made in Infisical. */
-  override revision(ciphertext: string, recordId: string): string {
-    if (!isSecretReference(ciphertext)) return super.revision(ciphertext, recordId);
-    const key = this.keyFor(ciphertext, recordId);
-    return `${ciphertext}#${this.values.has(key) ? (this.revisions.get(key) ?? 0) : "missing"}`;
-  }
-
-  /** Keys currently held in the folder, as of the last refresh. */
-  keys(): string[] {
-    return [...this.values.keys()];
-  }
-
-  async remove(key: string): Promise<void> {
+  async start(): Promise<void> {
     try {
-      await this.request("DELETE", this.secretPath(key), { ...this.scope(), type: "shared" });
-    } catch (error) {
-      if (!(error instanceof InfisicalRequestError && error.status === 404)) throw error;
+      await this.authenticate();
+    } catch {
+      this.degraded = true;
     }
-    this.changeLocally(key, undefined);
   }
-
+  async close(): Promise<void> {
+    this.closed = true;
+    this.lifetime.abort();
+    this.token = undefined;
+    for (const ref of this.cache.keys()) this.dropCached(ref);
+    this.lastSeen.clear();
+    this.reads.clear();
+    this.clearListeners();
+  }
+  /** Used by the composing store for cross-process invalidation. */
+  invalidate(ref: string): void {
+    for (const read of this.reads.get(ref) ?? []) read.invalidated = true;
+    this.dropCached(ref);
+    // The notification already reports this change; the next read establishes a new baseline.
+    this.lastSeen.delete(ref);
+    this.changed(ref);
+  }
   /**
-   * Removes app keys that no row references and that are past the grace period,
-   * so values from replaced, failed or deleted saves do not accumulate.
+   * Fork shim: an external writer (spartacus-services) changed some key. Drop cached values so
+   * the next read refetches; `observe` still reports a real rotation through `changed`.
    */
-  async sweep(referencedKeys: Iterable<string>, now = Date.now()): Promise<string[]> {
-    const referenced = new Set(referencedKeys);
-    const removed: string[] = [];
-    for (const key of this.keys()) {
-      if (!key.startsWith("SECRET_") || referenced.has(key)) continue;
-      const writtenAt = infisicalKeyWrittenAt(key);
-      if (writtenAt !== undefined && now - writtenAt < UNREFERENCED_KEY_GRACE_MS) continue;
-      await this.remove(key);
-      removed.push(key);
-    }
-    return removed;
+  dropCache(): void {
+    for (const reads of this.reads.values()) for (const read of reads) read.invalidated = true;
+    for (const ref of [...this.cache.keys()]) this.dropCached(ref);
   }
-
-  /** Creates the app folder when it is missing (used by setup and migration). */
-  async ensureFolder(): Promise<void> {
-    const segments = this.options.secretPath.split("/").filter(Boolean);
-    let parent = "/";
-    for (const name of segments) {
-      const query = new URLSearchParams({
-        workspaceId: this.options.projectId,
-        environment: this.options.environment,
-        path: parent,
-      });
-      const listed = (await this.request("GET", `/api/v1/folders?${query}`)) as {
-        folders?: { name: string }[];
-      };
-      if (!listed.folders?.some((folder) => folder.name === name)) {
-        await this.request("POST", "/api/v1/folders", {
-          workspaceId: this.options.projectId,
-          environment: this.options.environment,
-          name,
-          path: parent,
-        });
-      }
-      parent = parent === "/" ? `/${name}` : `${parent}/${name}`;
-    }
+  private dropCached(ref: string): void {
+    const entry = this.cache.get(ref);
+    if (entry) clearTimeout(entry.timer);
+    this.cache.delete(ref);
   }
-
-  /**
-   * Reloads the folder. A call made while a read is in flight waits for one more
-   * read, since the one in flight may predate the change it was called for.
-   */
-  refresh(): Promise<void> {
-    if (this.refreshing) {
-      this.queuedRefresh ??= this.refreshing
-        .catch(() => undefined)
-        .then(() => {
-          this.queuedRefresh = undefined;
-          return this.refresh();
-        });
-      return this.queuedRefresh;
+  private observe(ref: string, value: string): boolean {
+    const digest = credentialDigest(value);
+    const previous = this.lastSeen.get(ref);
+    this.lastSeen.delete(ref);
+    while (this.lastSeen.size >= (this.options.cacheMaxEntries ?? 256)) {
+      const oldest = this.lastSeen.keys().next().value;
+      if (oldest !== undefined) this.lastSeen.delete(oldest);
     }
-    this.refreshing = this.fetchAll().finally(() => {
-      this.refreshing = undefined;
-    });
-    return this.refreshing;
+    this.lastSeen.set(ref, digest);
+    return previous !== undefined && previous !== digest;
   }
-
-  private refreshQuietly() {
+  private remember(ref: string, value: string): void {
     if (this.closed) return;
-    // A failed refresh keeps the last good values; the next interval retries.
-    this.refresh().then(
-      () => {
-        if (!this.refreshFailing) return;
-        this.refreshFailing = false;
-        getLogger().info("Infisical secret refresh recovered");
-      },
-      (error: unknown) => {
-        if (this.refreshFailing) return;
-        this.refreshFailing = true;
-        getLogger().warn(
-          `Infisical secret refresh failed; serving values from ${this.lastRefreshedAt?.toISOString() ?? "startup"}: ${errorSummary(error)}`,
-        );
-      },
-    );
-  }
-
-  private async fetchAll() {
-    const startedAt = this.sequence;
-    const query = new URLSearchParams({
-      ...this.scope(),
-      // Imported secrets belong to other folders; the app owns only its own.
-      include_imports: "false",
-    });
-    const body = (await this.request("GET", `/api/v3/secrets/raw?${query}`)) as {
-      secrets?: { secretKey: string; secretValue: string }[];
+    this.dropCached(ref);
+    while (this.cache.size >= (this.options.cacheMaxEntries ?? 256)) {
+      const oldest = this.cache.keys().next().value;
+      if (oldest !== undefined) this.dropCached(oldest);
+    }
+    const ttl = this.options.cacheTtlMs ?? 30_000;
+    const entry: CacheEntry = {
+      value,
+      expires: this.now() + ttl,
+      timer: setTimeout(() => {
+        if (this.cache.get(ref) === entry) this.dropCached(ref);
+      }, ttl),
     };
-    const next = new Map(
-      (body.secrets ?? []).map((secret) => [secret.secretKey, secret.secretValue]),
-    );
-    // Changes made here after the read began may be missing from it.
-    for (const [key, change] of this.localChanges) {
-      if (change.sequence <= startedAt) this.localChanges.delete(key);
-      else if (change.value === undefined) next.delete(key);
-      else next.set(key, change.value);
-    }
-    for (const [key, value] of next) {
-      if (this.values.get(key) !== value) this.revisions.set(key, ++this.lastRevision);
-    }
-    for (const key of this.revisions.keys()) if (!next.has(key)) this.revisions.delete(key);
-    this.values = next;
-    this.lastRefreshedAt = new Date();
+    entry.timer.unref?.();
+    this.cache.set(ref, entry);
   }
-
-  private changeLocally(key: string, value: string | undefined) {
-    this.localChanges.set(key, { value, sequence: ++this.sequence });
-    if (value === undefined) {
-      this.values.delete(key);
-      this.revisions.delete(key);
-    } else {
-      this.values.set(key, value);
-      this.revisions.set(key, ++this.lastRevision);
+  private key(ref: string, context: SecretContext): string {
+    const recordId = typeof context === "string" ? context : context.recordId;
+    if (!ref.startsWith(INFISICAL_REF_PREFIX) && isInfisicalRef(ref)) {
+      const forkKey = ref.slice(FORK_REF_PREFIX.length);
+      if (!forkKeyBelongsTo(forkKey, recordId)) throw new SecretNotFoundError();
+      return forkKey;
     }
-  }
-
-  private keyFor(ciphertext: string, recordId: string): string {
-    const key = ciphertext.slice(INFISICAL_REFERENCE_PREFIX.length);
-    // The reference is bound to its row, like the AAD on encrypted values.
-    if (!keyBelongsTo(key, recordId)) throw new Error("Secret reference does not match its record");
+    const prefix = `rakazo_${credentialDigest(recordId).slice(0, 24)}_`;
+    const key = ref.slice(INFISICAL_REF_PREFIX.length);
+    if (
+      !ref.startsWith(INFISICAL_REF_PREFIX) ||
+      !key.startsWith(prefix) ||
+      !/^rakazo_[a-f0-9]{24}_[a-f0-9-]{36}$/.test(key)
+    )
+      throw new SecretNotFoundError();
     return key;
   }
-
   private scope() {
     return {
       workspaceId: this.options.projectId,
       environment: this.options.environment,
-      secretPath: this.options.secretPath,
+      secretPath: this.options.folder,
+      type: "shared",
     };
   }
-
-  private secretPath(key: string) {
-    return `/api/v3/secrets/raw/${encodeURIComponent(key)}`;
-  }
-
-  private every(ms: number, task: () => void) {
-    const timer = setInterval(task, ms);
-    timer.unref?.();
-    this.timers.push(timer);
-  }
-
-  private async accessToken(): Promise<string> {
-    if (this.token && this.token.expiresAt > Date.now() + 60_000) return this.token.value;
-    const response = await this.fetchImpl(
-      new URL("/api/v1/auth/universal-auth/login", this.options.siteUrl),
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          clientId: this.options.clientId,
-          clientSecret: this.options.clientSecret,
-        }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      },
-    );
-    if (!response.ok) throw new InfisicalRequestError("login", response.status);
-    const body = (await response.json()) as { accessToken: string; expiresIn: number };
-    this.token = { value: body.accessToken, expiresAt: Date.now() + body.expiresIn * 1000 };
-    return body.accessToken;
-  }
-
-  private async request(
-    method: string,
-    path: string,
-    body?: unknown,
-    retried = false,
-  ): Promise<unknown> {
-    const response = await this.fetchImpl(new URL(path, this.options.siteUrl), {
-      method,
-      headers: {
-        authorization: `Bearer ${await this.accessToken()}`,
-        "content-type": "application/json",
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (response.status === 401 && !retried) {
-      this.token = undefined;
-      return this.request(method, path, body, true);
+  async put(
+    plaintext: string,
+    context: AdapterContext,
+    options: SecretPutOptions = {},
+  ): Promise<SecretRecord> {
+    context.signal.throwIfAborted();
+    if (options.ephemeral) throw new Error("Ephemeral secrets require local encrypted storage");
+    const recordId = options.recordId ?? randomUUID();
+    // Fork shim: write the fork key format so spartacus-services can read what Legiara writes.
+    const key = `${forkKeyBase(recordId)}__v${Date.now().toString(36)}_${randomBytes(4).toString("hex")}`;
+    const ref = FORK_REF_PREFIX + key;
+    try {
+      await this.request(
+        `/api/v3/secrets/raw/${key}`,
+        "POST",
+        { ...this.scope(), secretValue: plaintext, secretComment: context.operationId },
+        context.signal,
+      );
+    } catch (error) {
+      // The unique key may have been created before the response was lost.
+      const cleanupSignal = AbortSignal.timeout(2_000);
+      await this.withCancellation(
+        this.delete(ref, { recordId, signal: cleanupSignal }),
+        cleanupSignal,
+      ).catch(() => {
+        getLogger().warn("Secret cleanup after a failed write did not complete; a key may remain");
+      });
+      throw error;
     }
-    // Response bodies can echo request values, so errors carry only the status.
-    if (!response.ok)
-      throw new InfisicalRequestError(`${method} ${path.split("?")[0]}`, response.status);
-    return response.json();
+    this.observe(ref, plaintext);
+    this.remember(ref, plaintext);
+    this.changed(ref);
+    return { id: recordId, ref, ciphertext: ref };
   }
-}
-
-/** Errors from this store carry no values; anything else is reduced to its type. */
-function errorSummary(error: unknown): string {
-  return error instanceof InfisicalRequestError
-    ? error.message
-    : error instanceof Error
-      ? error.name
-      : "unknown error";
-}
-
-export class InfisicalRequestError extends Error {
-  constructor(
-    operation: string,
-    readonly status: number,
-  ) {
-    super(`Infisical ${operation} failed with HTTP ${status}`);
+  async load(ref: string, context: SecretContext): Promise<string> {
+    this.key(ref, context);
+    const signal = typeof context === "string" ? undefined : context.signal;
+    signal?.throwIfAborted();
+    if (this.closed) throw new SecretStoreUnavailableError();
+    const cached = this.cache.get(ref);
+    if (cached && cached.expires > this.now()) {
+      this.cache.delete(ref);
+      this.cache.set(ref, cached);
+      const digest = this.lastSeen.get(ref);
+      if (digest !== undefined) {
+        this.lastSeen.delete(ref);
+        this.lastSeen.set(ref, digest);
+      }
+      return cached.value;
+    }
+    if (cached) this.dropCached(ref);
+    let pending = this.pendingReads.get(ref);
+    if (!pending) {
+      pending = this.loadFresh(ref, context);
+      this.pendingReads.set(ref, pending);
+      const release = () => {
+        if (this.pendingReads.get(ref) === pending) this.pendingReads.delete(ref);
+      };
+      void pending.then(release, release);
+    }
+    return this.withCancellation(pending, signal);
   }
-}
-
-/**
- * Builds the deployment's secret store. `SECRET_STORE=infisical` keeps values in
- * Infisical; anything else keeps the encrypted database store.
- */
-export async function createSecretStore(
-  source: Record<string, string | undefined>,
-  encryptionKey: string,
-  realtime?: RealtimeFanout,
-  options?: InfisicalStartOptions,
-): Promise<EncryptedSecretStore> {
-  if ((source.SECRET_STORE ?? "database") !== "infisical")
-    return new EncryptedSecretStore(encryptionKey);
-  const store = new InfisicalSecretStore(encryptionKey, infisicalOptionsFromEnv(source));
-  await store.start(realtime, options);
-  return store;
-}
-
-export function infisicalOptionsFromEnv(
-  source: Record<string, string | undefined>,
-): InfisicalSecretStoreOptions {
-  const required = (name: string) => {
-    const value = source[name]?.trim();
-    if (!value) throw new Error(`${name} is required when SECRET_STORE=infisical`);
+  private async loadFresh(ref: string, context: SecretContext): Promise<string> {
+    const key = this.key(ref, context);
+    const query = new URLSearchParams({
+      ...this.scope(),
+      expandSecretReferences: "false",
+      includeImports: "false",
+    });
+    const read = { invalidated: false };
+    const reads = this.reads.get(ref) ?? new Set<{ invalidated: boolean }>();
+    reads.add(read);
+    this.reads.set(ref, reads);
+    let value: string;
+    try {
+      const result = await this.request(`/api/v3/secrets/raw/${key}?${query}`, "GET");
+      if (typeof result?.secret?.secretValue !== "string") {
+        this.degraded = true;
+        throw new SecretStoreUnavailableError();
+      }
+      value = result.secret.secretValue;
+    } finally {
+      reads.delete(read);
+      if (!reads.size) this.reads.delete(ref);
+    }
+    if (this.closed) throw new SecretStoreUnavailableError();
+    if (read.invalidated) return this.loadFresh(ref, context);
+    const rotated = this.observe(ref, value);
+    this.remember(ref, value);
+    if (rotated) this.changed(ref);
     return value;
-  };
-  const refreshSeconds = Number(source.INFISICAL_REFRESH_SECONDS ?? 30);
-  return {
-    siteUrl: required("INFISICAL_SITE_URL"),
-    clientId: required("INFISICAL_CLIENT_ID"),
-    clientSecret: required("INFISICAL_CLIENT_SECRET"),
-    projectId: required("INFISICAL_PROJECT_ID"),
-    environment: required("INFISICAL_ENVIRONMENT"),
-    secretPath: required("INFISICAL_SECRET_PATH"),
-    refreshMs:
-      Number.isFinite(refreshSeconds) && refreshSeconds >= 5 ? refreshSeconds * 1000 : 30_000,
-  };
+  }
+
+  async delete(ref: string, context: SecretContext): Promise<void> {
+    const key = this.key(ref, context);
+    try {
+      await this.request(
+        `/api/v3/secrets/raw/${key}`,
+        "DELETE",
+        this.scope(),
+        typeof context === "string" ? undefined : context.signal,
+      );
+    } catch (error) {
+      if (!(error instanceof SecretNotFoundError)) throw error;
+    } finally {
+      this.invalidate(ref);
+    }
+  }
+  redact(_value: string): string {
+    return "[redacted]";
+  }
+  private async pause(ms: number, signal: AbortSignal): Promise<void> {
+    if (this.options.sleep) return this.options.sleep(ms, signal);
+    await new Promise<void>((resolve, reject) => {
+      signal.throwIfAborted();
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", abort);
+        resolve();
+      }, ms);
+      const abort = () => {
+        clearTimeout(timer);
+        reject(signal.reason);
+      };
+      signal.addEventListener("abort", abort, { once: true });
+    });
+  }
+  private async authenticate(): Promise<string> {
+    if (this.token && this.token.expires > this.now() + 30_000) return this.token.value;
+    if (this.login) return this.login;
+    const pending = (async () => {
+      const result = await this.http("/api/v1/auth/universal-auth/login", "POST", {
+        clientId: this.options.clientId,
+        clientSecret: this.options.clientSecret,
+      });
+      if (typeof result?.accessToken !== "string" || typeof result?.expiresIn !== "number")
+        throw new SecretStoreUnavailableError();
+      if (this.closed) throw new SecretStoreUnavailableError();
+      this.token = { value: result.accessToken, expires: this.now() + result.expiresIn * 1000 };
+      this.degraded = false;
+      return result.accessToken;
+    })();
+    this.login = pending;
+    try {
+      return await pending;
+    } finally {
+      if (this.login === pending) this.login = undefined;
+    }
+  }
+  private async request(
+    path: string,
+    method: string,
+    body?: unknown,
+    signal?: AbortSignal,
+  ): Promise<RestResult> {
+    try {
+      // Caller cancellation doesn't cancel a shared login used by other requests.
+      const token = await this.withCancellation(this.authenticate(), signal);
+      try {
+        return await this.http(path, method, body, token, signal);
+      } catch (error) {
+        if (!(error instanceof SecretStoreUnavailableError) || error.status !== 401) throw error;
+        if (this.token?.value === token) this.token = undefined;
+        return await this.http(
+          path,
+          method,
+          body,
+          await this.withCancellation(this.authenticate(), signal),
+          signal,
+        );
+      }
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason;
+      if (error instanceof SecretStoreUnavailableError) this.degraded = true;
+      throw error;
+    }
+  }
+  private async withCancellation<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+    if (!signal) return promise;
+    signal.throwIfAborted();
+    return new Promise<T>((resolve, reject) => {
+      const abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+      promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
+    });
+  }
+  private async http(
+    path: string,
+    method: string,
+    body?: unknown,
+    token?: string,
+    callerSignal?: AbortSignal,
+  ): Promise<RestResult> {
+    if (this.closed) throw new SecretStoreUnavailableError();
+    const signal = AbortSignal.any([
+      this.lifetime.signal,
+      ...(callerSignal ? [callerSignal] : []),
+      AbortSignal.timeout(this.options.timeoutMs ?? 15_000),
+    ]);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const response = await this.fetcher(`${this.options.baseUrl.replace(/\/$/, "")}${path}`, {
+          method,
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+          signal,
+        });
+        if (response.status === 404 && token !== undefined) {
+          await response.body?.cancel();
+          this.degraded = false;
+          throw new SecretNotFoundError();
+        }
+        if ((response.status === 429 || response.status >= 500) && attempt < 2) {
+          await response.body?.cancel();
+          await this.pause(100 * 2 ** attempt, signal);
+          continue;
+        }
+        if (!response.ok) {
+          await response.body?.cancel();
+          throw new SecretStoreUnavailableError(response.status);
+        }
+        if (method === "DELETE") {
+          await response.body?.cancel();
+          this.degraded = false;
+          return {};
+        }
+        const result = (await response.json()) as RestResult;
+        this.degraded = false;
+        return result;
+      } catch (error) {
+        if (callerSignal?.aborted) throw callerSignal.reason;
+        if (error instanceof SecretNotFoundError || error instanceof SecretStoreUnavailableError)
+          throw error;
+        throw new SecretStoreUnavailableError();
+      }
+    }
+    throw new SecretStoreUnavailableError();
+  }
 }

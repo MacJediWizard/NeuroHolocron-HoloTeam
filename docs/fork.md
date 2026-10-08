@@ -7,9 +7,9 @@ and how it stays mergeable with upstream. Upstream changes are in [CHANGELOG.md]
 
 | Feature | Configure with | Docs |
 | --- | --- | --- |
-| Single sign-on through any OpenID Connect provider, optionally SSO-only | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_NAME`, `AUTH_PASSWORD_ENABLED` | [Self-hosting: Single sign-on](./self-host.md#single-sign-on-oidc) |
+| SSO admits users without the signup allowlist by default (upstream SSO otherwise) | `OIDC_ALLOW_SIGNUP_BYPASS` (defaults to `true`) | [Self-hosting: SSO](./self-host.md#optional-openid-connect-sso) |
 | Shared Spaces: provider groups add members to a Space that they share with its owner | `OIDC_GROUP_SPACES`, `OIDC_GROUPS_CLAIM` | [Self-hosting: Shared Spaces](./self-host.md#shared-spaces-from-provider-groups) |
-| In-app secrets (model keys, integration credentials, bot secrets) kept in Infisical instead of Postgres | `SECRET_STORE=infisical` and `INFISICAL_*` | [Self-host secrets: Infisical](./self-host-secrets.md#keeping-in-app-secrets-in-infisical-optional) |
+| In-app secrets (model keys, integration credentials, bot secrets) kept in Infisical instead of Postgres | `SECRET_STORE=infisical` and `INFISICAL_*` | [Infisical: Legiara compatibility](./infisical-secrets.md#legiara-compatibility) |
 | Images, installer, and desktop updates published from this repository | `SOURCE_REPO` in `packages/contracts/src/brand.js` | [Published images and tags](./self-host.md#published-images-and-tags) |
 | CI that runs without upstream's paid services | Repository variables | [Fork CI](./fork-ci.md) |
 
@@ -18,37 +18,12 @@ upstream.
 
 ## Infisical secret store
 
-The API reads and writes in-app secrets through one secret-store interface. The default store
-encrypts each value with `ENCRYPTION_KEY` and keeps it in Postgres. With `SECRET_STORE=infisical`,
-values live in an Infisical folder used only by the app, and the API keeps an in-memory mirror that
-refreshes every `INFISICAL_REFRESH_SECONDS` and after every write. Each save writes a new key, so a
-failed save never changes the value in use, and the API deletes keys no row references once they
-are an hour old. A value edited in Infisical is picked up on the next refresh, and MCP sessions
-reconnect with it.
-
-```env
-SECRET_STORE=infisical
-INFISICAL_SITE_URL=https://infisical.example.com
-INFISICAL_CLIENT_ID=...
-INFISICAL_CLIENT_SECRET=...
-INFISICAL_PROJECT_ID=...
-INFISICAL_ENVIRONMENT=prod
-INFISICAL_SECRET_PATH=/app
-# INFISICAL_REFRESH_SECONDS=30
-```
-
-Give the machine identity access to that folder only; the app owns every key in it. Deploy with the
-setting on, then move rows written before the switch (keep a database backup from before the
-first run):
-
-```sh
-pnpm --filter @rakazo/api secrets:infisical --dry-run   # lists row ids, no values
-pnpm --filter @rakazo/api secrets:infisical             # copies, then swaps each row to a reference
-pnpm --filter @rakazo/api secrets:infisical --prune     # also deletes unreferenced keys over an hour old
-```
-
-`ENCRYPTION_KEY` stays required. The full reference is in
-[Self-host secrets](./self-host-secrets.md#keeping-in-app-secrets-in-infisical-optional).
+The Infisical store is upstream's. The fork keeps it compatible with stores set up by earlier
+Legiara releases and with other services that share the folder: it accepts `INFISICAL_SITE_URL`,
+`INFISICAL_SECRET_PATH` and `INFISICAL_REFRESH_SECONDS` as older names, writes keys as
+`SECRET_<record id>__v<time>_<random>`, and reads those keys, unversioned `SECRET_<record id>`
+keys and upstream `infisical:v1:` refs. Setup, migration and rollback are in
+[Infisical setup, migration, and rollback](./infisical-secrets.md).
 
 ## Staying mergeable with upstream
 

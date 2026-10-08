@@ -60,8 +60,24 @@ services:
     env_file:
       - ../../.env
     environment:
+      SECRET_STORE: ${SECRET_STORE:-encrypted}
+      INFISICAL_URL: ${INFISICAL_URL:-}
+      INFISICAL_ALLOW_INSECURE_HTTP: ${INFISICAL_ALLOW_INSECURE_HTTP:-false}
+      INFISICAL_CLIENT_ID: ${INFISICAL_CLIENT_ID:-}
+      INFISICAL_CLIENT_SECRET: ${INFISICAL_CLIENT_SECRET:-}
+      INFISICAL_PROJECT_ID: ${INFISICAL_PROJECT_ID:-}
+      INFISICAL_ENVIRONMENT: ${INFISICAL_ENVIRONMENT:-}
+      INFISICAL_FOLDER: ${INFISICAL_FOLDER:-}
       NODE_ENV: production
       API_HOST: "0.0.0.0"
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_NAME: ${OIDC_NAME:-SSO}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid email profile}
+      # Fork default: the operator\'s IdP admits users, so SSO bypasses the allowlist unless set to false.
+      OIDC_ALLOW_SIGNUP_BYPASS: ${OIDC_ALLOW_SIGNUP_BYPASS:-true}
+      AUTH_PASSWORD_ENABLED: ${AUTH_PASSWORD_ENABLED:-true}
       DATABASE_URL: postgres://${POSTGRES_USER:-rakazo}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-rakazo}
       DATA_DIR: /data
       SANDBOX_PROVIDER: ${SANDBOX_PROVIDER:-e2b}
@@ -119,8 +135,21 @@ services:
     env_file:
       - ../../.env
     environment:
+      SECRET_STORE: ${SECRET_STORE:-encrypted}
+      INFISICAL_URL: ${INFISICAL_URL:-}
+      INFISICAL_ALLOW_INSECURE_HTTP: ${INFISICAL_ALLOW_INSECURE_HTTP:-false}
+      INFISICAL_CLIENT_ID: ${INFISICAL_CLIENT_ID:-}
+      INFISICAL_CLIENT_SECRET: ${INFISICAL_CLIENT_SECRET:-}
+      INFISICAL_PROJECT_ID: ${INFISICAL_PROJECT_ID:-}
+      INFISICAL_ENVIRONMENT: ${INFISICAL_ENVIRONMENT:-}
+      INFISICAL_FOLDER: ${INFISICAL_FOLDER:-}
       BETTER_AUTH_SECRET: ""
+      OIDC_ISSUER: ""
+      OIDC_CLIENT_ID: ""
       OIDC_CLIENT_SECRET: ""
+      AUTH_PASSWORD_ENABLED: "true"
+      # Fork: the worker never parses OIDC; blank group mapping so env_file cannot leak it in.
+      OIDC_GROUP_SPACES: ""
       NODE_ENV: production
       DATABASE_URL: postgres://${POSTGRES_USER:-rakazo}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/${POSTGRES_DB:-rakazo}
       DATA_DIR: /data

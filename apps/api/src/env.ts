@@ -2,8 +2,9 @@ import {
   resolveCloudAgentProvider,
   resolveDeploymentModel,
   resolveSandboxProvider,
+  secretStoreOptionsFromEnv,
 } from "@rakazo/adapters";
-import type { OidcProvider } from "@rakazo/auth";
+import type { OidcConfig } from "@rakazo/auth";
 import {
   resolveAuthSecret,
   resolveEncryptionKey,
@@ -15,6 +16,8 @@ import { parseGroupSpaces } from "@rakazo/db";
 export { resolveCloudAgentProvider, resolveSandboxProvider } from "@rakazo/adapters";
 
 export interface AppEnv {
+  passwordAuth?: boolean;
+  oidc?: OidcConfig;
   nodeEnv: string;
   desktopStackToken?: string;
   databaseUrl: string;
@@ -27,8 +30,6 @@ export interface AppEnv {
   apiHost: string;
   signupsEnabled: string | undefined;
   signupAllowlist: string | undefined;
-  oidc: OidcProvider | undefined;
-  passwordAuth: boolean;
   encryptionKey: string;
   dataDir: string;
   /** Opt-in Pi JSONL session recording under DATA_DIR/pi-sessions. Default off. */
@@ -104,18 +105,63 @@ export interface AppEnv {
 }
 
 export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
+  secretStoreOptionsFromEnv(source);
+  const issuer = optional(source.OIDC_ISSUER);
+  const clientId = optional(source.OIDC_CLIENT_ID);
+  const clientSecret = optional(source.OIDC_CLIENT_SECRET);
+  const credentials = [issuer, clientId, clientSecret];
+  if (credentials.some(Boolean) && !credentials.every(Boolean)) {
+    throw new Error(
+      "OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be configured together",
+    );
+  }
+  if (issuer) {
+    try {
+      const url = new URL(issuer);
+      if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash)
+        throw new Error();
+    } catch {
+      throw new Error("OIDC_ISSUER must be an HTTPS issuer URL");
+    }
+  }
+  for (const key of ["AUTH_PASSWORD_ENABLED", "OIDC_ALLOW_SIGNUP_BYPASS"]) {
+    const value = source[key];
+    if (value && !["true", "false"].includes(value))
+      throw new Error(`${key} must be true or false`);
+  }
+  const passwordAuth = source.AUTH_PASSWORD_ENABLED !== "false";
+  if (!passwordAuth && !issuer)
+    throw new Error("AUTH_PASSWORD_ENABLED=false requires OIDC configuration");
+  // Fork: Shared Spaces from provider groups need the provider configured.
+  if (optional(source.OIDC_GROUP_SPACES) && !issuer)
+    throw new Error("OIDC_GROUP_SPACES needs OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET");
+  const oidc =
+    issuer && clientId && clientSecret
+      ? {
+          issuer,
+          clientId,
+          clientSecret,
+          name: optional(source.OIDC_NAME) ?? "SSO",
+          scopes: (optional(source.OIDC_SCOPES) ?? "openid email profile")
+            .split(/[\s,]+/)
+            .filter(Boolean),
+          // Fork default: the operator's identity provider decides who gets in,
+          // so the bypass is on unless OIDC_ALLOW_SIGNUP_BYPASS=false.
+          allowSignupBypass: source.OIDC_ALLOW_SIGNUP_BYPASS !== "false",
+          // Fork: Shared Spaces from provider groups.
+          groupSpaces: parseGroupSpaces(source.OIDC_GROUP_SPACES),
+          groupsClaim: optional(source.OIDC_GROUPS_CLAIM) ?? "groups",
+        }
+      : undefined;
   const authSecret = resolveAuthSecret(source);
   const sandboxProvider = resolveSandboxProvider(source);
   const cloudAgentProvider = resolveCloudAgentProvider(source);
   const deploymentModel = resolveDeploymentModel(source);
   const updaterUrl = optional(source.RAKAZO_UPDATER_URL);
   const updaterToken = optional(source.RAKAZO_UPDATER_TOKEN);
-  const oidc = resolveOidc(source);
-  const passwordAuth = source.AUTH_PASSWORD_ENABLED?.trim() !== "false";
-  if (!passwordAuth && !oidc) {
-    throw new Error("AUTH_PASSWORD_ENABLED=false needs OIDC_ISSUER, or nobody can sign in");
-  }
   return {
+    passwordAuth,
+    oidc,
     nodeEnv: source.NODE_ENV ?? "",
     databaseUrl: required(source, "DATABASE_URL"),
     realtimeDatabaseUrl: source.REALTIME_DATABASE_URL ?? required(source, "DATABASE_URL"),
@@ -128,8 +174,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     apiHost: source.API_HOST ?? "127.0.0.1",
     signupsEnabled: source.SIGNUPS_ENABLED,
     signupAllowlist: source.SIGNUP_ALLOWLIST,
-    oidc,
-    passwordAuth,
     encryptionKey: resolveEncryptionKey(source),
     dataDir: source.DATA_DIR ?? "./data",
     piSessionRecording: source.PI_SESSION_RECORDING === "true",
@@ -198,29 +242,6 @@ export function loadEnv(source: NodeJS.ProcessEnv = process.env): AppEnv {
     updaterUrl,
     updaterToken,
     imageTag: optional(source.RAKAZO_IMAGE_TAG),
-  };
-}
-
-function resolveOidc(source: NodeJS.ProcessEnv): OidcProvider | undefined {
-  const issuer = optional(source.OIDC_ISSUER);
-  const clientId = optional(source.OIDC_CLIENT_ID);
-  const clientSecret = optional(source.OIDC_CLIENT_SECRET);
-  if (!issuer && !clientId && !clientSecret) {
-    if (optional(source.OIDC_GROUP_SPACES)) {
-      throw new Error("OIDC_GROUP_SPACES needs OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET");
-    }
-    return undefined;
-  }
-  if (!issuer || !clientId || !clientSecret) {
-    throw new Error("OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_CLIENT_SECRET must be set together");
-  }
-  return {
-    issuer,
-    clientId,
-    clientSecret,
-    name: optional(source.OIDC_NAME) ?? "SSO",
-    groupSpaces: parseGroupSpaces(source.OIDC_GROUP_SPACES),
-    groupsClaim: optional(source.OIDC_GROUPS_CLAIM) ?? "groups",
   };
 }
 
