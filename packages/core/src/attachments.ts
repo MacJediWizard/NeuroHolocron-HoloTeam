@@ -191,7 +191,9 @@ export function attachmentsForBot<T extends { botId: string }>(
 export function userTurnMessageForRun<
   T extends { id?: string; role: string; runId?: string | null; blocks: MessageBlock[] },
 >(trigger: string, runId: string, messages: T[], sourceMessageId?: string | null): T | undefined {
-  if (trigger !== "user") return undefined;
+  // A message from another bot is this run's turn just like a person's: files sent with
+  // message_bot must reach the recipient's computer, or it is told a file it cannot open.
+  if (trigger !== "user" && trigger !== "bot_message") return undefined;
   return messages.find(
     (message) =>
       message.role === "user" &&

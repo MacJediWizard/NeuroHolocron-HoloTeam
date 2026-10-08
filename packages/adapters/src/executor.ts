@@ -3440,10 +3440,25 @@ export function createRunExecutor(deps: ExecutorDeps) {
           runId: message.runId,
           blocks: message.blocks as MessageBlock[],
         }));
+        // The source message can fall outside the bounded history when a queued run
+        // starts after many newer messages; load it directly so its files still arrive.
+        const sourceOutsideHistory =
+          run.sourceMessageId &&
+          !historyMessages.some((message) => message.id === run.sourceMessageId)
+            ? await deps.prisma.message.findFirst({
+                where: { id: run.sourceMessageId, threadId: run.threadId },
+                select: { id: true, role: true, runId: true, blocks: true },
+              })
+            : null;
         const currentTurnMessage = userTurnMessageForRun(
           run.trigger,
           runId,
-          historyMessages,
+          sourceOutsideHistory
+            ? [
+                ...historyMessages,
+                { ...sourceOutsideHistory, blocks: sourceOutsideHistory.blocks as MessageBlock[] },
+              ]
+            : historyMessages,
           run.sourceMessageId,
         );
         const turnBlocks = currentTurnMessage?.blocks;
