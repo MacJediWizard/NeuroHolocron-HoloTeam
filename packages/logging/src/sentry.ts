@@ -54,6 +54,9 @@ export function createSentrySink(
     environment: config.environment,
     release: config.release,
     transport,
+    // A message-only error log would otherwise carry a stack captured inside this sink, and the
+    // collector would group every such log as one issue titled after that frame.
+    attachStacktrace: false,
     dataCollection: {
       userInfo: false,
       cookies: false,

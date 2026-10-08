@@ -77,13 +77,17 @@ describe("sentry sink", () => {
     logger.info("started");
     logger.warn("slow");
     logger.error("queue unavailable", { "request.id": "req-1" });
+    logger.error("mail sync failed");
     await logger.flush();
 
-    expect(events).toHaveLength(1);
+    expect(events).toHaveLength(2);
     expect(events[0]).toMatchObject({
       level: "error",
       message: "queue unavailable",
       tags: { service: "rakazo-api", "request.id": "req-1" },
     });
+    // No synthetic stack: the collector titles and groups these by their message.
+    expect(events.map((event) => event.exception)).toEqual([undefined, undefined]);
+    expect(events[1]!.message).toBe("mail sync failed");
   });
 });
