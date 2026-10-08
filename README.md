@@ -1,6 +1,7 @@
 # Legiara
 
 [![GitHub stars](https://img.shields.io/github/stars/MacJediWizard/NeuroHolocron-Legiara?labelColor=black&style=for-the-badge&color=2563EB)](https://github.com/MacJediWizard/NeuroHolocron-Legiara/stargazers)
+![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/MacJediWizard/NeuroHolocron-Legiara?utm_source=oss&utm_medium=github&utm_campaign=MacJediWizard%2FNeuroHolocron-Legiara&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
 ![Legiara — AI teammates you actually own](./docs/readme-hero.png)
 
