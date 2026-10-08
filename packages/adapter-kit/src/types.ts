@@ -223,6 +223,11 @@ export interface ConnectorTool {
   inputSchema: Record<string, unknown>;
   /** Declared effect. `false` forces approval; `true` never relaxes the name-based gate. */
   readOnly?: boolean;
+  /**
+   * Arguments that identify what an approval-gated call changes. A new card is not filed while an
+   * earlier change to the same target is still waiting, and a recent finished one is flagged first.
+   */
+  approvalTarget?: string[];
   /** In-process routing metadata. It is never exposed to the model. */
   route?: ConnectorRoute;
 }

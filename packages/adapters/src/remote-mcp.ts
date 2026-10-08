@@ -6,6 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { ConnectorTool } from "@rakazo/adapter-kit";
 import { isCloudMetadataHost, isLocalMcpHost, isPrivateNetworkHost } from "@rakazo/contracts";
 import { Agent } from "undici";
+import { approvalTargetKeysFromMeta } from "./approval-target.js";
 import { combineSignals } from "./connector-safety.js";
 import {
   createAddressCheckedLookup,
@@ -62,11 +63,13 @@ export async function listRemoteMcpTools(options: RemoteMcpOptions): Promise<Con
       });
       for (const tool of result.tools) {
         if (tools.length >= MAX_MCP_TOOLS) break;
+        const approvalTarget = approvalTargetKeysFromMeta(tool._meta);
         tools.push({
           name: tool.name,
           description: tool.description ?? tool.title ?? tool.name,
           inputSchema: tool.inputSchema,
           readOnly: tool.annotations?.readOnlyHint,
+          ...(approvalTarget ? { approvalTarget } : {}),
         });
       }
       cursor = result.nextCursor;
