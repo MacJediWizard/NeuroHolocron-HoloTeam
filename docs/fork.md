@@ -10,6 +10,7 @@ and how it stays mergeable with upstream. Upstream changes are in [CHANGELOG.md]
 | SSO admits users without the signup allowlist by default (upstream SSO otherwise) | `OIDC_ALLOW_SIGNUP_BYPASS` (defaults to `true`) | [Self-hosting: SSO](./self-host.md#optional-openid-connect-sso) |
 | Shared Spaces: provider groups add members to a Space that they share with its owner | `OIDC_GROUP_SPACES`, `OIDC_GROUPS_CLAIM` | [Self-hosting: Shared Spaces](./self-host.md#shared-spaces-from-provider-groups) |
 | In-app secrets (model keys, integration credentials, bot secrets) kept in Infisical instead of Postgres | `SECRET_STORE=infisical` and `INFISICAL_*` | [Infisical: Legiara compatibility](./infisical-secrets.md#legiara-compatibility) |
+| Error reporting to Sentry or a Sentry-compatible collector such as GlitchTip, from the server and the web app | `SENTRY_DSN`, `SENTRY_BROWSER_DSN`, `SENTRY_ENVIRONMENT`, `SENTRY_RELEASE` | [Self-hosting: Logging](./self-host.md#logging) |
 | Images, installer, and desktop updates published from this repository | `SOURCE_REPO` in `packages/contracts/src/brand.js` | [Published images and tags](./self-host.md#published-images-and-tags) |
 | CI that runs without upstream's paid services | Repository variables | [Fork CI](./fork-ci.md) |
 
