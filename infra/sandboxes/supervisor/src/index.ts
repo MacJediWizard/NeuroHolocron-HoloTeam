@@ -12,10 +12,11 @@ import {
   resolveSupervisorToken,
 } from "@rakazo/core";
 import { loadRootEnv } from "@rakazo/core/node/load-root-env";
-import { SERVICE_NAMES } from "@rakazo/logging";
+import { getLogger, SERVICE_NAMES } from "@rakazo/logging";
 import { createRootLogger } from "@rakazo/logging/axiom";
 import { requestLogging } from "@rakazo/logging/hono";
 import Docker from "dockerode";
+import type { Context } from "hono";
 import { Hono, type MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
@@ -130,6 +131,12 @@ const app = new Hono();
 export { app as supervisorApp };
 
 app.use("*", requestLogging());
+
+/** Answer 500 for a caught failure, logging it so its cause chain reaches the error collector. */
+function failedRequest(c: Context, error: unknown, body: Record<string, unknown>) {
+  getLogger().error("supervisor.request.failed", error);
+  return c.json(body, 500);
+}
 
 export function resolveDockerSocketPath(
   env: NodeJS.ProcessEnv = process.env,
@@ -318,7 +325,7 @@ app.post("/computers", async (c) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return c.json({ error: message }, 500);
+    return failedRequest(c, error, { error: message });
   }
 });
 
@@ -556,7 +563,7 @@ app.post("/computers/:id/observe", async (c) => {
     return c.json(observation);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return c.json({ error: message }, 500);
+    return failedRequest(c, error, { error: message });
   }
 });
 
@@ -607,7 +614,7 @@ app.post("/computers/:id/actions", async (c) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return c.json({ error: message }, 500);
+    return failedRequest(c, error, { error: message });
   }
 });
 
@@ -849,7 +856,7 @@ app.post("/computers/:id/input", async (c) => {
     return c.json({ ok: true, leaseId: body.leaseId ?? null });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return c.json({ ok: false, error: message }, 500);
+    return failedRequest(c, error, { ok: false, error: message });
   }
 });
 
@@ -901,7 +908,7 @@ app.delete("/computers/:id/screen", async (c) => {
     )
       return c.json({ error: "computer not found" }, 404);
     const message = error instanceof Error ? error.message : String(error);
-    return c.json({ error: message || "computer screen failed to stop" }, 500);
+    return failedRequest(c, error, { error: message || "computer screen failed to stop" });
   }
 });
 
@@ -939,7 +946,7 @@ app.post("/computers/:id/stop", async (c) => {
       return c.json({ error: "invalid computer identity" }, 403);
     if (error && typeof error === "object" && "statusCode" in error && error.statusCode === 404)
       return c.json({ error: "computer not found" }, 404);
-    return c.json({ error: "computer failed to stop" }, 500);
+    return failedRequest(c, error, { error: "computer failed to stop" });
   }
 });
 

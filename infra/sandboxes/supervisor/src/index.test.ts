@@ -5,6 +5,7 @@ import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { resolveSupervisorToken } from "@rakazo/core";
+import { createLogger, createTestSink, installLogger } from "@rakazo/logging";
 import { describe, expect, it } from "vitest";
 import {
   MAX_SUPERVISOR_FILE_REQUEST_BYTES,
@@ -253,6 +254,8 @@ describe("sandbox supervisor HTTP boundary", () => {
   });
 
   it("rejects a provision request whose identity headers do not match its body", async () => {
+    const sink = createTestSink();
+    installLogger(createLogger({ service: "rakazo-sandbox-supervisor", sinks: [sink] }));
     const response = await supervisorApp.request("/computers", {
       method: "POST",
       headers: {
@@ -270,6 +273,15 @@ describe("sandbox supervisor HTTP boundary", () => {
 
     expect(response.status).toBe(500);
     await expect(response.json()).resolves.toEqual({ error: "computer identity mismatch" });
+    // The reply carries only the message; the log keeps the error for the collector.
+    expect(sink.events).toContainEqual(
+      expect.objectContaining({
+        level: "error",
+        message: "supervisor.request.failed",
+        error: expect.objectContaining({ message: "computer identity mismatch" }),
+      }),
+    );
+    installLogger(createLogger({ service: "rakazo-sandbox-supervisor", level: "off", sinks: [] }));
   });
 });
 
