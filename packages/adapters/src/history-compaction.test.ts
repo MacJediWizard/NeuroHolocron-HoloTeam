@@ -480,6 +480,7 @@ describe("compactHistory", () => {
     expect(harness.runtime.run).toHaveBeenCalledOnce();
     const [request] = harness.runtime.run.mock.calls[0]!;
     expect(request.instructions).toContain("Current date and time");
+    expect(request.instructions).toContain("Keep the summary under 12,000 characters.");
     expect(request.tools).toEqual([]);
     expect(request.model).toEqual({
       provider: "openrouter",
